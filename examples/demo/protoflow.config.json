@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "prototypeDir": "prototype",
+  "verification": {
+    "build": { "argv": ["node", "build.js"] },
+    "functional": { "argv": ["node", "../../node_modules/@playwright/test/cli.js", "test", "-c", "playwright.config.js"] }
+  },
+  "mappings": [
+    { "id": "card", "prototypeFiles": ["prototype/index.html"], "prototype": "#card", "application": "[data-ui=card]", "component": "app/index.html", "priority": "critical" },
+    { "id": "heading", "prototypeFiles": ["prototype/index.html"], "prototype": "#heading", "application": "[data-ui=heading]", "component": "app/index.html", "priority": "critical" }
+  ],
+  "visual": {
+    "maxDiffRatio": 0.01,
+    "pixelThreshold": 0.1,
+    "geometryTolerance": 1,
+    "styleProperties": ["font-family", "font-size", "font-weight", "color", "background-color", "border-radius"],
+    "scenes": [
+      { "id": "create-session", "prototypeUrl": "http://127.0.0.1:4318/prototype/", "applicationUrl": "http://127.0.0.1:4318/app/", "viewport": { "width": 1000, "height": 720 }, "deviceScaleFactor": 1, "locale": "en-US", "colorScheme": "light", "mappings": ["card", "heading"] },
+      { "id": "session-created", "prototypeUrl": "http://127.0.0.1:4318/prototype/", "applicationUrl": "http://127.0.0.1:4318/app/", "viewport": { "width": 1000, "height": 720 }, "steps": [ { "action": "fill", "prototype": "#name", "application": "#session-name", "value": "Settings screen" }, { "action": "click", "prototype": "#create", "application": "[data-ui=create]" } ], "mappings": ["card", "heading"] }
+    ]
+  }
+}

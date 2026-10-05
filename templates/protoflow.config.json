@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "prototypeDir": "prototype",
+  "mappings": [{
+    "id": "home",
+    "prototypeFiles": ["prototype/index.html"],
+    "prototype": "main",
+    "application": "main",
+    "component": "src/Home.tsx",
+    "priority": "normal"
+  }],
+  "classification": { "rules": [] },
+  "policy": { "maxRepairAttempts": 3, "requireHumanReview": true },
+  "watch": { "pollMs": 200, "idleMs": 1000 },
+  "verification": { "build": null, "functional": null },
+  "visual": { "scenes": [], "maxDiffRatio": 0.01, "geometryTolerance": 1, "pixelThreshold": 0.1 },
+  "adapters": { "codex": { "command": null }, "specKit": { "command": null }, "bmad": { "command": null } }
+}

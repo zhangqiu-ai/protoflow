@@ -1,0 +1,5 @@
+node_modules/
+.protoflow/
+test-results/
+playwright-report/
+*.tgz

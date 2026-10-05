@@ -1,0 +1,40 @@
+import Ajv from 'ajv';
+import { readJson, projectPath } from './util.js';
+
+const command = { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['argv'], properties: { argv: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }, timeoutMs: { type: 'integer', minimum: 1, maximum: 3600000 } } }] };
+const selectorPair = { type: 'object', required: ['prototype', 'application'], properties: { prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 } }, additionalProperties: false };
+export const configSchema = {
+  type: 'object', required: ['schemaVersion', 'prototypeDir', 'mappings'], additionalProperties: false,
+  properties: {
+    schemaVersion: { const: 1 }, prototypeDir: { type: 'string', minLength: 1 },
+    mappings: { type: 'array', items: { type: 'object', required: ['id', 'prototypeFiles', 'prototype', 'application', 'component'], additionalProperties: false, properties: {
+      id: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$' }, prototypeFiles: { type: 'array', minItems: 1, items: { type: 'string' } }, prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 }, component: { type: 'string', minLength: 1 }, priority: { enum: ['critical', 'high', 'normal', 'low'] }, geometryTolerance: { type: 'number', minimum: 0 }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }
+    } } },
+    classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
+    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, requireHumanReview: { type: 'boolean' } } },
+    watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
+    verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: command } },
+    adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: { command } }])) },
+    visual: { type: 'object', additionalProperties: false, properties: {
+      mode: { enum: ['browser', 'native'] },
+      maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, pixelThreshold: { type: 'number', minimum: 0, maximum: 1 }, geometryTolerance: { type: 'number', minimum: 0 }, styleProperties: { type: 'array', items: { type: 'string' } },
+      scenes: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'prototypeUrl', 'applicationUrl', 'viewport'], properties: {
+        id: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$' }, prototypeUrl: { type: 'string' }, applicationUrl: { type: 'string' }, viewport: { type: 'object', required: ['width', 'height'], additionalProperties: false, properties: { width: { type: 'integer', minimum: 1, maximum: 8192 }, height: { type: 'integer', minimum: 1, maximum: 8192 } } }, deviceScaleFactor: { type: 'number', minimum: 0.5, maximum: 4 }, locale: { type: 'string' }, timezoneId: { type: 'string' }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, colorScheme: { enum: ['light', 'dark', 'no-preference'] }, fixture: { type: 'object' }, mappings: { type: 'array', minItems: 1, items: { type: 'string' } }, masks: { type: 'array', items: selectorPair }, steps: { type: 'array', items: { type: 'object', required: ['action', 'prototype', 'application'], additionalProperties: false, properties: { action: { enum: ['click', 'fill'] }, prototype: { type: 'string' }, application: { type: 'string' }, value: { type: 'string' } } } }
+      } } }
+    } }
+  }
+};
+const validate = new Ajv({ allErrors: true, strict: false }).compile(configSchema);
+export async function loadConfig(root) {
+  const config = await readJson(await projectPath(root, 'protoflow.config.json'));
+  if (!validate(config)) throw new Error(`Invalid ProtoFlow config: ${JSON.stringify(validate.errors)}`);
+  await projectPath(root, config.prototypeDir);
+  for (const mapping of config.mappings) {
+    await projectPath(root, mapping.component);
+    for (const file of mapping.prototypeFiles) await projectPath(root, file);
+  }
+  for (const [key, entries] of [['mapping', config.mappings], ['scene', config.visual?.scenes ?? []]]) {
+    if (new Set(entries.map(item => item.id)).size !== entries.length) throw new Error(`Duplicate ${key} id`);
+  }
+  return config;
+}
