@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readJson, writeJson, projectPath, hash, id, gitInfo } from './util.js';
+import { freezeVersion } from './versions.js';
 
 const LEVELS = ['L0', 'L1', 'L2', 'L3'];
 const EXCLUDED = new Set(['node_modules', '.git', '.protoflow']);
@@ -17,8 +18,8 @@ function inside(root, target) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-/** Capture immutable prototype text; no writes, staging, or Git operations. */
-export async function snapshot(root, config) {
+/** Capture immutable prototype text; no writes, staging, or Git operations. `keepBytes` exposes raw bytes for the version store. */
+export async function snapshot(root, config, { keepBytes = false } = {}) {
   const realRoot = await fs.realpath(root);
   root = realRoot;
   const directory = await projectPath(root, config.prototypeDir);
@@ -27,6 +28,7 @@ export async function snapshot(root, config) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid snapshot limit: ${name}`);
   }
   const files = {};
+  const raw = new Map();
   let totalBytes = 0;
   const visiting = new Set();
 
@@ -64,16 +66,22 @@ export async function snapshot(root, config) {
     let content;
     try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { /* Binary asset: hashed, not interpreted as code. */ }
     files[relative] = { hash: hash(bytes), size: bytes.length, ...(content === undefined ? { binary: true } : { content }) };
+    if (keepBytes) raw.set(relative, bytes);
   }
 
   try { await visit(directory); } catch (error) {
     // Missing prototype directories are legitimate before the first design edit.
     if (error.code !== 'ENOENT' || await fs.lstat(directory).then(() => true, () => false)) throw error;
   }
-  return { files, hash: hash(JSON.stringify(Object.entries(files).map(([name, file]) => [name, file.hash]))) };
+  const result = { files, hash: snapshotHash(files) };
+  // Not enumerable: session JSON keeps text snapshots only.
+  if (keepBytes) Object.defineProperty(result, 'bytes', { value: raw });
+  return result;
 }
 
-function patternMatches(pattern, file) {
+export const snapshotHash = files => hash(JSON.stringify(Object.entries(files).map(([name, file]) => [name, file.hash])));
+
+export function patternMatches(pattern, file) {
   if (typeof pattern !== 'string') return false;
   // Portable glob subset: * does not cross '/', ** does; no arbitrary regex evaluation.
   let expression = '';
@@ -198,11 +206,14 @@ export async function checkpoint(root, config, { sessionId, level, summary } = {
     session = await startSession(root, config, { label: summary ?? 'Prototype checkpoint', before: previous?.after ?? { files: {}, hash: hash(JSON.stringify([])) } });
   }
   if (session.status !== 'active') throw new Error(`Session is already ${session.status}: ${session.id}`);
-  const after = await snapshot(root, config);
+  const after = await snapshot(root, config, { keepBytes: true });
   const classification = classifyChanges(session.before, after, config, { level });
   const requireHumanReview = config.policy?.requireHumanReview ?? true;
   const required = requireHumanReview === true || (Array.isArray(requireHumanReview) && requireHumanReview.includes(classification.level));
-  const manifest = { schemaVersion: 1, version: 1, id: id('manifest'), sessionId: session.id, createdAt: new Date().toISOString(),
+  const manifestId = id('manifest');
+  // Freeze before publishing the manifest: the application side may pick it up immediately.
+  await freezeVersion(root, manifestId, after);
+  const manifest = { schemaVersion: 1, version: 1, id: manifestId, sessionId: session.id, createdAt: new Date().toISOString(),
     summary: summary ?? session.label, beforeHash: session.before.hash, afterHash: after.hash, ...classification,
     requires: { spec: ['L2', 'L3'].includes(classification.level), architecture: classification.level === 'L3', humanReview: required },
     git: await gitInfo(root, config.prototypeDir), review: { required, status: required ? 'pending' : 'not_required' } };

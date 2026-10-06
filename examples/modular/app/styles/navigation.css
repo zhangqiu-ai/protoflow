@@ -1,0 +1,5 @@
+#navigation { display: flex; align-items: center; justify-content: space-between; width: min(720px, calc(100% - 48px)); height: 72px; margin: 0 auto; border-bottom: 1px solid var(--line); }
+#navigation .brand { font-weight: 700; letter-spacing: -0.3px; }
+#navigation .links { display: flex; gap: 8px; }
+#navigation a { display: block; padding: 10px 16px; border-radius: 8px; text-decoration: none; color: var(--muted); }
+#navigation a[aria-current="page"] { background: #e7edff; color: #2148cc; font-weight: 600; }

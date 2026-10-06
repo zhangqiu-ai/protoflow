@@ -1,0 +1,6 @@
+.panel { border-radius: 16px; padding: var(--space); background: var(--surface); }
+#chat-panel .description { color: var(--muted); margin: 0 0 24px; }
+#messages { list-style: none; padding: 0; margin: 0 0 24px; }
+#messages li { border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 0 0 12px; background: #fafbfe; }
+#messages p { margin: 4px 0 0; overflow-wrap: anywhere; }
+#chat-panel textarea { display: block; resize: vertical; min-height: 96px; margin-bottom: 16px; }

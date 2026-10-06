@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 1,
+  "prototypeDir": "prototype",
+  "mappings": [
+    {
+      "id": "chat-panel",
+      "prototypeFiles": [
+        "prototype/pages/chat.html",
+        "prototype/styles/chat.css",
+        "prototype/scripts/chat.js",
+        "prototype/styles/tokens.css",
+        "prototype/styles/navigation.css"
+      ],
+      "prototype": "#chat-panel",
+      "application": "#chat-panel",
+      "component": "app/components/ChatPanel.js",
+      "priority": "critical"
+    },
+    {
+      "id": "settings-panel",
+      "prototypeFiles": [
+        "prototype/pages/settings.html",
+        "prototype/styles/settings.css",
+        "prototype/scripts/settings.js",
+        "prototype/styles/tokens.css",
+        "prototype/styles/navigation.css"
+      ],
+      "prototype": "#settings-panel",
+      "application": "#settings-panel",
+      "component": "app/components/SettingsPanel.js",
+      "priority": "critical"
+    },
+    {
+      "id": "navigation-chat",
+      "prototypeFiles": [
+        "prototype/pages/chat.html",
+        "prototype/styles/navigation.css",
+        "prototype/styles/tokens.css"
+      ],
+      "prototype": "#navigation",
+      "application": "#navigation",
+      "component": "app/components/Navigation.js",
+      "priority": "critical"
+    },
+    {
+      "id": "navigation-settings",
+      "prototypeFiles": [
+        "prototype/pages/settings.html",
+        "prototype/styles/navigation.css",
+        "prototype/styles/tokens.css"
+      ],
+      "prototype": "#navigation",
+      "application": "#navigation",
+      "component": "app/components/Navigation.js",
+      "priority": "critical"
+    }
+  ],
+  "policy": {
+    "maxRepairAttempts": 2,
+    "requireHumanReview": true
+  },
+  "verification": {
+    "build": {
+      "argv": [
+        "node",
+        "build.js"
+      ]
+    },
+    "functional": {
+      "argv": [
+        "node",
+        "run-tests.js"
+      ]
+    }
+  },
+  "visual": {
+    "maxDiffRatio": 0.01,
+    "pixelThreshold": 0.1,
+    "geometryTolerance": 1,
+    "scenes": [
+      {
+        "id": "chat-initial",
+        "prototypeUrl": "http://127.0.0.1:4319/prototype/pages/chat.html",
+        "applicationUrl": "http://127.0.0.1:4319/app/pages/chat.html",
+        "viewport": {
+          "width": 1000,
+          "height": 800
+        },
+        "locale": "en-US",
+        "colorScheme": "light",
+        "deviceScaleFactor": 1,
+        "mappings": [
+          "chat-panel",
+          "navigation-chat"
+        ]
+      },
+      {
+        "id": "chat-submitted",
+        "prototypeUrl": "http://127.0.0.1:4319/prototype/pages/chat.html",
+        "applicationUrl": "http://127.0.0.1:4319/app/pages/chat.html",
+        "viewport": {
+          "width": 1000,
+          "height": 800
+        },
+        "locale": "en-US",
+        "colorScheme": "light",
+        "deviceScaleFactor": 1,
+        "mappings": [
+          "chat-panel",
+          "navigation-chat"
+        ],
+        "steps": [
+          {
+            "action": "fill",
+            "prototype": "#message",
+            "application": "#message",
+            "value": "Review the navigation spacing."
+          },
+          {
+            "action": "click",
+            "prototype": "#send-message",
+            "application": "#send-message"
+          }
+        ]
+      },
+      {
+        "id": "settings-initial",
+        "prototypeUrl": "http://127.0.0.1:4319/prototype/pages/settings.html",
+        "applicationUrl": "http://127.0.0.1:4319/app/pages/settings.html",
+        "viewport": {
+          "width": 1000,
+          "height": 800
+        },
+        "locale": "en-US",
+        "colorScheme": "light",
+        "deviceScaleFactor": 1,
+        "mappings": [
+          "settings-panel",
+          "navigation-settings"
+        ]
+      },
+      {
+        "id": "settings-submitted",
+        "prototypeUrl": "http://127.0.0.1:4319/prototype/pages/settings.html",
+        "applicationUrl": "http://127.0.0.1:4319/app/pages/settings.html",
+        "viewport": {
+          "width": 1000,
+          "height": 800
+        },
+        "locale": "en-US",
+        "colorScheme": "light",
+        "deviceScaleFactor": 1,
+        "mappings": [
+          "settings-panel",
+          "navigation-settings"
+        ],
+        "steps": [
+          {
+            "action": "fill",
+            "prototype": "#display-name",
+            "application": "#display-name",
+            "value": "Morgan"
+          },
+          {
+            "action": "click",
+            "prototype": "#save-settings",
+            "application": "#save-settings"
+          }
+        ]
+      }
+    ]
+  }
+}

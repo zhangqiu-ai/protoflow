@@ -2,17 +2,21 @@
   "schemaVersion": 1,
   "prototypeDir": "prototype",
   "mappings": [{
-    "id": "home",
-    "prototypeFiles": ["prototype/index.html"],
-    "prototype": "main",
-    "application": "main",
-    "component": "src/Home.tsx",
+    "id": "page-region",
+    "prototypeFiles": ["prototype/<page>.html", "prototype/<shared-resource>"],
+    "prototype": "<prototype-css-selector>",
+    "application": "<application-css-selector>",
+    "component": "<path/to/your/component>",
     "priority": "normal"
   }],
   "classification": { "rules": [] },
-  "policy": { "maxRepairAttempts": 3, "requireHumanReview": true },
+  "policy": { "maxRepairAttempts": 3, "requireHumanReview": true, "sequentialVersions": true },
   "watch": { "pollMs": 200, "idleMs": 1000 },
   "verification": { "build": null, "functional": null },
   "visual": { "scenes": [], "maxDiffRatio": 0.01, "geometryTolerance": 1, "pixelThreshold": 0.1 },
-  "adapters": { "codex": { "command": null }, "specKit": { "command": null }, "bmad": { "command": null } }
+  "adapters": {
+    "codex": { "command": null },
+    "specKit": { "command": null, "install": { "argv": ["uvx", "--from", "specify-cli", "specify", "init", "--here", "--force", "--non-interactive", "--integration", "codex", "--script", "sh"], "timeoutMs": 600000 } },
+    "bmad": { "command": null, "install": { "argv": ["npx", "--yes", "skills", "add", "bmad-code-org/BMAD-METHOD", "--skill", "*", "--agent", "codex", "--yes"], "timeoutMs": 600000 } }
+  }
 }

@@ -3,6 +3,8 @@ import { readFile, mkdir, realpath } from 'node:fs/promises';
 import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand } from './util.js';
 import { snapshot } from './sessions.js';
 import { verifyVisual } from './visual.js';
+import { loadVersion } from './versions.js';
+import { assertCurrentVersion } from './queue.js';
 
 const date = () => new Date().toISOString();
 const validId = value => {
@@ -17,11 +19,15 @@ async function persist(root, kind, data) {
   await writeJson(await projectPath(root, `.protoflow/${kind}/${validId(data.id)}.json`), data);
   return data;
 }
-async function currentManifest(root, config, manifestId) {
+// The prototype is its own version stream; the application hash excludes it so design work can continue.
+const applicationFingerprint = (root, config) => fingerprint(root, { exclude: [config.prototypeDir] });
+/** Load a manifest with its frozen prototype version; the live prototype may already be newer. */
+async function manifestVersion(root, config, manifestId) {
   const manifest = await loadArtifact(root, 'manifests', manifestId);
-  if ((await snapshot(root, config)).hash !== manifest.afterHash) throw new Error('Prototype changed since checkpoint; create a new checkpoint');
-  return manifest;
+  return { manifest, version: await loadVersion(root, config, manifest) };
 }
+const versionReference = version => ({ manifestId: version.manifestId, hash: version.hash, prototypeDir: version.prototypeDir });
+const versionInstructions = version => `Read the prototype for this version from ${version.prototypeDir}/ (a frozen copy). The live prototype directory may already contain newer versions; do not implement them.`;
 async function evidenceFile(root, relative) {
   const file = await projectPath(root, relative);
   const content = await readFile(file, 'utf8');
@@ -50,7 +56,8 @@ async function assertPlanningFresh(root, manifest, planning) {
   }
 }
 export async function createContext(root, config, manifestId, { spec, adr } = {}) {
-  const manifest = await currentManifest(root, config, manifestId);
+  await assertCurrentVersion(root, config, manifestId);
+  const { manifest, version } = await manifestVersion(root, config, manifestId);
   const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
   if (unmapped.length) throw new Error(`Map changed prototype files before execution: ${unmapped.join(', ')}`);
   const specEvidence = spec ? await evidenceFile(root, spec) : null;
@@ -64,17 +71,18 @@ export async function createContext(root, config, manifestId, { spec, adr } = {}
   }
   return persist(root, 'contexts', {
     schemaVersion: 1, id: id('CTX'), createdAt: date(), manifestId, manifestHash: hash(manifest), manifest,
-    prototypeHash: manifest.afterHash, project: await fingerprint(root), git: await gitInfo(root),
+    prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: await applicationFingerprint(root, config), git: await gitInfo(root),
     mappings: config.mappings.filter(mapping => manifest.mappings.includes(mapping.id)),
     spec: specEvidence, adr: adrEvidence,
-    instructions: 'Implement only mapped application changes. Preserve prototype and unrelated user changes. Maintain and run repeatable Playwright regression tests. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.',
+    instructions: `${versionInstructions(version)} Implement only mapped application changes. Preserve prototype and unrelated user changes. Maintain and run repeatable Playwright regression tests. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
     verification: config.verification ?? {}, visual: config.visual ?? {}
   });
 }
 export async function prepareIntegration(root, config, manifestId, adapter) {
   if (!['specKit', 'bmad'].includes(adapter)) throw new Error('Adapter must be specKit or bmad');
-  const manifest = await currentManifest(root, config, manifestId);
-  const request = { schemaVersion: 1, kind: adapter, manifest, manifestHash: hash(manifest), mappings: config.mappings, expected: adapter === 'bmad' ? 'ADR with explicit human decision; do not implement application code' : 'Specification, acceptance criteria, plan and tasks; do not implement application code' };
+  await assertCurrentVersion(root, config, manifestId);
+  const { manifest, version } = await manifestVersion(root, config, manifestId);
+  const request = { schemaVersion: 1, kind: adapter, manifest, manifestHash: hash(manifest), prototypeVersion: versionReference(version), mappings: config.mappings, expected: adapter === 'bmad' ? 'ADR with explicit human decision; do not implement application code' : 'Specification, acceptance criteria, plan and tasks; do not implement application code' };
   const result = await runCommand(root, config.adapters?.[adapter]?.command, request);
   let response = null;
   if (result.status === 'PASS') {
@@ -88,9 +96,10 @@ export async function prepareIntegration(root, config, manifestId, adapter) {
 }
 export async function executeContext(root, config, contextId, { execute = false, repair = null } = {}) {
   const context = await loadArtifact(root, 'contexts', contextId);
-  await currentManifest(root, config, context.manifestId);
-  if (context.manifestHash !== hash(await loadArtifact(root, 'manifests', context.manifestId))) throw new Error('Context manifest changed');
-  if (context.project.hash !== (await fingerprint(root)).hash) throw new Error('Context is stale; regenerate it before execution');
+  await assertCurrentVersion(root, config, context.manifestId);
+  const { manifest } = await manifestVersion(root, config, context.manifestId);
+  if (context.manifestHash !== hash(manifest)) throw new Error('Context manifest changed');
+  if (context.project.hash !== (await applicationFingerprint(root, config)).hash) throw new Error('Context is stale; regenerate it before execution');
   for (const evidence of [context.spec, context.adr].filter(Boolean)) {
     if ((await evidenceFile(root, evidence.path)).hash !== evidence.hash) throw new Error('Planning evidence changed; regenerate context');
   }
@@ -99,19 +108,24 @@ export async function executeContext(root, config, contextId, { execute = false,
   const command = config.adapters?.codex?.command;
   const before = await snapshot(root, config);
   const result = await runCommand(root, command, request);
-  if ((await snapshot(root, config)).hash !== before.hash) { result.status = 'FAIL'; result.error = 'Executor changed prototype; create a checkpoint and review before continuing'; }
-  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, projectAfter: await fingerprint(root) });
+  try { await loadVersion(root, config, manifest); }
+  catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
+  // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.
+  const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
+  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config) });
 }
 export async function verify(root, config, manifestId) {
-  const manifest = await currentManifest(root, config, manifestId);
+  await assertCurrentVersion(root, config, manifestId);
+  const { manifest, version } = await manifestVersion(root, config, manifestId);
   const verificationId = id('VER');
   const directory = await projectPath(root, `.protoflow/artifacts/${verificationId}`);
   await mkdir(directory, { recursive: true });
   // Build may produce project assets. Bind evidence after build, before acceptance.
   const build = await runCommand(root, config.verification?.build);
-  const before = await fingerprint(root);
+  const before = await applicationFingerprint(root, config);
   const functional = await runCommand(root, config.verification?.functional);
-  const visual = await verifyVisual(root, config, directory);
+  const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
+  const visual = await verifyVisual(root, config, directory, { version, liveMatches });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
   const missing = manifest.mappings.filter(mapping => !covered.has(mapping));
   const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
@@ -123,15 +137,19 @@ export async function verify(root, config, manifestId) {
     const relative = path.relative(await realpath(root), await realpath(artifact));
     artifactHashes[relative] = hash(await readFile(await projectPath(root, relative)));
   }
-  const after = await fingerprint(root);
-  const changedDuringVerification = before.hash !== after.hash || (await snapshot(root, config)).hash !== manifest.afterHash;
+  const after = await applicationFingerprint(root, config);
+  let versionIntact = true;
+  try { await loadVersion(root, config, manifest); } catch { versionIntact = false; }
+  const liveChanged = visual.prototypeSource === 'live' && (await snapshot(root, config)).hash !== manifest.afterHash;
+  const changedDuringVerification = before.hash !== after.hash || !versionIntact || liveChanged;
   const checks = [build.status, functional.status, visual.status];
   const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, status };
+  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, status };
   return persist(root, 'verifications', record);
 }
 export async function createReview(root, config, manifestId, verificationId) {
   // Pending review can preserve a failed/stale attempt; approval still checks freshness.
+  await assertCurrentVersion(root, config, manifestId, { allowAccepted: true });
   const manifest = await loadArtifact(root, 'manifests', manifestId);
   const verification = await loadArtifact(root, 'verifications', verificationId);
   if (verification.manifestId !== manifestId || verification.manifestHash !== hash(manifest)) throw new Error('Verification does not belong to this manifest');
@@ -143,7 +161,7 @@ export async function createReview(root, config, manifestId, verificationId) {
   });
 }
 async function assertReviewFresh(root, config, review) {
-  const manifest = await currentManifest(root, config, review.manifestId);
+  const { manifest } = await manifestVersion(root, config, review.manifestId);
   const verification = await loadArtifact(root, 'verifications', review.verificationId);
   if (hash(manifest) !== review.manifestHash || hash(verification) !== review.verificationHash || verification.manifestHash !== hash(manifest)) throw new Error('Review evidence changed');
   if (verification.status !== 'PASS') throw new Error('Review approval requires PASS build, functional and visual verification');
@@ -151,7 +169,7 @@ async function assertReviewFresh(root, config, review) {
   for (const [relative, expected] of Object.entries(verification.artifactHashes)) {
     if (hash(await readFile(await projectPath(root, relative))) !== expected) throw new Error('Visual evidence changed; rerun verification');
   }
-  if ((await fingerprint(root)).hash !== review.projectHash) throw new Error('Project changed since verification; rerun verify and review');
+  if ((await applicationFingerprint(root, config)).hash !== review.projectHash) throw new Error('Project changed since verification; rerun verify and review');
   await assertPlanningFresh(root, manifest, review.planning);
   return { manifest, verification };
 }

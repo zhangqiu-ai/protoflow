@@ -1,0 +1,5 @@
+.protoflow/
+test-results/
+playwright-report/
+.agents/
+node_modules/

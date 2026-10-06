@@ -20,7 +20,7 @@ async function command(root, args, expectedCode = 0) {
   try { result = { ...(await exec(process.execPath, [cli, ...args, '--project', root], { cwd: root, env, maxBuffer: 8 * 1024 * 1024 })), code: 0 }; }
   catch (error) { result = { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
   expect(result.code, `${args.join(' ')}\n${result.stdout}\n${result.stderr}`).toBe(expectedCode);
-  return JSON.parse(expectedCode === 1 && !result.stdout.trim() ? result.stderr : result.stdout);
+  return JSON.parse(expectedCode !== 0 && !result.stdout.trim() ? result.stderr : result.stdout);
 }
 
 async function project() {
@@ -51,6 +51,15 @@ test('actual CLI verifies, binds a human review, records a baseline and rejects 
   try {
     const checkpoint = await command(root, ['checkpoint', '--summary', 'Initial demo']);
     expect(checkpoint.mappings).toContain('card');
+    // Design keeps going: a second prototype version queues behind the first.
+    const prototypeFile = path.join(root, 'prototype/index.html');
+    const v1Prototype = await readFile(prototypeFile, 'utf8');
+    await writeFile(prototypeFile, v1Prototype.replace('Create a design session', 'Start a new design session'));
+    const next = await command(root, ['checkpoint', '--summary', 'Retitled heading']);
+    expect((await command(root, ['queue'])).waiting).toEqual([next.id]);
+    const outOfOrder = await command(root, ['context', '--manifest', next.id], 3);
+    expect(outOfOrder.status).toBe('BLOCKED');
+    expect(outOfOrder.queue.current.id).toBe(checkpoint.id);
     const planningPath = path.join(root, '.protoflow/review-spec.md');
     const planning = await readFile(path.join(root, 'spec.md'), 'utf8');
     await writeFile(planningPath, planning);
@@ -58,6 +67,10 @@ test('actual CLI verifies, binds a human review, records a baseline and rejects 
     const verified = await command(root, ['verify', '--manifest', checkpoint.id]);
     expect(verified.status).toBe('PASS');
     expect(verified.functional.stdout).toContain('1 passed');
+    // The live prototype already shows v2's heading; v1 acceptance compared v1's frozen copy.
+    expect(verified.visual.prototypeSource).toBe('version');
+    expect(verified.prototypeVersion.manifestId).toBe(checkpoint.id);
+    expect((await command(root, ['queue'])).current.id).toBe(next.id);
     await page.goto(pathToFileURL(verified.visual.artifacts.at(-1)).href);
     await expect(page.getByRole('heading', { name: 'ProtoFlow visual review' })).toBeVisible();
     await expect(page.getByRole('heading', { name: /create-session — PASS/ })).toBeVisible();

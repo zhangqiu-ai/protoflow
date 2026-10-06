@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ProtoFlow modular · Chat</title><link rel="stylesheet" href="../styles/tokens.css"><link rel="stylesheet" href="../styles/navigation.css"><link rel="stylesheet" href="../styles/chat.css"></head>
+<body>
+<nav id="navigation" aria-label="Main navigation"></nav>
+<main><section id="chat-panel" class="panel" aria-labelledby="chat-title"></section></main>
+<script type="module">import { mountNavigation } from '../components/Navigation.js'; import { mountChatPanel } from '../components/ChatPanel.js'; mountNavigation(document.querySelector('#navigation'), 'chat'); mountChatPanel(document.querySelector('#chat-panel'));</script>
+</body></html>

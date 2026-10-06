@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { snapshot, startSession, checkpoint, classifyChanges, watch, getSession, getManifest, listSessions } from '../src/sessions.js';
+import { loadConfig } from '../src/config.js';
 
 const exec = promisify(execFile);
 const config = {
@@ -239,4 +240,91 @@ test('CLI watch emits readiness and persists one debounced checkpoint without ho
   assert.equal(saved.before.files['prototype/index.html'].content, markup('red'));
   assert.equal(saved.after.files['prototype/index.html'].content, markup('purple'));
   await assert.rejects(fs.stat(path.join(root, '.protoflow/active.lock')), { code: 'ENOENT' });
+});
+
+const singlePageMappings = [
+  { id: 'navigation', prototypeFiles: ['prototype/index.html'], prototype: '#navigation', application: '[data-ui=navigation]', component: 'src/Navigation.tsx' },
+  { id: 'chat', prototypeFiles: ['prototype/index.html'], prototype: '#chat', application: '[data-ui=chat]', component: 'src/Chat.tsx' },
+];
+const pageContent = label => `<nav id="navigation">Home</nav>\n<main id="chat">${label}</main>\n`;
+
+test('one prototype HTML supports multiple mappings with distinct application component files', async t => {
+  const root = await fixture(t, { git: false });
+  await fs.writeFile(path.join(root, 'prototype/index.html'), pageContent('Messages'));
+  await fs.writeFile(path.join(root, 'src/Navigation.tsx'), 'export default function Navigation() { return "Home"; }');
+  await fs.writeFile(path.join(root, 'src/Chat.tsx'), 'export default function Chat() { return "Messages"; }');
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ schemaVersion: 1, ...config, mappings: singlePageMappings }));
+  const loaded = await loadConfig(root);
+  const manifest = await checkpoint(root, loaded);
+  assert.deepEqual(loaded.mappings.map(mapping => mapping.component), ['src/Navigation.tsx', 'src/Chat.tsx']);
+  assert.deepEqual(manifest.mappings, ['navigation', 'chat']);
+  assert.deepEqual(manifest.changes.map(change => change.path), ['prototype/index.html']);
+  assert.deepEqual((await getManifest(root, manifest.id)).changes[0].mappings, ['navigation', 'chat']);
+});
+
+test('local text edit within one HTML fans out to all file mappings despite distinct selectors', async t => {
+  const root = await fixture(t, { git: false });
+  const pageConfig = { ...config, mappings: singlePageMappings };
+  await fs.writeFile(path.join(root, 'prototype/index.html'), pageContent('Messages'));
+  const session = await startSession(root, pageConfig);
+  await fs.writeFile(path.join(root, 'prototype/index.html'), pageContent('New messages'));
+  const manifest = await checkpoint(root, pageConfig, { sessionId: session.id });
+  assert.deepEqual(manifest.mappings, ['navigation', 'chat']);
+  assert.deepEqual(manifest.changes[0].mappings, ['navigation', 'chat']);
+  const saved = await getSession(root, session.id);
+  assert.equal(saved.before.files['prototype/index.html'].content.split('\n')[0], saved.after.files['prototype/index.html'].content.split('\n')[0]);
+  assert.match(manifest.changes[0].diff, /-<main id="chat">Messages<\/main>/);
+  assert.match(manifest.changes[0].diff, /\+<main id="chat">New messages<\/main>/);
+});
+
+async function multipageFixture(t) {
+  const root = await fixture(t, { git: false });
+  await fs.mkdir(path.join(root, 'prototype/pages/chat'), { recursive: true });
+  await fs.mkdir(path.join(root, 'prototype/shared'), { recursive: true });
+  await fs.writeFile(path.join(root, 'prototype/pages/navigation.html'), '<link rel="stylesheet" href="../shared/tokens.css"><nav id="navigation">Home</nav>');
+  await fs.writeFile(path.join(root, 'prototype/pages/chat/index.html'), '<link rel="stylesheet" href="../../shared/tokens.css"><main id="chat">Messages</main>');
+  await fs.writeFile(path.join(root, 'prototype/shared/tokens.css'), ':root { --accent: blue; }');
+  const pageConfig = { ...config, mappings: [
+    { ...singlePageMappings[0], prototypeFiles: ['prototype/pages/navigation.html', 'prototype/shared/tokens.css'] },
+    { ...singlePageMappings[1], prototypeFiles: ['prototype/pages/chat/**/*.html', 'prototype/shared/tokens.css'] },
+  ] };
+  return { root, pageConfig };
+}
+
+test('split prototype pages route a local change only to the affected page component', async t => {
+  const { root, pageConfig } = await multipageFixture(t);
+  const before = await snapshot(root, pageConfig);
+  await fs.writeFile(path.join(root, 'prototype/pages/chat/index.html'), '<link rel="stylesheet" href="../../shared/tokens.css"><main id="chat">New messages</main>');
+  const after = await snapshot(root, pageConfig);
+  const change = classifyChanges(before, after, pageConfig);
+  assert.deepEqual(change.mappings, ['chat']);
+  assert.deepEqual(change.changes.map(item => item.path), ['prototype/pages/chat/index.html']);
+  assert.deepEqual(change.changes[0].mappings, ['chat']);
+  assert.equal(before.files['prototype/pages/navigation.html'].hash, after.files['prototype/pages/navigation.html'].hash);
+});
+
+test('shared token edits fan out to every explicitly configured consumer mapping', async t => {
+  const { root, pageConfig } = await multipageFixture(t);
+  const session = await startSession(root, pageConfig);
+  await fs.writeFile(path.join(root, 'prototype/shared/tokens.css'), ':root { --accent: green; }');
+  const manifest = await checkpoint(root, pageConfig, { sessionId: session.id });
+  assert.equal(manifest.level, 'L0');
+  assert.deepEqual(manifest.mappings, ['navigation', 'chat']);
+  assert.deepEqual(manifest.changes.map(change => change.path), ['prototype/shared/tokens.css']);
+  assert.deepEqual(manifest.changes[0].mappings, ['navigation', 'chat']);
+  assert.equal(manifest.changes[0].type, 'modified');
+});
+
+test('deleting a shared token file retains original evidence and fans out to every consumer mapping', async t => {
+  const { root, pageConfig } = await multipageFixture(t);
+  const session = await startSession(root, pageConfig);
+  await fs.unlink(path.join(root, 'prototype/shared/tokens.css'));
+  const manifest = await checkpoint(root, pageConfig, { sessionId: session.id });
+  assert.deepEqual(manifest.mappings, ['navigation', 'chat']);
+  assert.deepEqual(manifest.changes.map(change => change.path), ['prototype/shared/tokens.css']);
+  assert.deepEqual(manifest.changes[0].mappings, ['navigation', 'chat']);
+  assert.equal(manifest.changes[0].type, 'deleted');
+  assert.equal(manifest.changes[0].beforeHash, session.before.files['prototype/shared/tokens.css'].hash);
+  assert.equal(manifest.changes[0].afterHash, null);
+  assert.match(manifest.changes[0].diff, /-:root \{ --accent: blue; \}/);
 });

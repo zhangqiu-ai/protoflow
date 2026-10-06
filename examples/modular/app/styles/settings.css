@@ -1,0 +1,4 @@
+#settings-panel.panel { border-radius: 16px; padding: var(--space); background: var(--surface); }
+#settings-panel .description { color: var(--muted); margin: 0 0 24px; }
+#settings-panel input { display: block; margin-bottom: 16px; }
+#settings-status { margin: 20px 0 0; padding: 12px 16px; border-radius: 8px; background: #edf2ff; }

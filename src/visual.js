@@ -1,4 +1,4 @@
-import { mkdir, writeFile, realpath } from 'node:fs/promises';
+import { mkdir, writeFile, realpath, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -21,6 +21,45 @@ async function urlFor(root, value) {
   validated.search = parsed.search;
   validated.hash = parsed.hash;
   return validated.href;
+}
+
+const CONTENT_TYPES = { '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf' };
+
+/**
+ * Serve the prototype scene from the frozen version under verification, because the live prototype may be newer.
+ * Project-relative scenes are rewritten into the version store; http scenes are routed when their base maps to prototypeDir.
+ */
+async function prototypeTarget(root, config, scene, context, { version, liveMatches }) {
+  if (!version) return { url: await urlFor(root, scene.prototypeUrl), source: 'live' };
+  const prototypeDir = path.posix.normalize(config.prototypeDir.split(path.sep).join('/')).replace(/\/+$/, '');
+  const value = scene.prototypeUrl;
+  if (!value) throw new Error('Scene requires prototypeUrl and applicationUrl');
+  if (/^https?:/.test(value)) {
+    const url = new URL(value);
+    const configured = config.visual?.prototypeBaseUrl;
+    const base = configured ? new URL(configured.endsWith('/') ? configured : `${configured}/`) : url.pathname.startsWith(`/${prototypeDir}/`) ? new URL(`/${prototypeDir}/`, url.origin) : null;
+    if (!base || !url.href.startsWith(base.href)) {
+      if (liveMatches) return { url: value, source: 'live' };
+      throw new Error(`Live prototype has moved past ${version.manifestId}; set visual.prototypeBaseUrl to the URL serving ${prototypeDir}/ so this version can be served from its frozen copy`);
+    }
+    await context.route(candidate => candidate.href.startsWith(base.href), async route => {
+      let relative = decodeURIComponent(new URL(route.request().url()).pathname.slice(base.pathname.length));
+      if (!relative || relative.endsWith('/')) relative += 'index.html';
+      const key = path.posix.normalize(`${prototypeDir}/${relative}`);
+      if (!key.startsWith(`${prototypeDir}/`) || !version.files[key]) return route.fulfill({ status: 404, body: `Not in prototype version ${version.manifestId}` });
+      const body = await readFile(await projectPath(root, `${version.directory}/${key}`));
+      return route.fulfill({ status: 200, contentType: CONTENT_TYPES[path.extname(key).toLowerCase()] ?? 'application/octet-stream', body });
+    });
+    return { url: value, source: 'version' };
+  }
+  const parsed = new URL(value, pathToFileURL(`${path.resolve(root)}${path.sep}`));
+  if (parsed.protocol !== 'file:') throw new Error(`Unsupported scene URL protocol: ${parsed.protocol}`);
+  const relative = path.relative(path.resolve(root), fileURLToPath(parsed)).split(path.sep).join('/');
+  if (relative !== prototypeDir && !relative.startsWith(`${prototypeDir}/`)) return { url: await urlFor(root, value), source: 'live' };
+  const frozen = pathToFileURL(await projectPath(root, `${version.directory}/${relative}`));
+  frozen.search = parsed.search;
+  frozen.hash = parsed.hash;
+  return { url: frozen.href, source: 'version' };
 }
 
 export function compareImages(beforeBuffer, afterBuffer, threshold = 0.1) {
@@ -88,7 +127,7 @@ async function prepare(page, url, scene, side) {
 }
 
 /** Browser evidence only: missing browsers and unsupported native surfaces never pass. */
-export async function verifyVisual(root, config, outDir) {
+export async function verifyVisual(root, config, outDir, { version = null, liveMatches = true } = {}) {
   const visual = config.visual ?? {};
   if (!visual.scenes?.length || visual.mode === 'native') {
     return { status: 'NOT_RUN', reason: visual.mode === 'native' ? 'Native UI requires a separately configured acceptance adapter; browser verification cannot cover it.' : 'No visual scenes configured.', scenes: [], artifacts: [] };
@@ -99,6 +138,7 @@ export async function verifyVisual(root, config, outDir) {
   catch (error) { return { status: 'NOT_RUN', reason: `Browser unavailable: ${error.message}`, scenes: [], artifacts: [] }; }
   const results = [];
   const artifacts = [];
+  const sources = new Set();
   try {
     for (const [index, scene] of visual.scenes.entries()) {
       const result = { id: scene.id ?? `scene-${index + 1}`, status: 'PASS', reasons: [], mappings: [], artifacts: [] };
@@ -119,7 +159,10 @@ export async function verifyVisual(root, config, outDir) {
         const application = await applicationContext.newPage();
         prototype.setDefaultTimeout(scene.timeoutMs ?? 10000);
         application.setDefaultTimeout(scene.timeoutMs ?? 10000);
-        const prototypeUrl = await urlFor(root, scene.prototypeUrl);
+        const target = await prototypeTarget(root, config, scene, prototypeContext, { version, liveMatches });
+        sources.add(target.source);
+        result.prototypeSource = target.source;
+        const prototypeUrl = target.url;
         const applicationUrl = await urlFor(root, scene.applicationUrl);
         await Promise.all([prepare(prototype, prototypeUrl, scene, 'prototype'), prepare(application, applicationUrl, scene, 'application')]);
         const masksFor = async (page, side) => {
@@ -192,7 +235,7 @@ export async function verifyVisual(root, config, outDir) {
   const report = path.join(outDir, 'visual-review.html');
   await writeFile(report, renderReport(results));
   artifacts.push(report);
-  return { status: results.every((scene) => scene.status === 'PASS') ? 'PASS' : 'FAIL', scenes: results, artifacts };
+  return { status: results.every((scene) => scene.status === 'PASS') ? 'PASS' : 'FAIL', scenes: results, artifacts, prototypeSource: sources.has('live') ? 'live' : 'version' };
 }
 
 function renderReport(scenes) {

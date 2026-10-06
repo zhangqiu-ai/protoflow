@@ -12,6 +12,9 @@ const config = {
   mappings: [{ id: 'button', prototypeFiles: ['prototype/index.html'], prototype: '#button', application: '#button', component: 'src/button.js' }],
 };
 
+// Application evidence excludes the prototype, which is versioned separately.
+const appFingerprint = root => fingerprint(root, { exclude: [config.prototypeDir] });
+
 async function fixture(t, { level } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-audit-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -34,7 +37,7 @@ async function syntheticVerification(root, manifest, { status = 'PASS', omitHash
   const verification = {
     schemaVersion: 1, id: 'VER-SYNTHETIC', fixture: 'synthetic-unit-protocol-only',
     manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
-    project: await fingerprint(root), git: { head: null }, status,
+    project: await appFingerprint(root), git: { head: null }, status,
     build: { status }, functional: { status },
     visual: { status, scenes: [{ id: 'synthetic-fixture', mappings: [{ id: 'button', status }] }], artifacts: [artifact] },
     artifactHashes: omitHashes ? {} : { [relative]: hash(content) },
@@ -48,7 +51,7 @@ test('synthetic protocol fixture: screenshot mutation blocks approval even thoug
   const { verification, artifact } = await syntheticVerification(root, manifest);
   const review = await createReview(root, config, manifest.id, verification.id);
   await fs.writeFile(artifact, 'replaced evidence');
-  assert.equal((await fingerprint(root)).hash, verification.project.hash);
+  assert.equal((await appFingerprint(root)).hash, verification.project.hash);
   await assert.rejects(decideReview(root, config, review.id, { status: 'approved', reviewer: 'Unit fixture reviewer' }), /Visual evidence changed/);
   assert.equal((await loadArtifact(root, 'reviews', review.id)).status, 'pending');
 });
@@ -128,30 +131,34 @@ test('project paths reject unresolved or escaping symlinks before writes', async
 
 test('planning gates L2 spec and L3 approved ADR to the exact manifest', async t => {
   const { root, manifest } = await fixture(t, { level: 'L2' });
-  await assert.rejects(createContext(root, config, manifest.id), /L2 requires --spec/);
+  // Planning gates for later versions are exercised directly; version ordering is tested in queue.test.js.
+  const unordered = { ...config, policy: { ...config.policy, sequentialVersions: false } };
+  await assert.rejects(createContext(root, unordered, manifest.id), /L2 requires --spec/);
   await fs.writeFile(path.join(root, 'spec.md'), 'Specification fixture: require save behavior and acceptance criteria.');
-  const level2 = await createContext(root, config, manifest.id, { spec: 'spec.md' });
+  const level2 = await createContext(root, unordered, manifest.id, { spec: 'spec.md' });
   assert.equal(level2.spec.path, 'spec.md');
-  const session = await startSession(root, config);
+  const session = await startSession(root, unordered);
   await fs.writeFile(path.join(root, 'prototype/index.html'), '<button id="button">Authenticate</button>');
-  const level3 = await checkpoint(root, config, { sessionId: session.id, level: 'L3' });
-  await assert.rejects(createContext(root, config, level3.id, { spec: 'spec.md' }), /requires --adr/);
+  const level3 = await checkpoint(root, unordered, { sessionId: session.id, level: 'L3' });
+  await assert.rejects(createContext(root, unordered, level3.id, { spec: 'spec.md' }), /requires --adr/);
   const adr = { status: 'approved', reviewer: 'Unit fixture reviewer', manifestHash: hash(manifest), decision: 'Approve fixture architecture' };
   await fs.writeFile(path.join(root, 'adr.json'), JSON.stringify(adr));
-  await assert.rejects(createContext(root, config, level3.id, { spec: 'spec.md', adr: 'adr.json' }), /bound to this manifestHash/);
+  await assert.rejects(createContext(root, unordered, level3.id, { spec: 'spec.md', adr: 'adr.json' }), /bound to this manifestHash/);
   await fs.writeFile(path.join(root, 'adr.json'), JSON.stringify({ ...adr, manifestHash: hash(level3), status: 'pending' }));
-  await assert.rejects(createContext(root, config, level3.id, { spec: 'spec.md', adr: 'adr.json' }), /human approval/);
+  await assert.rejects(createContext(root, unordered, level3.id, { spec: 'spec.md', adr: 'adr.json' }), /human approval/);
   await fs.writeFile(path.join(root, 'adr.json'), JSON.stringify({ ...adr, manifestHash: hash(level3) }));
-  const accepted = await createContext(root, config, level3.id, { spec: 'spec.md', adr: 'adr.json' });
+  const accepted = await createContext(root, unordered, level3.id, { spec: 'spec.md', adr: 'adr.json' });
   assert.equal(accepted.manifestHash, hash(level3));
   assert.equal(accepted.adr.hash, hash(await fs.readFile(path.join(root, 'adr.json'), 'utf8')));
 });
 
 test('unmapped prototype changes block context generation instead of producing an empty execution target', async t => {
   const { root } = await fixture(t);
+  // Planning gates for later versions are exercised directly; version ordering is tested in queue.test.js.
+  const unordered = { ...config, policy: { ...config.policy, sequentialVersions: false } };
   await fs.writeFile(path.join(root, 'prototype/unmapped.css'), 'button { color: blue }');
-  const manifest = await checkpoint(root, config);
-  await assert.rejects(createContext(root, config, manifest.id), /Map changed prototype files.*prototype\/unmapped.css/);
+  const manifest = await checkpoint(root, unordered);
+  await assert.rejects(createContext(root, unordered, manifest.id), /Map changed prototype files.*prototype\/unmapped.css/);
 });
 
 test('planning evidence in ignored state is independently bound to its content before execution', async t => {
@@ -161,7 +168,7 @@ test('planning evidence in ignored state is independently bound to its content b
   await fs.writeFile(file, 'Original specification');
   const context = await createContext(root, config, manifest.id, { spec: '.protoflow/planning/spec.md' });
   await fs.writeFile(file, 'Changed specification');
-  assert.equal((await fingerprint(root)).hash, context.project.hash);
+  assert.equal((await appFingerprint(root)).hash, context.project.hash);
   await assert.rejects(executeContext(root, config, context.id), /Planning evidence changed/);
 });
 

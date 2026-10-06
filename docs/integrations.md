@@ -4,6 +4,21 @@
 
 配置 command 為 null 或 `{ "argv": ["program", "arg"], "timeoutMs": 120000 }`。cwd 是目標 project。引擎不開 shell，不插入動態 shell 字串；預設超時兩分鐘、輸出上限 4 MiB，超時／超量會終止 subprocess group。非零 exit code 是 FAIL；null 是 NOT_RUN。
 
+## 安裝 Spec Kit 與 BMad
+
+`protoflow install` 在安裝 ProtoFlow Skill 後依序處理 `specKit`、`bmad`：先偵測（Spec Kit：`.specify/` 或 `.agents/skills/speckit*`；BMad：`_bmad/` 或 `.agents/skills/bmad*`／`bmod*`），已存在則記錄 `present` 並略過；否則執行 `adapters.<id>.install` argv，cwd 是目標專案，預設超時 10 分鐘。配置沒有 `install` 欄位或沒有配置檔時使用引擎預設；`null` 記錄 `NOT_RUN` 並提醒手動安裝。
+
+```json
+{"adapters":{
+  "specKit":{"command":null,"install":{"argv":["uvx","--from","specify-cli","specify","init","--here","--force","--non-interactive","--integration","codex","--script","sh"],"timeoutMs":600000}},
+  "bmad":{"command":null,"install":{"argv":["npx","--yes","skills","add","bmad-code-org/BMAD-METHOD","--skill","*","--agent","codex","--yes"],"timeoutMs":600000}}
+}}
+```
+
+預設命令依兩個專案的官方文件：Spec Kit 對既有專案使用 `specify init --here --force --integration <key>`，Codex 整合把 skills 放在 `.agents/skills`；BMad 以 skills CLI 安裝，之後在 Codex 執行 `bmad setup`。上游 CLI 變更時改寫配置即可，不需修改引擎。安裝器退出碼零但沒有留下偵測依據時判為 FAIL。每筆結果保存 argv、exit code、stdout／stderr 尾段與 `changed`（安裝前後專案 fingerprint 的差異檔案），`notices` 另輸出到 stderr 提醒開發者。安裝器是被信任的外部程式，引擎不隔離它們的檔案寫入；執行前應有可檢查的 Git 基準。
+
+## Adapter 協定
+
 外部 planning/execution adapter 接收 stdin JSON，不應假設 engine source 存在目標專案內。不要在配置存 token；工具使用既有的本機授權機制。Spec Kit／BMad 的 agent skills 不是終端命令，必須由了解該框架的 adapter 或當前 agent 執行。
 
 ## Spec Kit

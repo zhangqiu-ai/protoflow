@@ -29,6 +29,9 @@ test('init creates usable defaults and rejects paths outside project', async () 
   assert.equal(config.prototypeDir, 'prototype');
   assert.deepEqual(config.mappings, []);
   assert.equal(config.adapters.codex.command, null);
+  assert.deepEqual(config.adapters.specKit.install.argv.slice(3, 5), ['specify', 'init']);
+  assert.ok(config.adapters.specKit.install.argv.includes('codex'));
+  assert.deepEqual(config.adapters.bmad.install.argv.slice(2, 5), ['skills', 'add', 'bmad-code-org/BMAD-METHOD']);
   assert.equal(config.policy.maxRepairAttempts, 3);
   await assert.rejects(initProject(root, { prototypeDir: '../outside' }), /inside the project/);
   await assert.rejects(initProject(root, { prototypeDir: '/tmp/outside' }), /relative project path/);
@@ -36,12 +39,12 @@ test('init creates usable defaults and rejects paths outside project', async () 
 
 test('local skill install contains instructions only and preserves an existing destination', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'protoflow-install-'));
-  const first = await installSkill(root);
+  const first = await installSkill(root, { integrations: false });
   assert.equal(first.installed.length, 1);
   assert.ok((await readFile(path.join(first.skillDir, 'SKILL.md'), 'utf8')).includes('name: protoflow'));
   assert.deepEqual((await readdir(first.skillDir)).sort(), ['SKILL.md', 'references']);
   await writeFile(path.join(first.skillDir, 'user-note.txt'), 'keep');
-  const second = await installSkill(root);
+  const second = await installSkill(root, { integrations: false });
   assert.equal(second.installed.length, 0);
   assert.deepEqual(second.skipped, [first.skillDir]);
   assert.equal(await readFile(path.join(first.skillDir, 'user-note.txt'), 'utf8'), 'keep');
@@ -101,7 +104,7 @@ test('init and local install reject escaping parent directory symlinks', async (
   await assert.rejects(initProject(root, { prototypeDir: 'design/mockups' }), /Symlink escapes project/);
   assert.deepEqual(await readdir(outside), []);
   await symlink(outside, path.join(root, '.agents'));
-  await assert.rejects(installSkill(root), /Symlink escapes project/);
+  await assert.rejects(installSkill(root, { integrations: false }), /Symlink escapes project/);
   assert.deepEqual(await readdir(outside), []);
 });
 
@@ -112,7 +115,9 @@ test('initial and example template configurations are accepted by the actual eng
   const template = await readFile(new URL('../templates/protoflow.config.json', import.meta.url), 'utf8');
   await writeFile(path.join(root, 'protoflow.config.json'), template);
   const configured = await loadConfig(root);
-  assert.equal(configured.mappings[0].component, 'src/Home.tsx');
+  // The template must not prescribe any project's components; every project-specific value is a placeholder.
+  for (const key of ['prototype', 'application', 'component']) assert.match(configured.mappings[0][key], /^<[^>]+>$/);
+  assert.ok(configured.mappings[0].prototypeFiles.every(file => /<[^>]+>/.test(file)));
   assert.equal(configured.mappings[0].priority, 'normal');
 });
 

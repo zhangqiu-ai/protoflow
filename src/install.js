@@ -1,7 +1,8 @@
 import { appendFile, cp, lstat, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { projectPath as safeProjectPath } from './util.js';
+import { projectPath as safeProjectPath, readJson } from './util.js';
+import { INTEGRATIONS, configuredInstallers, detectIntegrations, installIntegrations, integrationNotices } from './integrations.js';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const skillSource = path.join(packageRoot, 'skills/protoflow');
@@ -14,11 +15,15 @@ export function defaultConfig(prototypeDir = 'prototype') {
     prototypeDir,
     mappings: [],
     classification: { rules: [] },
-    policy: { maxRepairAttempts: 3, requireHumanReview: true },
+    policy: { maxRepairAttempts: 3, requireHumanReview: true, sequentialVersions: true },
     watch: { pollMs: 200, idleMs: 1000 },
     verification: { build: null, functional: null },
     visual: { scenes: [], maxDiffRatio: 0.01, geometryTolerance: 1, pixelThreshold: 0.1 },
-    adapters: { codex: { command: null }, specKit: { command: null }, bmad: { command: null } },
+    adapters: {
+      codex: { command: null },
+      specKit: { command: null, install: INTEGRATIONS.specKit.install },
+      bmad: { command: null, install: INTEGRATIONS.bmad.install },
+    },
   };
 }
 
@@ -79,11 +84,15 @@ export async function initProject(root, { prototypeDir = 'prototype' } = {}) {
   return { project, configPath, agentsPath, created, skipped };
 }
 
-/** Install instructions only; the engine remains in its shared installation. */
+/**
+ * Install the ProtoFlow instructions (the engine stays shared), then Spec Kit and BMad into the project.
+ * `integrations`: undefined uses protoflow.config.json installers or engine defaults; false only detects.
+ */
 export async function installSkill(root, {
   personal = false,
   sourceDir = '/Users/feature/GitHub/skills',
   discoveryDir = '/Users/feature/.codex/skills',
+  integrations,
 } = {}) {
   const project = path.resolve(root);
   if (!personal) await mkdir(project, { recursive: true });
@@ -105,5 +114,15 @@ export async function installSkill(root, {
       installed.push(link);
     }
   }
-  return { project, personal, skillDir, installed, skipped };
+  if (personal || integrations === false) {
+    const detected = await detectIntegrations(project).catch(error => { if (error.code === 'ENOENT') return {}; throw error; });
+    return { project, personal, skillDir, installed, skipped, integrations: detected, notices: integrationNotices(detected) };
+  }
+  const config = await readJson(await safeProjectPath(project, 'protoflow.config.json'), null);
+  const results = await installIntegrations(project, integrations ?? configuredInstallers(config));
+  return {
+    status: results.some(result => result.status === 'FAIL') ? 'FAIL' : 'PASS',
+    project, personal, skillDir, installed, skipped,
+    integrations: results, notices: results.map(result => result.notice),
+  };
 }

@@ -1,0 +1,18 @@
+:root {
+  --surface: #ffffff;
+  --canvas: #f4f6fb;
+  --text: #18253d;
+  --muted: #59667d;
+  --accent: #325be7;
+  --line: #d7deec;
+  --space: 24px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--canvas); color: var(--text); font: 16px Arial, sans-serif; }
+main { width: min(720px, calc(100% - 48px)); margin: 32px auto; }
+h1 { font-size: 28px; margin: 0 0 12px; }
+p { line-height: 24px; }
+label { display: block; font-weight: 600; margin-bottom: 8px; }
+button { border: 0; border-radius: 8px; padding: 12px 20px; background: var(--accent); color: white; font: inherit; cursor: pointer; }
+input, textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: inherit; color: var(--text); background: var(--surface); }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #9eb2ff; outline-offset: 3px; }

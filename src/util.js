@@ -46,11 +46,13 @@ export async function gitInfo(root, paths = []) {
   } catch { /* Non-Git or unborn repositories retain truthful null HEAD. */ }
   return result;
 }
-export async function withLock(root, action) {
-  const directory = await projectPath(root, '.protoflow/active.lock');
+/** `active` serializes application-side work; `design` serializes prototype sessions so both sides can run concurrently. */
+export async function withLock(root, action, name = 'active') {
+  if (!['active', 'design'].includes(name)) throw new Error(`Unknown lock: ${name}`);
+  const directory = await projectPath(root, `.protoflow/${name}.lock`);
   await mkdir(path.dirname(directory), { recursive: true });
   try { await mkdir(directory); } catch (error) {
-    if (error.code === 'EEXIST') throw new Error('Another ProtoFlow operation holds .protoflow/active.lock; inspect its owner before manual recovery');
+    if (error.code === 'EEXIST') throw new Error(`Another ProtoFlow operation holds .protoflow/${name}.lock; inspect its owner before manual recovery`);
     throw error;
   }
   const token = randomUUID();
@@ -61,10 +63,12 @@ export async function withLock(root, action) {
     if ((await readJson(path.join(directory, 'owner.json'), {})).token === token) await rm(directory, { recursive: true });
   }
 }
-export async function fingerprint(root) {
+/** Project content hash; `exclude` lists project-relative directories (e.g. the prototype) owned by another version stream. */
+export async function fingerprint(root, { exclude = [] } = {}) {
   root = await realpath(root);
   const files = {};
   const ignored = new Set(['.git', '.protoflow', 'node_modules', 'test-results', 'playwright-report']);
+  const excluded = exclude.map(entry => entry.split(path.sep).join('/').replace(/^\.\/|\/+$/g, ''));
   const visiting = new Set();
   async function walk(relative = '') {
     const directory = relative ? await projectPath(root, relative) : root;
@@ -74,6 +78,7 @@ export async function fingerprint(root) {
     for (const item of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       if (ignored.has(item.name)) continue;
       const name = relative ? `${relative}/${item.name}` : item.name;
+      if (excluded.includes(name)) continue;
       const location = await projectPath(root, name);
       let entry = item;
       if (item.isSymbolicLink()) {

@@ -8,6 +8,7 @@
 session.active → session.checkpointed → manifest
 manifest → context → execution
 manifest → verification.PASS | FAIL | NOT_RUN
+manifest 依建立順序排隊；應用端只處理最早未 PASS 的版本（queue.current），其他版本 → BLOCKED
 verification → review.pending → approved | rejected | changes_requested
 review.approved + fresh evidence → baseline.approved
 repair → READY_FOR_REVIEW | NEEDS_REVIEW
@@ -17,8 +18,10 @@ repair → READY_FOR_REVIEW | NEEDS_REVIEW
 
 ```text
 .protoflow/
-├── active.lock/owner.json
+├── active.lock/owner.json   # 應用端操作
+├── design.lock/owner.json   # 設計端 session／checkpoint／watch
 ├── sessions/<id>.json       # 修改前／後的原型快照
+├── versions/<manifest-id>/  # 該原型版本的凍結副本：files/ 與 index.json
 ├── manifests/<id>.json      # changes, mappings, L0–L3, scoped Git diff
 ├── contexts/<id>.json       # Context / integration / execution records
 ├── verifications/<id>.json  # checks + projectHash + artifactHashes

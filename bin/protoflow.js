@@ -6,12 +6,18 @@ import { initProject, installSkill } from '../src/install.js';
 import { loadConfig } from '../src/config.js';
 import { startSession, checkpoint, watch, listSessions } from '../src/sessions.js';
 import { withLock, readJson, projectPath } from '../src/util.js';
+import { detectIntegrations, integrationNotices } from '../src/integrations.js';
+import { suggestMappings } from '../src/mappings.js';
+import { versionQueue } from '../src/queue.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
 
 const help = `ProtoFlow 0.1 — shared prototype-driven engineering engine
 Usage: protoflow <command> [action] --project <path> [options]
   init [--prototype-dir prototype]       Create project config + AGENTS convention
-  install [--personal]                   Install instruction-only Codex Skill
+  install [--personal] [--skip-integrations]
+                                         Install the Codex Skill, then Spec Kit + BMad
+                                         (argv from adapters.<id>.install; null skips)
+  mappings suggest                       Draft mappings from prototype pages/resources
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
   checkpoint [--session id] [--level L0..L3] [--summary text]
@@ -23,13 +29,16 @@ Usage: protoflow <command> [action] --project <path> [options]
   review create --manifest id --verification id
   review approve|reject|request-changes --review id --reviewer name [--notes text]
   baseline create --review id | show [--baseline id]
-  status                                List sessions + latest baseline
-All output is JSON. Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW.
+  queue                                  Prototype versions in order; the application works on 'current'
+  status                                Sessions, latest baseline, version queue, Spec Kit/BMad
+All output is JSON. Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW,
+3 BLOCKED: context/prepare/execute/verify/repair target a version other than the
+queue's current one; versions are accepted in checkpoint order (policy.sequentialVersions).
 External commands are argv arrays, run without a shell. Nothing commits or pushes.`;
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
     ...Object.fromEntries(['prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -39,7 +48,7 @@ try {
     const requireOption = key => { if (!values[key]) throw new Error(`--${key} is required`); return values[key]; };
     const operation = async () => {
       if (command === 'init') return initProject(root, { prototypeDir: values['prototype-dir'] });
-      if (command === 'install') return installSkill(root, { personal: values.personal, sourceDir: values['source-dir'], discoveryDir: values['discovery-dir'] });
+      if (command === 'install') return installSkill(root, { personal: values.personal, sourceDir: values['source-dir'], discoveryDir: values['discovery-dir'], integrations: values['skip-integrations'] ? false : undefined });
       const config = await loadConfig(root);
       switch (command) {
         case 'session':
@@ -73,17 +82,32 @@ try {
             return values.baseline || latest.id ? loadArtifact(root, 'baselines', values.baseline ?? latest.id) : latest;
           }
           throw new Error('Use baseline create|show');
-        case 'status': return { sessions: await listSessions(root), baseline: await readJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: null }) };
+        case 'mappings':
+          if (action === 'suggest') return suggestMappings(root, config);
+          throw new Error('Use mappings suggest');
+        case 'queue': return versionQueue(root, config);
+        case 'status': {
+          const integrations = await detectIntegrations(root);
+          return { sessions: await listSessions(root), baseline: await readJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: null }), queue: await versionQueue(root, config), integrations, notices: integrationNotices(integrations) };
+        }
         default: throw new Error(`Unknown command: ${command}`);
       }
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
-    const result = await withLock(root, operation);
+    // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
+    const result = await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     console.log(JSON.stringify(result, null, 2));
+    // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.
+    for (const notice of result?.notices ?? []) console.error(`ProtoFlow: ${notice}`);
     if (result?.status === 'FAIL') process.exitCode = 1;
     else if (['NOT_RUN', 'NEEDS_REVIEW'].includes(result?.status)) process.exitCode = 2;
   }
 } catch (error) {
-  console.error(JSON.stringify({ status: 'ERROR', error: error.message }));
-  process.exitCode = 1;
+  if (error.code === 'VERSION_ORDER') {
+    console.error(JSON.stringify({ status: 'BLOCKED', error: error.message, queue: error.queue }));
+    process.exitCode = 3;
+  } else {
+    console.error(JSON.stringify({ status: 'ERROR', error: error.message }));
+    process.exitCode = 1;
+  }
 }

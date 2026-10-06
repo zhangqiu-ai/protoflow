@@ -23,35 +23,39 @@ async function target(t, content = '<main id="card">Hello</main>') {
 }
 test('context requires mapped changes and remains dry without explicit execution', async t => {
   const { root, config, manifest } = await target(t);
-  const context = await createContext(root, config, manifest.id);
+  // Planning gates for later versions are exercised directly; version ordering is tested in queue.test.js.
+  const unordered = { ...config, policy: { ...config.policy, sequentialVersions: false } };
+  const context = await createContext(root, unordered, manifest.id);
   assert.equal(context.mappings[0].component, 'app.html');
-  const dry = await executeContext(root, config, context.id);
+  const dry = await executeContext(root, unordered, context.id);
   assert.equal(dry.status, 'NOT_RUN');
   await writeFile(path.join(root, 'app.html'), 'User edited');
-  await assert.rejects(executeContext(root, config, context.id, { execute: true }), /stale/);
-  const next = await startSession(root, config);
+  await assert.rejects(executeContext(root, unordered, context.id, { execute: true }), /stale/);
+  const next = await startSession(root, unordered);
   await writeFile(path.join(root, 'prototype/new.html'), '<aside>Unknown</aside>');
-  const unmapped = await checkpoint(root, config, { sessionId: next.id });
-  await assert.rejects(createContext(root, config, unmapped.id), /Map changed/);
+  const unmapped = await checkpoint(root, unordered, { sessionId: next.id });
+  await assert.rejects(createContext(root, unordered, unmapped.id), /Map changed/);
 });
 test('L2 specification and L3 human architecture decisions are separate mandatory gates', async t => {
   const { root, config } = await target(t);
-  const session = await startSession(root, config);
+  // Planning gates for later versions are exercised directly; version ordering is tested in queue.test.js.
+  const unordered = { ...config, policy: { ...config.policy, sequentialVersions: false } };
+  const session = await startSession(root, unordered);
   await writeFile(path.join(root, 'prototype/index.html'), '<main id="card"><script>fetch("/api")</script></main>');
-  const l2 = await checkpoint(root, config, { sessionId: session.id });
+  const l2 = await checkpoint(root, unordered, { sessionId: session.id });
   assert.equal(l2.level, 'L2');
-  await assert.rejects(createContext(root, config, l2.id), /requires --spec/);
+  await assert.rejects(createContext(root, unordered, l2.id), /requires --spec/);
   await writeFile(path.join(root, 'spec.md'), '# Feature\nAcceptance: loads data and shows failures.');
-  assert.equal((await createContext(root, config, l2.id, { spec: 'spec.md' })).spec.path, 'spec.md');
-  const next = await startSession(root, config);
+  assert.equal((await createContext(root, unordered, l2.id, { spec: 'spec.md' })).spec.path, 'spec.md');
+  const next = await startSession(root, unordered);
   await writeFile(path.join(root, 'prototype/index.html'), '<main id="card">Replace authentication permission system</main>');
-  const l3 = await checkpoint(root, config, { sessionId: next.id });
+  const l3 = await checkpoint(root, unordered, { sessionId: next.id });
   assert.equal(l3.level, 'L3');
-  await assert.rejects(createContext(root, config, l3.id, { spec: 'spec.md' }), /requires --adr/);
+  await assert.rejects(createContext(root, unordered, l3.id, { spec: 'spec.md' }), /requires --adr/);
   await writeFile(path.join(root, 'adr.json'), JSON.stringify({ status: 'approved', reviewer: 'Test human fixture', manifestHash: 'wrong', decision: 'Preserve current auth' }));
-  await assert.rejects(createContext(root, config, l3.id, { spec: 'spec.md', adr: 'adr.json' }), /human approval/);
+  await assert.rejects(createContext(root, unordered, l3.id, { spec: 'spec.md', adr: 'adr.json' }), /human approval/);
   await writeFile(path.join(root, 'adr.json'), JSON.stringify({ status: 'approved', reviewer: 'Test human fixture', manifestHash: hash(l3), decision: 'Preserve current auth' }));
-  const context = await createContext(root, config, l3.id, { spec: 'spec.md', adr: 'adr.json' });
+  const context = await createContext(root, unordered, l3.id, { spec: 'spec.md', adr: 'adr.json' });
   assert.equal(context.adr.path, 'adr.json');
 });
 test('missing checks stay NOT_RUN and can never approve or create baseline', async t => {
@@ -76,14 +80,22 @@ test('planning adapter validates actual produced artifact paths, not just exit z
   assert.equal(result.status, 'PASS');
   assert.equal(result.response.evidence[0].hash, hash('Acceptance criteria and tests'));
 });
-test('executor records process results and rejects prototype modification', async t => {
+test('executor fails if it alters the frozen version; live prototype edits are recorded, not attributed', async t => {
   const { root, config, manifest } = await target(t);
-  config.adapters.codex.command = { argv: [process.execPath, '-e', 'process.stdin.resume(); require("fs").writeFileSync("prototype/index.html", "Agent changed design")'] };
+  const frozen = `.protoflow/versions/${manifest.id}/files/prototype/index.html`;
+  config.adapters.codex.command = { argv: [process.execPath, '-e', `process.stdin.resume(); require("fs").writeFileSync(${JSON.stringify(frozen)}, "Agent changed design")`] };
   const context = await createContext(root, config, manifest.id);
   const result = await executeContext(root, config, context.id, { execute: true });
   assert.equal(result.status, 'FAIL');
-  assert.match(result.result.error, /changed prototype/);
-  await assert.rejects(verify(root, config, manifest.id), /checkpoint/);
+  assert.match(result.result.error, /Executor changed the frozen prototype version/);
+  await assert.rejects(verify(root, config, manifest.id), /version store changed/);
+
+  const second = await target(t);
+  second.config.adapters.codex.command = { argv: [process.execPath, '-e', 'process.stdin.resume(); require("fs").writeFileSync("prototype/index.html", "Designer kept working")'] };
+  const concurrent = await executeContext(second.root, second.config, (await createContext(second.root, second.config, second.manifest.id)).id, { execute: true });
+  assert.equal(concurrent.status, 'PASS');
+  assert.equal(concurrent.livePrototypeChanged, true);
+  assert.equal((await verify(second.root, second.config, second.manifest.id)).prototypeVersion.manifestId, second.manifest.id);
 });
 test('repair does not retry NOT_RUN checks and escalates to pending human review', async t => {
   const { root, config, manifest } = await target(t);
