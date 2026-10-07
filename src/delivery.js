@@ -75,7 +75,9 @@ export async function syncDeliveries(root, config, { worktree } = {}) {
     const delivery = { id: id('DLV'), createdAt: new Date().toISOString(), versions: pending.map(entry => entry.manifestId), shas: pending.map(entry => entry.sha), status: 'PENDING', steps: {} };
     try {
       if (config.policy?.autoApprove) delivery.approval = await approve(root, config, worktree, last);
-      await git(worktree, ['add', '-A', '--', '.', ...EXCLUDED.map(entry => `:(exclude)${entry}`)]);
+      // Stage, then unstage exclusions: naming a gitignored path in an add pathspec makes git exit non-zero.
+      await git(worktree, ['add', '-A', '--', '.']);
+      await git(worktree, ['reset', '-q', '--', ...EXCLUDED]);
       const staged = await runCommand(worktree, { argv: ['git', 'diff', '--cached', '--quiet'] });
       if (staged.exitCode === 1) {
         const subject = pending.length === 1 ? `ProtoFlow: implement prototype ${last.sha.slice(0, 7)}` : `ProtoFlow: implement prototypes ${pending[0].sha.slice(0, 7)}..${last.sha.slice(0, 7)}`;

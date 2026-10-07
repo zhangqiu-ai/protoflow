@@ -52,6 +52,8 @@ async function fixture(t, { merge = 'auto', versions = 1 } = {}) {
     await git(dir, 'config', 'user.name', 'Fixture');
   }
   await fs.writeFile(path.join(root, 'README.md'), 'app\n');
+  // Mirrors real projects: runner state and test output are gitignored, but a node_modules symlink is not matched by 'node_modules/'.
+  await fs.writeFile(path.join(root, '.gitignore'), 'node_modules/\n.protoflow/\ntest-results/\nplaywright-report/\n');
   await git(root, 'add', '.');
   await git(root, 'commit', '-q', '-m', 'init');
   await git(root, 'push', '-q', 'origin', 'HEAD:main');
