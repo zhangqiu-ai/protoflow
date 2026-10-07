@@ -94,7 +94,7 @@ export async function prepareIntegration(root, config, manifestId, adapter) {
   }
   return persist(root, 'contexts', { schemaVersion: 1, id: id('INT'), createdAt: date(), request, result, response, status: result.status });
 }
-export async function executeContext(root, config, contextId, { execute = false, repair = null } = {}) {
+export async function executeContext(root, config, contextId, { execute = false, repair = null, signal, onBeforeSpawn, onStart } = {}) {
   const context = await loadArtifact(root, 'contexts', contextId);
   await assertCurrentVersion(root, config, context.manifestId);
   const { manifest } = await manifestVersion(root, config, context.manifestId);
@@ -107,25 +107,46 @@ export async function executeContext(root, config, contextId, { execute = false,
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: 'Use --execute after configuring the Codex adapter' };
   const command = config.adapters?.codex?.command;
   const before = await snapshot(root, config);
-  const result = await runCommand(root, command, request);
+  const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart });
   try { await loadVersion(root, config, manifest); }
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
   // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.
   const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
   return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config) });
 }
-export async function verify(root, config, manifestId) {
+export async function verify(root, config, manifestId, { signal, onBeforeSpawn, onStart, onFinish } = {}) {
   await assertCurrentVersion(root, config, manifestId);
   const { manifest, version } = await manifestVersion(root, config, manifestId);
   const verificationId = id('VER');
   const directory = await projectPath(root, `.protoflow/artifacts/${verificationId}`);
   await mkdir(directory, { recursive: true });
+  const runPhase = async (phase, command) => {
+    let pid = null, started = false;
+    const result = await runCommand(root, command, null, {
+      signal, onBeforeSpawn: async () => { started = true; await onBeforeSpawn?.(phase); },
+      onStart: async childPid => { pid = childPid; await onStart?.(phase, childPid); }
+    });
+    if (started) await onFinish?.(phase, pid, result);
+    if (result.processGroupActive) {
+      const error = new Error(`Verification ${phase} subprocess group remains active; stop it before further verification or repair`);
+      error.code = 'PROCESS_GROUP_ACTIVE'; error.phase = phase; error.result = result;
+      throw error;
+    }
+    if (signal?.aborted) {
+      const error = new Error(`STOPPED: verification ${phase} was interrupted`);
+      error.code = 'RUNNER_STOPPED'; error.phase = phase; error.result = result;
+      throw error;
+    }
+
+    return result;
+  };
   // Build may produce project assets. Bind evidence after build, before acceptance.
-  const build = await runCommand(root, config.verification?.build);
+  const build = await runPhase('build', config.verification?.build);
   const before = await applicationFingerprint(root, config);
-  const functional = await runCommand(root, config.verification?.functional);
+  const functional = await runPhase('functional', config.verification?.functional);
   const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
-  const visual = await verifyVisual(root, config, directory, { version, liveMatches });
+  if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
+  const visual = await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
   const missing = manifest.mappings.filter(mapping => !covered.has(mapping));
   const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
@@ -173,26 +194,29 @@ async function assertReviewFresh(root, config, review) {
   await assertPlanningFresh(root, manifest, review.planning);
   return { manifest, verification };
 }
-export async function decideReview(root, config, reviewId, { status, reviewer, notes = '', findings = [] }) {
+export async function decideReview(root, config, reviewId, { status, reviewer, reviewerKind = 'human', notes = '', findings = [] }) {
   if (!['approved', 'rejected', 'changes_requested'].includes(status)) throw new Error('Invalid review decision');
   if (!reviewer?.trim()) throw new Error('--reviewer is required');
+  if (!['human', 'automated'].includes(reviewerKind)) throw new Error('reviewerKind must be human or automated');
+  // Automated approval is an explicit project policy and is always recorded as automated, never as a person.
+  if (reviewerKind === 'automated' && (config.policy?.autoApprove !== true || status !== 'approved')) throw new Error('Automated review decisions require policy.autoApprove and may only approve verified changes');
   if (!Array.isArray(findings)) throw new Error('findings must be an array');
   if (findings.some(finding => !finding || typeof finding !== 'object' || typeof finding.description !== 'string' || !finding.description.trim() || !['critical', 'high', 'normal', 'low'].includes(finding.severity))) throw new Error('Each finding requires description and severity (critical|high|normal|low)');
   const review = await loadArtifact(root, 'reviews', reviewId);
   if (review.status !== 'pending') throw new Error('Review already decided; create a new review');
   if (status === 'approved') await assertReviewFresh(root, config, review);
-  return persist(root, 'reviews', { ...review, status, reviewer, reviewedAt: date(), notes, findings });
+  return persist(root, 'reviews', { ...review, status, reviewer, reviewerKind, reviewedAt: date(), notes, findings });
 }
 export async function createBaseline(root, config, reviewId) {
   const review = await loadArtifact(root, 'reviews', reviewId);
-  if (review.status !== 'approved') throw new Error('Baseline requires an approved human review');
+  if (review.status !== 'approved') throw new Error('Baseline requires an approved review');
   const { manifest, verification } = await assertReviewFresh(root, config, review);
   const latest = await readJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: null });
   if (latest.id) {
     const previous = await loadArtifact(root, 'baselines', latest.id);
     if (previous.reviewId === reviewId) return previous;
   }
-  const data = { schemaVersion: 1, id: id('UI'), createdAt: date(), parent: latest.id, status: 'approved', manifestId: manifest.id, manifestHash: hash(manifest), reviewId, reviewHash: hash(review), reviewer: review.reviewer,
+  const data = { schemaVersion: 1, id: id('UI'), createdAt: date(), parent: latest.id, status: 'approved', manifestId: manifest.id, manifestHash: hash(manifest), reviewId, reviewHash: hash(review), reviewer: review.reviewer, reviewerKind: review.reviewerKind ?? 'human',
     prototype: { hash: manifest.afterHash, git: manifest.git?.head ?? null }, application: { hash: verification.project.hash, git: verification.git.head }, verificationId: verification.id, verificationHash: hash(verification),
     spec: review.planning?.spec ?? null, adr: review.planning?.adr ?? null, changed: manifest.mappings, evidence: { build: verification.build.status, functional: verification.functional.status, visual: verification.visual.status, scenes: verification.visual.scenes, artifacts: verification.visual.artifacts } };
   await persist(root, 'baselines', data);

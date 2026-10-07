@@ -8,16 +8,26 @@ import { startSession, checkpoint, watch, listSessions } from '../src/sessions.j
 import { withLock, readJson, projectPath } from '../src/util.js';
 import { detectIntegrations, integrationNotices } from '../src/integrations.js';
 import { suggestMappings } from '../src/mappings.js';
+import { scanSource, sourceStatus } from '../src/source.js';
+import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
+import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
 
 const help = `ProtoFlow 0.1 — shared prototype-driven engineering engine
 Usage: protoflow <command> [action] --project <path> [options]
   init [--prototype-dir prototype]       Create project config + AGENTS convention
+       [--repository url --branch name --path dir [--start-sha sha]]
+                                         Also configure a Git prototype source
+                                         (--branch and --path required with --repository)
   install [--personal] [--skip-integrations]
                                          Install the Codex Skill, then Spec Kit + BMad
                                          (argv from adapters.<id>.install; null skips)
   mappings suggest                       Draft mappings from prototype pages/resources
+  source scan|status                     Fetch Git source, freeze new commits, show progress
+  runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
+  delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
+  doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
   checkpoint [--session id] [--level L0..L3] [--summary text]
@@ -39,7 +49,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
-    ...Object.fromEntries(['prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -47,10 +57,32 @@ try {
     const root = path.resolve(values.project);
     const requireOption = key => { if (!values[key]) throw new Error(`--${key} is required`); return values[key]; };
     const operation = async () => {
-      if (command === 'init') return initProject(root, { prototypeDir: values['prototype-dir'] });
+      if (command === 'init') return initProject(root, { prototypeDir: values['prototype-dir'], source: values.repository ? { kind: 'git', repository: values.repository, branch: requireOption('branch'), path: requireOption('path'), ...(values['start-sha'] ? { startSha: values['start-sha'] } : {}) } : undefined });
       if (command === 'install') return installSkill(root, { personal: values.personal, sourceDir: values['source-dir'], discoveryDir: values['discovery-dir'], integrations: values['skip-integrations'] ? false : undefined });
       const config = await loadConfig(root);
+      if (config.source && ['watch', 'checkpoint', 'session'].includes(command) && !(command === 'session' && action === 'list')) throw new Error('Git source configured: use source scan and runner start; local prototype edits are not application triggers');
       switch (command) {
+        case 'source':
+          if (action === 'scan') return scanSource(root, config);
+          if (action === 'status') return sourceStatus(root);
+          throw new Error('Use source scan|status');
+        case 'doctor': return doctor(root, config);
+        case 'runner':
+          if (action === 'status') return runnerStatus(root);
+          if (action === 'retry') return retryRunner(root);
+          if (action === 'configure') return configureRunner(root, config);
+          if (action === 'start') {
+            const controller = new AbortController();
+            const stop = () => controller.abort();
+            process.once('SIGINT', stop); process.once('SIGTERM', stop);
+            try { return await startRunner(root, config, { once: values.once, signal: controller.signal, onEvent: event => console.log(JSON.stringify(event)) }); }
+            finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+          }
+          throw new Error('Use runner start|status|retry|configure');
+        case 'delivery':
+          if (action === 'sync') return syncDeliveries(root, config);
+          if (action === 'status') return deliveryStatus(root);
+          throw new Error('Use delivery sync|status');
         case 'session':
           if (action === 'start') return startSession(root, config, { label: values.label });
           if (action === 'list') return listSessions(root);
@@ -95,11 +127,13 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const result = await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
+    const readOnly = ['queue', 'status', 'doctor'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status';
+    const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     console.log(JSON.stringify(result, null, 2));
     // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.
     for (const notice of result?.notices ?? []) console.error(`ProtoFlow: ${notice}`);
-    if (result?.status === 'FAIL') process.exitCode = 1;
+    if (['FAIL', 'SCAN_FAILED'].includes(result?.status)) process.exitCode = 1;
+    else if (result?.status === 'BLOCKED') process.exitCode = 3;
     else if (['NOT_RUN', 'NEEDS_REVIEW'].includes(result?.status)) process.exitCode = 2;
   }
 } catch (error) {

@@ -7,3 +7,6 @@ export { INTEGRATIONS, detectIntegrations, installIntegrations } from './integra
 export { suggestMappings } from './mappings.js';
 export { versionQueue, assertCurrentVersion, VersionOrderError } from './queue.js';
 export { freezeVersion, loadVersion } from './versions.js';
+
+export { scanSource, sourceStatus, gitSnapshot } from './source.js';
+export { startRunner, runOnce, retryRunner, configureRunner, runnerStatus, doctor } from './runner.js';

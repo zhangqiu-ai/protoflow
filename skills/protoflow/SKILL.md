@@ -13,7 +13,17 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 
 每個 mapping 的 `prototypeFiles` 明確包含其頁面與消費的共用資源；修改共用檔案時，核對所有命中的 mapping 及相應驗證場景。引擎採檔案粒度的保守展開，selector 只定位／驗證，不能根據某個 DOM 區塊、CSS 變數或 import 推測引擎已排除其他影響。移動／刪除檔案時同步資源引用、映射、場景與回歸測試；調整後建立新 checkpoint／context，不沿用過期證據。
 
-建立或補齊映射時，先執行 `protoflow mappings suggest --project <root>` 取得依目標專案原型頁面與引用資源產生的草稿；再閱讀應用程式碼，為每個區域填入實際存在的 `component` 與兩邊 selector，必要時把一頁拆成多筆 mapping，並核對 `sharedResources`、`orphanFiles`、`unmappedFiles`。草稿不寫入配置，修改配置前向使用者說明對應關係。拆分方法見共享引擎的 `docs/prototype-structure.md`；`examples/modular/` 只是示範專案。checkpoint 保存 hash 與 Git evidence，不提供 Git 版本選取／鎖定，也不自動 commit。
+建立或補齊映射時，先執行 `protoflow mappings suggest --project <root>` 取得依目標專案原型頁面與引用資源產生的草稿；再閱讀應用程式碼，為每個區域填入實際存在的 `component` 與兩邊 selector，必要時把一頁拆成多筆 mapping，並核對 `sharedResources`、`orphanFiles`、`unmappedFiles`。草稿不寫入配置，修改配置前向使用者說明對應關係。拆分方法見共享引擎的 `docs/prototype-structure.md`；`examples/modular/` 只是示範專案。本機 checkpoint 保存 hash 與 Git evidence；Git source checkpoint 額外固定來源 SHA，不自動 commit。
+
+## GitHub 提交來源與本機 Runner
+
+配置 `source.kind: git` 時，正式應用由指定 GitHub repo／branch／path 的提交觸發；不要啟動本機 `watch` 或用現行 prototype 檔案建立應用版本。讀共享引擎 `docs/git-runner.md` 與 `templates/protoflow.git.config.json`。`init --repository URL --branch BRANCH --path PATH [--start-sha SHA]` 可接入新專案，既有設定須明確合併；安裝 Skill 不會啟動背景程序。
+
+先 `doctor`、`source scan`、`queue`，核對 frozen checkpoint 與 mapping，再於既有授權範圍啟動 `runner start [--once]`。Runner 在隔離 worktree 逐筆 execute／verify／bounded repair，Skill 本身不常駐；不用開機服務或擴大登入權限。source state 的 scannedSha 與 completedSha 不同，只有前版全部 PASS 才可前進。`runner status` 顯示每版 attempts、verificationId 與 worktree；截圖須綁定 manifestHash／prototypeHash／Git SHA。
+
+BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實際錯誤、保存已有修改，解決原因後才 `runner retry`。操作設定修改需先 `runner configure` 保存前後設定綁定，再 retry；不能變更來源與 mapping 所有權。不刪除／偽造進度、不跳到較新 SHA、不關閉 FIFO。歷史重寫應明確報告並停止。GitHub 推送／新建遠端分支必須在使用者已授權的具體範圍；本機 Git fixture 必須標記為 fixture，不能冒充真實來源驗收。L2／L3 規格與人工 ADR 邊界沿用既有流程，Runner 可配置 `runner.spec`／`runner.adr`。
+
+以下 session／watch 步驟只供未配置 Git source 的相容本機設計流程。
 
 ## 工作流程
 
@@ -25,7 +35,7 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 6. 配置 Codex adapter 後，執行 `protoflow execute --project <root> --context <id>` 檢查乾跑 request，再於授權範圍內加上 `--execute` 實際執行；也可由目前 Codex 依上下文直接實作，再執行 verify。
 7. `protoflow verify --project <root> --manifest <id>` 執行 build、functional、visual，原型端使用該版本的凍結副本。PASS 後佇列前進到下一個版本。新增／變更／修復功能需維護目標專案 Node.js Playwright 回歸測試並使用 runner。尚未配置或尚未執行的驗證是 `NOT_RUN`，不能當作通過。
 8. 失敗時執行 `protoflow repair --project <root> --manifest <id> --execute`；它依配置的 `maxRepairAttempts` 停止。讀取每次驗證與修復記錄，上限耗盡或缺少外部 adapter 時報告具體阻塞。
-9. `protoflow review create --project <root> --manifest <id> --verification <id>` 建立人工 Review。將實際差異與驗證證據呈現給使用者；只有明確人類批准後才執行 `protoflow review approve --project <root> --review <id> --reviewer <human-id>`。不要將自己的判斷登記為人類批准。
+9. `protoflow review create --project <root> --manifest <id> --verification <id>` 建立人工 Review。將實際差異與驗證證據呈現給使用者；只有明確人類批准後才執行 `protoflow review approve --project <root> --review <id> --reviewer <human-id>`。不要將自己的判斷登記為人類批准。專案配置 `policy.autoApprove: true` 時，Runner 交付流程會自動以 `ai:protoflow-runner` 批准並標記 `automated`；不要手動用 `--reviewer` 模擬此動作，也不要把 L3 ADR 當成可自動批准。
 10. `protoflow baseline create --project <root> --review <id>` 保存已批准的 UI Baseline。內容或驗證變更會使舊批准失效，應重新 verify／review。
 
 執行時以 CLI 回傳的 session ID 與證據路徑為準；先使用 `protoflow --help` 確認命令。不得自動 commit、push、部署或覆寫既有 Baseline；報告通過、失敗、未執行與仍需人類確認的事項。

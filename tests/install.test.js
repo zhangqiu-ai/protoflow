@@ -129,3 +129,13 @@ test('init rejects an unresolved AGENTS symlink without creating its external ta
   await assert.rejects(initProject(root));
   assert.deepEqual(await readdir(outside), []);
 });
+
+test('CLI help documents the Git source options accepted by init', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../bin/protoflow.js', import.meta.url));
+  const { stdout } = await promisify(execFile)(process.execPath, [cli, '--help']);
+  const init = stdout.slice(stdout.indexOf('  init '), stdout.indexOf('  install '));
+  for (const flag of ['--prototype-dir', '--repository', '--branch', '--path', '--start-sha']) assert.ok(init.includes(flag), `init help lacks ${flag}`);
+});

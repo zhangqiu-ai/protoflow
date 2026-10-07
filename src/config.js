@@ -1,3 +1,4 @@
+import { validateSource } from './source.js';
 import Ajv from 'ajv';
 import { readJson, projectPath } from './util.js';
 
@@ -6,12 +7,16 @@ const selectorPair = { type: 'object', required: ['prototype', 'application'], p
 export const configSchema = {
   type: 'object', required: ['schemaVersion', 'prototypeDir', 'mappings'], additionalProperties: false,
   properties: {
+    source: { type: 'object', required: ['kind', 'repository', 'branch', 'path'], additionalProperties: false, properties: {
+      kind: { const: 'git' }, repository: { type: 'string', minLength: 1 }, branch: { type: 'string', minLength: 1 }, path: { type: 'string', minLength: 1 }, startSha: { type: 'string', pattern: '^[a-f0-9]{40}$' }
+    } },
+    runner: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 1000 }, applicationRef: { type: 'string', minLength: 1 }, setup: command, spec: { type: 'string', minLength: 1 }, adr: { type: 'string', minLength: 1 }, delivery: { type: 'object', additionalProperties: false, required: ['branch', 'baseBranch'], properties: { remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }, branch: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*$' }, baseBranch: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*$' }, merge: { enum: ['auto', 'none'] } } } } },
     schemaVersion: { const: 1 }, prototypeDir: { type: 'string', minLength: 1 },
     mappings: { type: 'array', items: { type: 'object', required: ['id', 'prototypeFiles', 'prototype', 'application', 'component'], additionalProperties: false, properties: {
       id: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$' }, prototypeFiles: { type: 'array', minItems: 1, items: { type: 'string' } }, prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 }, component: { type: 'string', minLength: 1 }, priority: { enum: ['critical', 'high', 'normal', 'low'] }, geometryTolerance: { type: 'number', minimum: 0 }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }
     } } },
     classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
-    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' } } },
+    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
     verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: command } },
     adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command } : { command, install: command } }])) },
@@ -29,7 +34,9 @@ const validate = new Ajv({ allErrors: true, strict: false }).compile(configSchem
 export async function loadConfig(root) {
   const config = await readJson(await projectPath(root, 'protoflow.config.json'));
   if (!validate(config)) throw new Error(`Invalid ProtoFlow config: ${JSON.stringify(validate.errors)}`);
+  if (config.source) validateSource(config.source);
   await projectPath(root, config.prototypeDir);
+  for (const evidence of [config.runner?.spec, config.runner?.adr].filter(Boolean)) await projectPath(root, evidence);
   for (const mapping of config.mappings) {
     await projectPath(root, mapping.component);
     for (const file of mapping.prototypeFiles) await projectPath(root, file);
