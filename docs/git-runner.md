@@ -67,7 +67,33 @@ protoflow runner start --project /path/to/app --once
 
 `.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。
 
-Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；人類 Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。
+Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；未啟用 `policy.autoApprove` 時，Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。
+
+## 自動交付（commit → PR → 合併）
+
+設定 `runner.delivery` 後，每個 PASS 版本在 Runner 前進前完成交付：
+
+```json
+{
+  "policy": {"autoApprove": true},
+  "runner": {"delivery": {"remote": "origin", "branch": "protoflow/delivery", "baseBranch": "main", "merge": "auto"}}
+}
+```
+
+1. `policy.autoApprove: true` 時，以 `ai:protoflow-runner` 建立 `reviewerKind: automated` 的 Review 與 Baseline，綁定該版 verification；紀錄、commit trailer 與 PR 留言都明示這是自動批准，不是真人。
+2. 在隔離 worktree commit 應用改動，排除 `.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`。訊息含 `Prototype-Commit`、`Manifest`、`Verification` 與 `Approved-By` trailer。下一版開始前必須先 commit 上一版，所以穩定狀態下一個 commit 對應一個原型版本；啟用前已累積的 PASS 版本合成一個 commit 並逐一列出。
+3. 推送到 `delivery.branch`，重用或建立指向 `baseBranch` 的 PR，留言版本與驗證摘要。
+4. `merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併，只合併交付的確切 commit；`"none"` 留給人合併。
+
+push、PR、留言或合併失敗保存在 `.protoflow/delivery/state.json`，`protoflow delivery sync` 從失敗步驟續做，不重複 commit 或留言；`protoflow delivery status` 讀取紀錄。需要 `gh` 已登入且對目標 repo 有寫入權。主 checkout 不會被 pull 或修改。
+
+### 定期巡查（Codex 自動化）
+
+在 Codex app 建立 heartbeat 自動化（例如每 30 分鐘），工作目錄為目標專案，prompt 範例：
+
+> 在 <目標專案> 執行 `node <engine>/bin/protoflow.js runner start --once --project .`，再執行 `delivery sync` 與 `delivery status`。只根據 JSON 回報：新處理的原型 SHA、驗證結果、PR 連結與合併 commit；BLOCKED／FAIL 時回報原因與需要的操作。無新版本且無失敗時保持安靜。不要修改設定、證據或原型，不要手動批准或合併。
+
+Codex 會在該自動化的對話串回覆結果（未讀提示點）。自動化需在 Codex app 中建立；引擎不寫入 Codex 設定。
 
 ## 可重複測試
 

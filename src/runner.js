@@ -7,6 +7,7 @@ import { createContext, executeContext, verify, loadArtifact } from './workflow.
 import { versionQueue } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, saveSourceState, validateSource } from './source.js';
+import { assertDelivered, syncDeliveries } from './delivery.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 
 const runnerPath = '.protoflow/runner/state.json';
@@ -112,6 +113,9 @@ async function exportEvidence(root, worktree, report) {
 export async function runOnce(root, config, { signal, onEvent = () => {} } = {}) {
   if (config.policy?.sequentialVersions === false) throw new Error('Git runner requires sequentialVersions');
   if (signal?.aborted) return { status: 'STOPPED' };
+  // Commit earlier accepted versions first (before reading state) so every commit holds a single version.
+  try { await assertDelivered(root, config); }
+  catch (error) { return { status: 'BLOCKED', reason: error.message }; }
   const state = await sourceStatus(root);
   if (state.status === 'HISTORY_REWRITTEN') throw new Error(state.error);
   if (!state.entries.length) return { status: 'IDLE', reason: 'No scanned checkpoints' };
@@ -128,7 +132,9 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
     if (runner?.status === 'RUNNING') {
       runner.status = 'IDLE'; runner.current = null; await saveRunner(root, runner);
     }
-    return { status: 'IDLE', completedSha: state.completedSha };
+    // Retry pending pushes, pull requests and merges while idle.
+    const delivery = runner?.worktree ? await syncDeliveries(root, config, { worktree: runner.worktree }) : undefined;
+    return { status: 'IDLE', completedSha: state.completedSha, ...(delivery && { delivery }) };
   }
   if (['BLOCKED', 'STOPPED', 'RUNNING'].includes(entry.status)) return { status: 'BLOCKED', manifestId: entry.manifestId, reason: entry.status === 'RUNNING' ? 'Interrupted execution; inspect evidence and run runner retry' : entry.error };
   if (!config.adapters?.codex?.command) return { status: 'NOT_RUN', reason: 'Codex adapter is not configured' };
@@ -149,7 +155,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
     entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;
     await saveSourceState(root, state); await saveRunner(root, runner);
-    return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, recovered: true };
+    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree });
+    return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, recovered: true, delivery };
   }
   if (queue.current?.id !== entry.manifestId) throw new Error(`Runner queue mismatch: expected ${entry.manifestId}, got ${queue.current?.id}`);
   entry.status = 'RUNNING'; entry.startedAt = new Date().toISOString();
@@ -220,7 +227,9 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
     entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;
     await saveSourceState(root, state); await saveRunner(root, runner);
-    return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, worktree: runner.worktree };
+    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree });
+    await onEvent({ event: 'delivered', sha: entry.sha, ...delivery });
+    return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, worktree: runner.worktree, delivery };
   } catch (error) {
     if (currentAttempt) {
       if (currentAttempt.status === 'RUNNING' || signal?.aborted) currentAttempt.status = signal?.aborted ? 'STOPPED' : 'FAIL';

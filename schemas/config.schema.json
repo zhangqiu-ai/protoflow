@@ -86,6 +86,34 @@
         "adr": {
           "type": "string",
           "minLength": 1
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "branch",
+            "baseBranch"
+          ],
+          "properties": {
+            "remote": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+$"
+            },
+            "branch": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+            },
+            "baseBranch": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+            },
+            "merge": {
+              "enum": [
+                "auto",
+                "none"
+              ]
+            }
+          }
         }
       }
     },
@@ -195,6 +223,9 @@
           "type": "boolean"
         },
         "sequentialVersions": {
+          "type": "boolean"
+        },
+        "autoApprove": {
           "type": "boolean"
         }
       }

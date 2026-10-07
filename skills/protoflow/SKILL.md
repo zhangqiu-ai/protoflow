@@ -35,7 +35,7 @@ BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實�
 6. 配置 Codex adapter 後，執行 `protoflow execute --project <root> --context <id>` 檢查乾跑 request，再於授權範圍內加上 `--execute` 實際執行；也可由目前 Codex 依上下文直接實作，再執行 verify。
 7. `protoflow verify --project <root> --manifest <id>` 執行 build、functional、visual，原型端使用該版本的凍結副本。PASS 後佇列前進到下一個版本。新增／變更／修復功能需維護目標專案 Node.js Playwright 回歸測試並使用 runner。尚未配置或尚未執行的驗證是 `NOT_RUN`，不能當作通過。
 8. 失敗時執行 `protoflow repair --project <root> --manifest <id> --execute`；它依配置的 `maxRepairAttempts` 停止。讀取每次驗證與修復記錄，上限耗盡或缺少外部 adapter 時報告具體阻塞。
-9. `protoflow review create --project <root> --manifest <id> --verification <id>` 建立人工 Review。將實際差異與驗證證據呈現給使用者；只有明確人類批准後才執行 `protoflow review approve --project <root> --review <id> --reviewer <human-id>`。不要將自己的判斷登記為人類批准。
+9. `protoflow review create --project <root> --manifest <id> --verification <id>` 建立人工 Review。將實際差異與驗證證據呈現給使用者；只有明確人類批准後才執行 `protoflow review approve --project <root> --review <id> --reviewer <human-id>`。不要將自己的判斷登記為人類批准。專案配置 `policy.autoApprove: true` 時，Runner 交付流程會自動以 `ai:protoflow-runner` 批准並標記 `automated`；不要手動用 `--reviewer` 模擬此動作，也不要把 L3 ADR 當成可自動批准。
 10. `protoflow baseline create --project <root> --review <id>` 保存已批准的 UI Baseline。內容或驗證變更會使舊批准失效，應重新 verify／review。
 
 執行時以 CLI 回傳的 session ID 與證據路徑為準；先使用 `protoflow --help` 確認命令。不得自動 commit、push、部署或覆寫既有 Baseline；報告通過、失敗、未執行與仍需人類確認的事項。

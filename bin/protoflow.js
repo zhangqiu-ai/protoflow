@@ -11,6 +11,7 @@ import { suggestMappings } from '../src/mappings.js';
 import { scanSource, sourceStatus } from '../src/source.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
+import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
 
 const help = `ProtoFlow 0.1 — shared prototype-driven engineering engine
@@ -25,6 +26,7 @@ Usage: protoflow <command> [action] --project <path> [options]
   mappings suggest                       Draft mappings from prototype pages/resources
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
+  delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
   doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
@@ -77,6 +79,10 @@ try {
             finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
           }
           throw new Error('Use runner start|status|retry|configure');
+        case 'delivery':
+          if (action === 'sync') return syncDeliveries(root, config);
+          if (action === 'status') return deliveryStatus(root);
+          throw new Error('Use delivery sync|status');
         case 'session':
           if (action === 'start') return startSession(root, config, { label: values.label });
           if (action === 'list') return listSessions(root);
@@ -121,7 +127,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor'].includes(command) || ['source', 'runner'].includes(command) && action === 'status';
+    const readOnly = ['queue', 'status', 'doctor'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     console.log(JSON.stringify(result, null, 2));
     // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.

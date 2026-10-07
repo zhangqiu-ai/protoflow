@@ -116,6 +116,7 @@ protoflow install --personal --project /path/to/app
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
 | `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
 | `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復 |
+| `delivery sync` / `delivery status` | PASS 版本自動 commit、推送、開 PR、合併（`runner.delivery`）；可選 `policy.autoApprove` 自動批准 |
 | `doctor` | 接入環境診斷 |
 | `session start` / `session list` | 設計會話及修改前快照 |
 | `watch [--once]` | 檔案輪詢、idle debounce、checkpoint |

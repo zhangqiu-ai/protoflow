@@ -11,5 +11,5 @@
 - mapping 依本專案實際元件填寫；可用 `protoflow mappings suggest` 起草，不套用範例的頁面或元件名稱。
 - 新增、變更、修復可由瀏覽器覆蓋的功能時，維護專案內 Node.js Playwright 回歸測試並以 runner 執行。
 - 修復循環以配置的上限停止；記錄真實 build、functional、visual 結果，未執行記錄為 `NOT_RUN`。
-- 人工 Review 與 UI Baseline 必須綁定當前 manifest、prototype、application 與驗證證據；自動代理不得代替人類批准。
+- Review 與 UI Baseline 必須綁定當前 manifest、prototype、application 與驗證證據。只有配置 `policy.autoApprove: true` 時，Runner 才以 `ai:protoflow-runner`（`reviewerKind: automated`）自動批准 PASS 版本；其他情況自動代理不得代替人類批准，任何時候都不得把自動批准登記成真人。L3 ADR 仍需真人決策。
 <!-- protoflow:end -->
