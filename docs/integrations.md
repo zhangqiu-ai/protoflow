@@ -60,7 +60,7 @@
 {"adapters":{"codex":{"command":{"argv":["node","/absolute/shared/protoflow/scripts/codex-adapter.js"],"timeoutMs":120000}}}}
 ```
 
-這是合併到既有配置的片段，不是完整 config。橋接執行 `codex exec --json --sandbox workspace-write -`，從 stdin 傳入 prompt。程序結果、stdout JSONL 與 stderr 保存至 execution evidence；exit zero 不代替產品驗證。官方：[Codex 非互動模式](https://developers.openai.com/codex/noninteractive)。
+這是合併到既有配置的片段，不是完整 config。橋接執行 `codex exec --json --sandbox workspace-write -`，從 stdin 傳入 prompt。可於 adapter argv 指定 `--model MODEL` 與 `--ephemeral`；仍固定 workspace-write，不接受繞過 sandbox 的參數。程序結果、stdout JSONL 與 stderr 保存至 execution evidence；exit zero 不代替產品驗證。官方：[Codex 非互動模式](https://developers.openai.com/codex/noninteractive)。
 
 ## 視覺／功能驗證
 

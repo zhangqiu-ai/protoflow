@@ -2,6 +2,7 @@ import { appendFile, cp, lstat, mkdir, readFile, symlink, writeFile } from 'node
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectPath as safeProjectPath, readJson } from './util.js';
+import { validateSource } from './source.js';
 import { INTEGRATIONS, configuredInstallers, detectIntegrations, installIntegrations, integrationNotices } from './integrations.js';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -45,8 +46,9 @@ function projectPath(root, relative) {
 }
 
 /** Initialize configuration and append the managed contract without replacing user files. */
-export async function initProject(root, { prototypeDir = 'prototype' } = {}) {
+export async function initProject(root, { prototypeDir = 'prototype', source } = {}) {
   const project = path.resolve(root);
+  if (source) validateSource(source);
   projectPath(project, prototypeDir);
   await mkdir(project, { recursive: true });
   const configPath = await safeProjectPath(project, 'protoflow.config.json');
@@ -56,7 +58,7 @@ export async function initProject(root, { prototypeDir = 'prototype' } = {}) {
   const skipped = [];
   let effectivePrototypeDir = prototypeDir;
   try {
-    await writeFile(configPath, `${JSON.stringify(defaultConfig(prototypeDir), null, 2)}\n`, { flag: 'wx' });
+    await writeFile(configPath, `${JSON.stringify({ ...defaultConfig(prototypeDir), ...(source ? { source, runner: { pollMs: 15000 }, adapters: { ...defaultConfig(prototypeDir).adapters, codex: { command: { argv: [process.execPath, path.join(packageRoot, 'scripts/codex-adapter.js')], timeoutMs: 600000 } } } } : {}) }, null, 2)}\n`, { flag: 'wx' });
     created.push(configPath);
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;

@@ -2,7 +2,7 @@
 
 ProtoFlow 是可透過 Codex Skill 接入的原型驅動工程引擎。共享 Node.js 引擎持有流程、協定與驗證；目標專案安裝輕量 Skill、配置及 AGENTS 約定，保留自己的原型、實作和回歸測試。
 
-**v0.1 可執行：**原型目錄監聽、Design Session／checkpoint、Git diff／Change Manifest、L0–L3 路由、Spec Kit／BMad 邊界、Codex 執行接口、瀏覽器視覺驗證、有限修復迴圈、人工 Review 與 UI Baseline。初版採本機 JSON 證據，沒有雲端服務或畫布 UI。
+**目前可執行：**GitHub 原型提交掃描、固定 SHA 與完整資源 checkpoint、持久 FIFO／進度、隔離本機 worktree 的前景 Codex Runner、doctor／離線補抓／阻塞重試，以及相容的原型目錄監聽、Design Session／checkpoint、Git diff／Change Manifest、L0–L3 路由、Spec Kit／BMad 邊界、Codex 執行接口、瀏覽器視覺驗證、有限修復迴圈、人工 Review 與 UI Baseline。初版採本機 JSON 證據，沒有雲端服務或畫布 UI。
 
 ```mermaid
 flowchart LR
@@ -17,6 +17,10 @@ flowchart LR
   V --> R[Human Review]
   R --> B[UI Baseline]
 ```
+
+## GitHub 提交驅動的正式應用
+
+以指定 GitHub repo／branch／path 的新提交逐版實作，Skill 負責接入指引，前景 Runner 依序呼叫 Codex 與獨立驗證。先讀 [本機 Runner 操作與恢復](docs/git-runner.md)，填好 mapping／build／Playwright／visual 後執行 `protoflow doctor`、`protoflow source scan` 與 `protoflow runner start`。前版未 PASS 時後版保持待辦。既有本機 watch 流程保留給未配置 Git source 的設計工作。
 
 ## 安裝共享引擎
 
@@ -110,6 +114,9 @@ protoflow install --personal --project /path/to/app
 |---|---|
 | `init` / `install [--skip-integrations]` | 建立配置與約定／安裝 Skill、Spec Kit 與 BMad |
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
+| `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
+| `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復 |
+| `doctor` | 接入環境診斷 |
 | `session start` / `session list` | 設計會話及修改前快照 |
 | `watch [--once]` | 檔案輪詢、idle debounce、checkpoint |
 | `checkpoint [--session ID]` | 精確 before/after Manifest |

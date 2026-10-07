@@ -25,3 +25,7 @@ protoflow install --personal --project /absolute/path/to/project
 依使用者個人安裝約定，來源目錄為 `/Users/feature/GitHub/skills/protoflow`，另建立 `/Users/feature/.codex/skills/protoflow` 單一 Skill 的 symlink。個人安裝只偵測並提醒 Spec Kit／BMad，不安裝到專案。來源或 discovery 目的地存在時跳過，包括斷裂 symlink；不替換 `.codex/skills` 目錄、不覆寫既有 Skill。可用 CLI `--source-dir`／`--discovery-dir` 指定其他環境的等價目錄。
 
 更新共享引擎不會偷偷更新目標專案的 Skill；更新 instruction package 應先檢查既有目的地與使用者修改，再明確處理。CLI 詳細命令以 `protoflow --help` 為準；[Skill 入口](../skills/protoflow/SKILL.md) 提供 session、驗證、修復、人工評審與 Baseline 的操作流程。
+
+## Git 來源接入
+
+正式應用依 GitHub 提交逐版推進時，使用 [Git Runner 接入](git-runner.md)；`init` 的 `--repository`／`--branch`／`--path` 可生成來源與真實 Codex adapter 設定。Skill 不啟動背景程序，開發者在前景執行 Runner。

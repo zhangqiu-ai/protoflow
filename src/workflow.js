@@ -94,7 +94,7 @@ export async function prepareIntegration(root, config, manifestId, adapter) {
   }
   return persist(root, 'contexts', { schemaVersion: 1, id: id('INT'), createdAt: date(), request, result, response, status: result.status });
 }
-export async function executeContext(root, config, contextId, { execute = false, repair = null } = {}) {
+export async function executeContext(root, config, contextId, { execute = false, repair = null, signal, onBeforeSpawn, onStart } = {}) {
   const context = await loadArtifact(root, 'contexts', contextId);
   await assertCurrentVersion(root, config, context.manifestId);
   const { manifest } = await manifestVersion(root, config, context.manifestId);
@@ -107,25 +107,46 @@ export async function executeContext(root, config, contextId, { execute = false,
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: 'Use --execute after configuring the Codex adapter' };
   const command = config.adapters?.codex?.command;
   const before = await snapshot(root, config);
-  const result = await runCommand(root, command, request);
+  const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart });
   try { await loadVersion(root, config, manifest); }
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
   // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.
   const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
   return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config) });
 }
-export async function verify(root, config, manifestId) {
+export async function verify(root, config, manifestId, { signal, onBeforeSpawn, onStart, onFinish } = {}) {
   await assertCurrentVersion(root, config, manifestId);
   const { manifest, version } = await manifestVersion(root, config, manifestId);
   const verificationId = id('VER');
   const directory = await projectPath(root, `.protoflow/artifacts/${verificationId}`);
   await mkdir(directory, { recursive: true });
+  const runPhase = async (phase, command) => {
+    let pid = null, started = false;
+    const result = await runCommand(root, command, null, {
+      signal, onBeforeSpawn: async () => { started = true; await onBeforeSpawn?.(phase); },
+      onStart: async childPid => { pid = childPid; await onStart?.(phase, childPid); }
+    });
+    if (started) await onFinish?.(phase, pid, result);
+    if (result.processGroupActive) {
+      const error = new Error(`Verification ${phase} subprocess group remains active; stop it before further verification or repair`);
+      error.code = 'PROCESS_GROUP_ACTIVE'; error.phase = phase; error.result = result;
+      throw error;
+    }
+    if (signal?.aborted) {
+      const error = new Error(`STOPPED: verification ${phase} was interrupted`);
+      error.code = 'RUNNER_STOPPED'; error.phase = phase; error.result = result;
+      throw error;
+    }
+
+    return result;
+  };
   // Build may produce project assets. Bind evidence after build, before acceptance.
-  const build = await runCommand(root, config.verification?.build);
+  const build = await runPhase('build', config.verification?.build);
   const before = await applicationFingerprint(root, config);
-  const functional = await runCommand(root, config.verification?.functional);
+  const functional = await runPhase('functional', config.verification?.functional);
   const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
-  const visual = await verifyVisual(root, config, directory, { version, liveMatches });
+  if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
+  const visual = await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
   const missing = manifest.mappings.filter(mapping => !covered.has(mapping));
   const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);

@@ -15,9 +15,9 @@ async function fixture(t) {
   await chmod(fake, 0o755);
   return root;
 }
-function run(root, context, code = 0) {
+function run(root, context, code = 0, options = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [adapter], { cwd: root, env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH}`, MOCK_EXIT: String(code) }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [adapter, ...options], { cwd: root, env: { ...process.env, PATH: `${root}${path.delimiter}${process.env.PATH}`, MOCK_EXIT: String(code) }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => stdout += chunk);
     child.stderr.on('data', chunk => stderr += chunk);
@@ -41,4 +41,13 @@ test('Codex bridge preserves executor failure instead of reporting success', asy
   const root = await fixture(t);
   const result = await run(root, { kind: 'repair', instructions: 'Only scoped application code', manifest: { id: 'test' } }, 7);
   assert.equal(result.exitCode, 7);
+});
+
+test('Codex model options preserve workspace-write and unsupported bypass options fail before provider', async t => {
+  const root = await fixture(t);
+  const context = { kind: 'implement', instructions: 'Preserve prototype', manifest: { id: 'test' } };
+  assert.equal((await run(root, context, 0, ['--model', 'metadata-supported-model', '--ephemeral'])).exitCode, 0);
+  const received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
+  assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '--model', 'metadata-supported-model', '--ephemeral', '-']);
+  assert.equal((await run(root, context, 0, ['--dangerously-bypass-approvals-and-sandbox'])).exitCode, 1);
 });

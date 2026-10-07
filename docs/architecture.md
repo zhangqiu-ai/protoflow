@@ -10,6 +10,8 @@
 | `src/config.js` | schema 與路徑／配置檢查 |
 | `src/install.js` | 非破壞 init、Skill installation、AGENTS managed block |
 | `src/integrations.js` | Spec Kit／BMad 偵測、配置 argv 安裝、安裝提醒 |
+| `src/source.js` | Git fetch、first-parent cursor、固定 SHA／完整資源 checkpoint、重寫檢查 |
+| `src/runner.js` | 持久進度、隔離 worktree、前景 Codex FIFO／驗證修復與 doctor |
 | `src/versions.js` | 每個原型版本的凍結副本與完整性核對 |
 | `src/queue.js` | 原型版本佇列；應用端只能處理最早未驗收的版本 |
 | `src/mappings.js` | 從目標專案原型頁面與引用資源起草 mapping（唯讀） |
@@ -67,3 +69,7 @@ repair 先驗證。FAIL 且有 `--execute` 才建立新 context，將上一份�
 新 integration 以 stdin Context/request 與 stdout response 協定接入，不將 Spec Kit 或 BMad 的內部檔案格式耦合進引擎。原生／裝置驗證可以透過目標 functional 命令執行，但本機 browser verifier 不會把它當 native 視覺 PASS。新增 native visual adapter、artifact 遠端儲存和畫布，可在此協定後逐步擴充。
 
 CLI 透過 `.protoflow/active.lock`（應用端）與 `.protoflow/design.lock`（設計端）序列化專案操作，API 呼叫端需自行使用 `withLock`。原子檔案寫入能保護單一 JSON，不等於跨檔交易；異常退出後保留已寫入證據，人工檢查後恢復。引擎不隔離被配置的 subprocess；只執行專案明確信任的 adapter/test 命令，不對未知配置自動加權限。
+
+## Git 來源與 Runner
+
+Git 提交驅動流程、設定、離線／阻塞恢復與證據位置見 [本機 Runner](git-runner.md)。Git manifest 按 source.ordinal 排序；來源掃描和執行進度使用同一 active 鎖避免並行保存狀態遺失。Runner 另持 runner 鎖防止雙執行者。鎖 owner PID 確認已死才恢復，未知 owner 或仍活躍者拒絕。

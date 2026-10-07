@@ -9,7 +9,7 @@ async function records(root, kind) {
   return Promise.all(names.filter(name => /^[a-zA-Z0-9_.-]+\.json$/.test(name)).map(name => readJson(path.join(directory, name))));
 }
 
-const chronological = (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+const chronological = (a, b) => a.source?.identity && a.source.identity === b.source?.identity && a.source.ordinal && b.source.ordinal ? a.source.ordinal - b.source.ordinal : a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 
 /** A prototype version is accepted once a PASS verification is bound to its exact manifest and prototype content. */
 export function acceptedBy(manifest, verifications) {
@@ -26,7 +26,7 @@ export async function versionQueue(root, config) {
   const verifications = await records(root, 'verifications');
   const versions = manifests.map(manifest => {
     const accepted = acceptedBy(manifest, verifications);
-    return { id: manifest.id, createdAt: manifest.createdAt, summary: manifest.summary, level: manifest.level, mappings: manifest.mappings, acceptedBy: accepted?.id ?? null };
+    return { id: manifest.id, createdAt: manifest.createdAt, summary: manifest.summary, level: manifest.level, source: manifest.source ?? null, mappings: manifest.mappings, acceptedBy: accepted?.id ?? null };
   });
   const sequential = config.policy?.sequentialVersions !== false;
   const index = versions.findIndex(version => !version.acceptedBy);
