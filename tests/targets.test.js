@@ -38,7 +38,12 @@ test('v2 configs validate targets and drivers; v1 configs keep their own schema'
   };
   await invalid(config => { delete config.targets[0].driver.urlTemplate; }, /playwright-web requires driver\.urlTemplate/);
   await invalid(config => { config.targets[0].driver = { kind: 'external' }; }, /external driver requires driver\.command/);
-  await invalid(config => { config.targets.push({ ...config.targets[0], id: 'second' }); }, /must NOT have more than 1 items/);
+  // Several targets need distinct, non-nested roots and known release targets.
+  await invalid(config => { config.targets.push({ ...config.targets[0], id: 'second' }); }, /Target roots must be distinct/);
+  await invalid(config => { config.targets[0].root = '.'; config.targets.push({ ...config.targets[0], id: 'second', root: 'app' }); }, /needs its own root directory/);
+  await invalid(config => { config.targets.push({ ...config.targets[0], id: 'second', root: 'app/desktop' }); }, /not nested/);
+  await invalid(config => { config.targets.push({ ...config.targets[0], id: 'second', root: 'prototype' }); config.release = { requireTargets: ['web', 'ios'] }; }, /unknown target: ios/);
+  await invalid(config => { config.targets.push({ ...config.targets[0] }); }, /Duplicate target id/);
   await invalid(config => { config.targets[0].platform = 'symbian'; }, /allowed values/);
   await invalid(config => { config.targets[0].root = '../outside'; }, /escapes project/);
   await invalid(config => { config.mappings = []; }, /must NOT have additional properties/);

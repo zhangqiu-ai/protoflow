@@ -372,7 +372,7 @@ Context Package 對每個 target 提供：
 |---|---|---|
 | P0 規格 ✅ | 審定錨點語法、sidecar、合約、驅動器協定的 JSON Schema；決定 §15 待決問題 | Schema 與範例檢入；本提案狀態改為「已接受」 |
 | P1 Web 錨點化 ✅ | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
-| P2 多目標與 Electron | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
+| P2 多目標 ✅、Electron 驅動器（另一工作進行中） | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
 | P3 Android | `external` 驅動器協定實作、Maestro 參考驅動器、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
 | P4 iOS | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
 | P5 Flutter／React Native | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
@@ -426,7 +426,7 @@ Context Package 對每個 target 提供：
 - **合約分靜態與渲染兩部分**（§4.3）。渲染需要 Chromium，而 Runner 要求所有瀏覽器程序受程序組監督；把渲染放在 verify 內，checkpoint 與 Context 保持便宜且確定。manifest 保存 `scope`，不保存 `contractHash`；驗證證據保存渲染量測與 hash。
 - **錨點自身文字**（§4.1），使範圍精確。
 - **v1 相容**：未提供「v1 mapping 轉成合成錨點」的執行期相容層；`schemaVersion: 1` 的配置直接沿用原引擎路徑（行為完全不變），遷移由 `migrate anchors` 草稿完成。兩條路徑並存，風險較低。
-- **單一 target**：v2 schema 暫限 `targets` 一筆，多目標佇列與 `release.requireTargets` 屬 P2。
+- **單一 target**：P1 時 v2 schema 限 `targets` 一筆；P2 已解除（§16.6）。
 
 ### 16.3 無效提交的處理
 
@@ -446,9 +446,21 @@ Git 來源中錨點無效的提交不發佈為版本；`source/state.json` 的 `
 - PR #8 合併時遇到 GitHub 503，`delivery sync` 從失敗步驟續做，未重複 commit 或留言。
 - 證據：驗收專案的 `.protoflow/acceptance/anchors-real-acceptance.json`（各 attempt 的 execution／verification、manifest／prototype／application hash、截圖 hash、程序紀錄）。
 
-### 16.5 尚未完成
+### 16.5 多目標（P2）
 
-- P2–P5：多目標、Electron 驅動器、Android／iOS／Flutter／React Native 參考驅動器與範例應用。本機已有 iOS 模擬器，尚未安裝 Android SDK。
+- `targets` 可有多筆；多筆時每個 target 必須有獨立、不互相巢狀的 `root`。單一 target 與 schemaVersion 1 專案的狀態檔、worktree 與交付分支完全不變。
+- **各自依序推進**：每個 target 有自己的進度 `.protoflow/targets/<id>/progress.json`、Runner 狀態 `.protoflow/runner/<id>/state.json`、worktree `worktree-<hash>-<id>` 與交付分支 `<runner.delivery.branch>/<id>`。`runner start` 依序推進每個 target，一個 target 阻塞不影響其他 target；只有全部 target 都阻塞時連續模式才停止。
+- **驗收**：verification 記錄 `target`；`versionQueue` 依 target 計算 `acceptedBy`，回傳每個 target 的 `current`／`waiting`／`lastAccepted`、每個版本的 `targets` 與 `acceptance`（accepted／partial／pending）。P2 之前沒有 `target` 欄位的驗證歸屬第一個 target。
+- **應用 hash**：多目標時每個 target 的應用 hash 排除原型與其他 target 的 root，所以一個平台的修改不會使其他平台的 context、驗證或 Review 過期；共用檔案仍會。
+- **發佈層**：`release.requireTargets` 使 `queue` 回報 `release.version`——所有必要 target 都已依序接受的最新版本。
+- **CLI**：多目標時 `context`、`prepare`、`verify`、`repair`、`runner retry`、`delivery sync` 以 `--target <id>` 指定 target，缺少時明確報錯；`queue`、`runner status`、`delivery status` 顯示全部 target。
+- **交付修正**：同一分支已有已合併的舊 PR 時，`gh pr create` 之後改以 open PR 查詢新 PR，且只有合併 head 等於交付 commit 才算 MERGED（`tests/delivery.test.js` 回歸測試）。
+- 測試：`tests/streams.test.js`（per-target 佇列、release、舊驗證歸屬、進度、應用 hash）；`tests/e2e/multi-target.spec.js`（本機 Git 來源、兩個 target、真實 Chromium 四層驗收、自動批准、per-target 分支交付；一個 target 執行失敗時另一個照常推進，retry 後依序補上，release 隨最慢的 target 前進）。
+
+### 16.6 尚未完成
+
+- Electron 驅動器（`playwright-electron`）由另一份進行中的工作負責，完成後整合為多目標架構中的一種 target。
+- P3–P5：Android／iOS／Flutter／React Native 參考驅動器與範例應用。本機已有 iOS 模擬器，尚未安裝 Android SDK。
 - L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供；每版自動產生規格不在本提案範圍。
 
 ## 附錄 A：合約片段

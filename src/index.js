@@ -10,3 +10,4 @@ export { freezeVersion, loadVersion } from './versions.js';
 
 export { scanSource, sourceStatus, gitSnapshot } from './source.js';
 export { startRunner, runOnce, retryRunner, configureRunner, runnerStatus, doctor } from './runner.js';
+export { streamTargets, isMultiTarget, loadProgress } from './streams.js';

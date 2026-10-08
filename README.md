@@ -113,6 +113,8 @@ protoflow install --personal --project /path/to/app
 - **分層驗收**：T1 結構語意、T2 token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM）。各 target 設定 `required`／`advisory`／`off`；Web 預設全部 required 並全量回歸，原生預設 T4 advisory、`affected+smoke` 回歸。
 - **工具**：`protoflow anchors lint|suggest`、`protoflow contract show --manifest <id>`、`protoflow migrate anchors`（v1 → v2 草稿：原型 patch、應用 patch、v2 配置）。
 
+- **多目標**：`targets` 可列出多個平台（各自獨立的 `root`），每個 target 依序推進同一串原型版本、有自己的 worktree 與交付分支（`<branch>/<id>`），一個 target 阻塞不影響其他。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已接受的最新版本。多目標時以 `--target <id>` 指定命令作用的 target。
+
 `schemaVersion: 1` 的 mapping 流程維持不變，說明如下。
 
 ### 原型適度拆分（schemaVersion 1）

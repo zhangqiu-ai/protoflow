@@ -14,6 +14,7 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 - 原型每頁一個畫面錨點（`<body data-pf="<screen>" data-pf-role="screen">`），追蹤的元素以 `data-pf="<screen>.<name>"` 標記，`data-pf-role` 為 region／element／action／input；狀態寫在 `<page>.pf.json`。新頁面或缺錨點時先執行 `protoflow anchors suggest --patch-file .protoflow/anchors.patch`，把建議交給使用者審閱 ID 後才提交原型；不要自行在原型 repo 推送錨點修改。`protoflow anchors lint` 必須 PASS。
 - 實作時讀 context 的 `anchors`：`screens` 是本版受影響畫面的合約，`target.convention` 說明本平台如何帶上錨點 ID，`anchorIndex` 列出既有錨點在程式碼中的位置。每個錨點必須以**完全相同的 ID** 出現在應用中；畫面需可由 `urlTemplate`（Web）或外部驅動器到達。以錨點 ID 搜尋程式碼找實作位置，不需要也不要新增 mapping。
 - verify 的 `visual.tiers` 依序是 structure（文字、數量、順序、互動、sidecar 期望）、tokens、layout、visual；`visual.scenes[].tiers[].reasons` 指出具體錨點。修復時依原因修改應用，不修改原型、合約或門檻。
+- 多個 target 時：每個 target 獨立依序推進。context／verify／repair／`runner retry` 需 `--target <id>`；context 的 `anchors.target` 指出本次實作的平台與 root，只修改該 root。回報時列出各 target 的 `current` 與 `queue.release.version`。
 - v1 專案遷移：`protoflow migrate anchors` 產生草稿（原型 patch、應用 patch、v2 配置）；原型 patch 屬設計端，套用前需使用者確認。
 
 ## 原型結構與映射（schemaVersion 1）

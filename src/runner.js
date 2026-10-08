@@ -3,20 +3,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { createContext, executeContext, verify, loadArtifact } from './workflow.js';
+import { createContext, executeContext, verify, loadArtifact, applicationFingerprint } from './workflow.js';
 import { versionQueue } from './queue.js';
 import { loadVersion } from './versions.js';
-import { git, scanSource, sourceStatus, saveSourceState, validateSource } from './source.js';
+import { git, scanSource, sourceStatus, validateSource } from './source.js';
+import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix } from './streams.js';
 import { assertDelivered, syncDeliveries } from './delivery.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 
-const runnerPath = '.protoflow/runner/state.json';
-export async function runnerStatus(root) {
-  return { source: await sourceStatus(root), runner: await readJson(await projectPath(root, runnerPath), null) };
+/** Source progress and runner state; with several targets, one { progress, runner } per target. */
+export async function runnerStatus(root, config = null) {
+  const source = await sourceStatus(root);
+  if (!config || !isMultiTarget(config)) return { source, runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
+  const targets = {};
+  for (const stream of streamTargets(config)) targets[stream] = { progress: await loadProgress(root, config, stream), runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
+  return { source, targets };
 }
-async function saveRunner(root, runner) { await writeJson(await projectPath(root, runnerPath), runner); }
+async function saveRunner(root, runner, statePath) { await writeJson(await projectPath(root, statePath), runner); }
 function assertNoActiveProcesses(entry) {
   for (const attempt of entry.attempts ?? []) {
     const children = [...(attempt.processes ?? [])];
@@ -35,13 +40,14 @@ function assertNoActiveProcesses(entry) {
     }
   }
 }
-async function ensureWorktree(root, config, { signal } = {}) {
-  let runner = await readJson(await projectPath(root, runnerPath), null);
+async function ensureWorktree(root, config, { signal, stream = null } = {}) {
+  const statePath = runnerStatePath(config, stream);
+  let runner = await readJson(await projectPath(root, statePath), null);
   if (runner && ['INITIALIZING', 'SETUP_FAILED'].includes(runner.status) && !runner.setupCompletedAt && (runner.setupStartedAt || runner.setupPid !== undefined)) {
     if (!Number.isSafeInteger(runner.setupPid) || runner.setupPid <= 0) throw new Error('Runner setup launch has unknown PID; inspect possible subprocesses before manual recovery');
     if (processGroupAlive(runner.setupPgid ?? runner.setupPid)) throw new Error(`Runner setup process group ${runner.setupPid} is still active; stop it and inspect its evidence before recovery`);
   }
-  const worktree = await projectPath(root, `.protoflow/runner/worktree-${hash(config.source).slice(0, 12)}`);
+  const worktree = await projectPath(root, `.protoflow/runner/worktree-${hash(config.source).slice(0, 12)}${worktreeSuffix(config, stream)}`);
   if (runner && !['INITIALIZING', 'SETUP_FAILED'].includes(runner.status)) {
     if (runner.worktree !== worktree) throw new Error('Runner worktree identity changed');
     const current = (await git(worktree, ['rev-parse', '--show-toplevel'])).trim();
@@ -53,7 +59,7 @@ async function ensureWorktree(root, config, { signal } = {}) {
   const seed = await fingerprint(root, { exclude: [config.prototypeDir] });
   const branch = runner?.branch ?? `protoflow-runner-${id('local').toLowerCase()}`;
   runner = { schemaVersion: 1, worktree, branch, base, configHash: hash(config), seedHash: seed.hash, status: 'INITIALIZING', createdAt: new Date().toISOString() };
-  await saveRunner(root, runner);
+  await saveRunner(root, runner, statePath);
   try { await fs.access(path.join(worktree, '.git')); }
   catch { await git(root, ['worktree', 'add', '-b', branch, worktree, base]); }
   // Preserve the user's dirty index and files: copy the current content into an isolated checkout.
@@ -76,15 +82,15 @@ async function ensureWorktree(root, config, { signal } = {}) {
       signal, onBeforeSpawn: async () => {
         runner.setupStatus = 'STARTING'; runner.setupStartedAt = new Date().toISOString();
         runner.setupPid = null; runner.setupPgid = null; runner.setupSpawned = null; runner.setupCompletedAt = null;
-        await saveRunner(root, runner);
+        await saveRunner(root, runner, statePath);
       },
-      onStart: async pid => { runner.setupStatus = 'RUNNING'; runner.setupPid = pid; runner.setupPgid = pid; runner.setupSpawned = true; await saveRunner(root, runner); }
+      onStart: async pid => { runner.setupStatus = 'RUNNING'; runner.setupPid = pid; runner.setupPgid = pid; runner.setupSpawned = true; await saveRunner(root, runner, statePath); }
     });
     runner.setup = result; runner.setupStatus = result.status; runner.setupSpawned = result.spawned;
     if (!result.processGroupActive) runner.setupCompletedAt = new Date().toISOString();
-    if (result.processGroupActive || result.status !== 'PASS') { runner.status = 'SETUP_FAILED'; await saveRunner(root, runner); throw new Error(`Runner setup failed: ${result.stderr || result.error}`); }
+    if (result.processGroupActive || result.status !== 'PASS') { runner.status = 'SETUP_FAILED'; await saveRunner(root, runner, statePath); throw new Error(`Runner setup failed: ${result.stderr || result.error}`); }
   }
-  runner.status = 'IDLE'; await saveRunner(root, runner);
+  runner.status = 'IDLE'; await saveRunner(root, runner, statePath);
   return runner;
 }
 async function syncCheckpoints(root, worktree, state, config) {
@@ -112,78 +118,80 @@ async function exportEvidence(root, worktree, report) {
 }
 
 /** One source stream, one isolated application worktree, one bounded FIFO executor. No implicit commits or approval. */
-export async function runOnce(root, config, { signal, onEvent = () => {} } = {}) {
+export async function runOnce(root, config, { signal, onEvent = () => {}, target: stream = null } = {}) {
   if (config.policy?.sequentialVersions === false) throw new Error('Git runner requires sequentialVersions');
   if (signal?.aborted) return { status: 'STOPPED' };
+  const statePath = runnerStatePath(config, stream);
+  const target = stream ?? undefined;
   // Commit earlier accepted versions first (before reading state) so every commit holds a single version.
-  try { await assertDelivered(root, config); }
+  try { await assertDelivered(root, config, stream); }
   catch (error) { return { status: 'BLOCKED', reason: error.message }; }
-  const state = await sourceStatus(root);
+  const state = await loadProgress(root, config, stream);
   if (state.status === 'HISTORY_REWRITTEN') throw new Error(state.error);
   if (!state.entries.length) return { status: 'IDLE', reason: 'No scanned checkpoints' };
   const entry = state.entries.find(item => item.status !== 'PASS');
   // Old unfinished browser/process rows must block setup and PASS reconciliation too.
   try { for (const previous of state.entries) assertNoActiveProcesses(previous); }
   catch (error) {
-    if (entry) { entry.status = 'BLOCKED'; entry.error = error.message; await saveSourceState(root, state); }
+    if (entry) { entry.status = 'BLOCKED'; entry.error = error.message; await saveProgress(root, config, stream, state); }
     return { status: 'BLOCKED', manifestId: entry?.manifestId, sha: entry?.sha, reason: error.message };
   }
   if (!entry) {
     // A crash can save source PASS just before the runner's final state write.
-    const runner = await readJson(await projectPath(root, runnerPath), null);
+    const runner = await readJson(await projectPath(root, statePath), null);
     if (runner?.status === 'RUNNING') {
-      runner.status = 'IDLE'; runner.current = null; await saveRunner(root, runner);
+      runner.status = 'IDLE'; runner.current = null; await saveRunner(root, runner, statePath);
     }
     // Retry pending pushes, pull requests and merges while idle.
-    const delivery = runner?.worktree ? await syncDeliveries(root, config, { worktree: runner.worktree }) : undefined;
+    const delivery = runner?.worktree ? await syncDeliveries(root, config, { worktree: runner.worktree, target: stream }) : undefined;
     return { status: 'IDLE', completedSha: state.completedSha, ...(delivery && { delivery }) };
   }
   if (['BLOCKED', 'STOPPED', 'RUNNING'].includes(entry.status)) return { status: 'BLOCKED', manifestId: entry.manifestId, reason: entry.status === 'RUNNING' ? 'Interrupted execution; inspect evidence and run runner retry' : entry.error };
   if (!config.adapters?.codex?.command) return { status: 'NOT_RUN', reason: 'Codex adapter is not configured' };
   let runner;
-  try { runner = await ensureWorktree(root, config, { signal }); }
+  try { runner = await ensureWorktree(root, config, { signal, stream }); }
   catch (error) { if (signal?.aborted) return { status: 'STOPPED', reason: error.message }; throw error; }
   if (signal?.aborted) return { status: 'STOPPED' };
   if (runner.status === 'SETUP_FAILED' || runner.status === 'INITIALIZING') throw new Error(`Runner requires initialization recovery: ${runner.status}`);
   await syncCheckpoints(root, runner.worktree, state, config);
-  const queue = await versionQueue(runner.worktree, config);
+  const queue = await versionQueue(runner.worktree, config, { target });
   // Reconcile a crash after independent verification passed but before source progress was saved.
   const version = queue.versions.find(item => item.id === entry.manifestId);
   if (version?.acceptedBy) {
     const report = await loadArtifact(runner.worktree, 'verifications', version.acceptedBy);
-    if (report.project.hash !== (await fingerprint(runner.worktree, { exclude: [config.prototypeDir] })).hash) throw new Error('Interrupted PASS evidence has stale application content');
+    if (report.project.hash !== (await applicationFingerprint(runner.worktree, config, target)).hash) throw new Error('Interrupted PASS evidence has stale application content');
     await loadVersion(runner.worktree, config, await loadArtifact(root, 'manifests', entry.manifestId));
     await exportEvidence(root, runner.worktree, report);
     entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;
-    await saveSourceState(root, state); await saveRunner(root, runner);
-    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree });
+    await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
+    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream });
     return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, recovered: true, delivery };
   }
   if (queue.current?.id !== entry.manifestId) throw new Error(`Runner queue mismatch: expected ${entry.manifestId}, got ${queue.current?.id}`);
   entry.status = 'RUNNING'; entry.startedAt = new Date().toISOString();
   runner.status = 'RUNNING'; runner.current = entry.manifestId;
-  await saveSourceState(root, state); await saveRunner(root, runner);
+  await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
   let report = null, currentAttempt = null;
   try {
     const maximum = config.policy?.maxRepairAttempts ?? 3;
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
-      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr });
+      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
       const record = { attempt, contextId: context.id, startedAt: new Date().toISOString(), status: 'RUNNING', processes: [] };
       currentAttempt = record;
-      entry.attempts.push(record); await saveSourceState(root, state);
+      entry.attempts.push(record); await saveProgress(root, config, stream, state);
       await onEvent({ event: attempt ? 'repair' : 'execute', sha: entry.sha, manifestId: entry.manifestId, attempt, worktree: runner.worktree });
       const processStarting = async phase => {
         record.processes.push({ phase, pid: null, pgid: null, spawned: null, status: 'STARTING', startedAt: new Date().toISOString() });
-        await saveSourceState(root, state);
+        await saveProgress(root, config, stream, state);
       };
       const processStarted = async (phase, pid) => {
         const child = record.processes.find(item => item.phase === phase && item.status === 'STARTING' && !item.completedAt);
         if (!child) throw new Error(`Missing ${phase} launch intent`);
         child.pid = pid; child.pgid = pid; child.spawned = true; child.status = 'RUNNING';
-        await saveSourceState(root, state);
+        await saveProgress(root, config, stream, state);
       };
       const processFinished = async (phase, pid, result) => {
         const child = record.processes.find(item => item.phase === phase && item.pid === (pid ?? null) && !item.completedAt);
@@ -191,7 +199,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
           if (!result.processGroupActive) child.completedAt = new Date().toISOString();
           child.status = result.status; child.spawned = result.spawned ?? child.spawned; child.error = result.error ?? null; child.processGroupActive = result.processGroupActive ?? false;
         }
-        await saveSourceState(root, state);
+        await saveProgress(root, config, stream, state);
       };
 
       const execution = await executeContext(runner.worktree, config, context.id, {
@@ -207,7 +215,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
         throw error;
       }
 
-      await saveSourceState(root, state);
+      await saveProgress(root, config, stream, state);
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (execution.status !== 'PASS') {
         let diagnostic = execution.result.error;
@@ -216,9 +224,9 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
         }
         throw new Error(`Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}): ${(diagnostic || execution.result.stderr || 'see execution evidence').slice(-1000)}`);
       }
-      report = await verify(runner.worktree, config, entry.manifestId, { signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
+      report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
-      await saveSourceState(root, state);
+      await saveProgress(root, config, stream, state);
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (report.status === 'PASS') break;
@@ -228,8 +236,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
     await exportEvidence(root, runner.worktree, report);
     entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;
-    await saveSourceState(root, state); await saveRunner(root, runner);
-    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree });
+    await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
+    const delivery = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream });
     await onEvent({ event: 'delivered', sha: entry.sha, ...delivery });
     return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, worktree: runner.worktree, delivery };
   } catch (error) {
@@ -241,12 +249,12 @@ export async function runOnce(root, config, { signal, onEvent = () => {} } = {})
     }
     entry.status = signal?.aborted ? 'STOPPED' : 'BLOCKED'; entry.error = error.message;
     runner.status = entry.status;
-    await saveSourceState(root, state); await saveRunner(root, runner);
+    await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
     return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message, worktree: runner.worktree };
   }
 }
-export async function retryRunner(root) {
-  const state = await sourceStatus(root);
+export async function retryRunner(root, config = {}, { target = null } = {}) {
+  const state = await loadProgress(root, config, target);
   const current = state.entries.find(entry => entry.status !== 'PASS');
   if (!current || !['BLOCKED', 'STOPPED', 'RUNNING'].includes(current.status)) throw new Error('No blocked/interrupted current version to retry');
   for (const previous of state.entries) assertNoActiveProcesses(previous);
@@ -264,14 +272,14 @@ export async function retryRunner(root) {
   }
   current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', at: new Date().toISOString() }];
   current.status = 'PENDING'; current.error = null;
-  await saveSourceState(root, state);
-  return { status: 'PASS', current: current.manifestId, next: 'runner start --once' };
+  await saveProgress(root, config, target, state);
+  return { status: 'PASS', ...(target && { target }), current: current.manifestId, next: 'runner start --once' };
 }
-/** Explicit operational configuration recovery; frozen source/routing ownership stays fixed. */
-export async function configureRunner(root, config) {
-  const runner = await readJson(await projectPath(root, runnerPath), null);
+async function configureStream(root, config, stream) {
+  const statePath = runnerStatePath(config, stream);
+  const runner = await readJson(await projectPath(root, statePath), null);
   if (!runner) return { status: 'PASS', reason: 'No worktree yet; next start uses the current config' };
-  const state = await sourceStatus(root);
+  const state = await loadProgress(root, config, stream);
   if (runner.status === 'RUNNING' || state.entries.some(entry => entry.status === 'RUNNING')) throw new Error('Stop the runner and inspect interrupted execution before reconfiguring');
   for (const previous of state.entries) assertNoActiveProcesses(previous);
   const old = await readJson(await projectPath(runner.worktree, 'protoflow.config.json'));
@@ -281,13 +289,27 @@ export async function configureRunner(root, config) {
     : { source: value.source, prototypeDir: value.prototypeDir, mappings: value.mappings.map(mapping => ({ id: mapping.id, prototypeFiles: mapping.prototypeFiles })) };
   if (hash(routing(old)) !== hash(routing(config))) throw new Error('Cannot change source/prototypeDir/targets or mapping ownership in an existing stream');
   const current = state.entries.find(entry => entry.status !== 'PASS');
-  if (current && (await versionQueue(runner.worktree, old)).versions.find(version => version.id === current.manifestId)?.acceptedBy) throw new Error('Recover the interrupted PASS with the original config before reconfiguring');
+  if (current && (await versionQueue(runner.worktree, old, { target: stream ?? undefined })).versions.find(version => version.id === current.manifestId)?.acceptedBy) throw new Error('Recover the interrupted PASS with the original config before reconfiguring');
   runner.configurationHistory = [...(runner.configurationHistory ?? []), { previousHash: runner.configHash, configHash: hash(config), previousConfig: old, updatedAt: new Date().toISOString() }];
   await writeJson(await projectPath(runner.worktree, 'protoflow.config.json'), config);
-  runner.configHash = hash(config); await saveRunner(root, runner);
+  runner.configHash = hash(config); await saveRunner(root, runner, statePath);
   return { status: 'PASS', worktree: runner.worktree, configHash: runner.configHash, next: current ? 'runner retry, then runner start' : 'runner start' };
 }
+/** Explicit operational configuration recovery; frozen source/routing ownership stays fixed. Applies to every target. */
+export async function configureRunner(root, config) {
+  if (!isMultiTarget(config)) return configureStream(root, config, null);
+  const targets = {};
+  for (const stream of streamTargets(config)) targets[stream] = await configureStream(root, config, stream);
+  return { status: 'PASS', targets };
+}
+/** Combine per-target results: any BLOCKED, then NOT_RUN, then PASS, otherwise IDLE. */
+function aggregate(results) {
+  const statuses = Object.values(results).map(result => result.status);
+  const status = ['BLOCKED', 'NOT_RUN', 'STOPPED', 'PASS'].find(item => statuses.includes(item)) ?? 'IDLE';
+  return { status, targets: results };
+}
 export async function startRunner(root, config, { once = false, signal, onEvent = () => {} } = {}) {
+  const streams = streamTargets(config);
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
     while (!signal?.aborted) {
@@ -295,9 +317,18 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
       try { const scan = await withLock(root, () => scanSource(root, config)); await onEvent({ event: 'scanned', tip: scan.tip, added: scan.added }); }
       catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN') throw error; }
       if (signal?.aborted) return { status: 'STOPPED' };
-      do { last = await withLock(root, () => runOnce(root, config, { signal, onEvent })); }
-      while (last.status === 'PASS' && !signal?.aborted);
-      if (once || last.status === 'BLOCKED' || last.status === 'NOT_RUN') return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
+      // Each target advances through the same versions independently; one blocked target does not hold the others.
+      const results = {};
+      for (const stream of streams) {
+        const events = stream ? event => onEvent({ ...event, target: stream }) : onEvent;
+        let result;
+        do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
+        while (result.status === 'PASS' && !signal?.aborted);
+        results[stream ?? ''] = result;
+      }
+      last = streams[0] === null ? results[''] : aggregate(results);
+      const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
+      if (once || stuck) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
     }
     return { status: 'STOPPED' };
@@ -316,10 +347,9 @@ export async function doctor(root, config) {
   });
   await check('verification', () => {
     if (config.schemaVersion === 2) {
-      const target = config.targets[0];
-      if (!target.build || !target.functional) throw new Error(`Target ${target.id} requires build and functional commands`);
+      for (const target of config.targets) if (!target.build || !target.functional) throw new Error(`Target ${target.id} requires build and functional commands`);
       if (config.policy?.sequentialVersions === false) throw new Error('Runner requires FIFO');
-      return `target ${target.id} (${target.platform}, ${target.driver.kind}): build + functional + anchored tiers`;
+      return config.targets.map(target => `target ${target.id} (${target.platform}, ${target.driver.kind})`).join('; ') + ': build + functional + anchored tiers';
     }
     if (!config.verification?.build || !config.verification?.functional || !config.visual?.scenes?.length) throw new Error('Build, functional (Playwright), and visual scenes are required');
     if (!config.mappings.length) throw new Error('Configure prototype/application mappings');
@@ -335,5 +365,5 @@ export async function doctor(root, config) {
     return `${Object.keys(contract.screens).length} screen(s), ${contract.warnings.length} warning(s)`;
   });
   await check('skill', async () => { await fs.access(await projectPath(root, '.agents/skills/protoflow/SKILL.md')); return 'installed'; });
-  return { status: checks.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', checks, engine: fileURLToPath(new URL('../', import.meta.url)), progress: await runnerStatus(root) };
+  return { status: checks.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', checks, engine: fileURLToPath(new URL('../', import.meta.url)), progress: await runnerStatus(root, config) };
 }

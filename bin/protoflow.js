@@ -45,7 +45,9 @@ Usage: protoflow <command> [action] --project <path> [options]
   review create --manifest id --verification id
   review approve|reject|request-changes --review id --reviewer name [--notes text]
   baseline create --review id | show [--baseline id]
-  queue                                  Prototype versions in order; the application works on 'current'
+  queue [--target id]                    Prototype versions in order; each target works on its 'current'
+  --target id                            Selects the target for context/prepare/verify/repair/runner retry/
+                                         delivery when a schemaVersion 2 project has several targets
   status                                Sessions, latest baseline, version queue, Spec Kit/BMad
 All output is JSON. Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW,
 3 BLOCKED: context/prepare/execute/verify/repair target a version other than the
@@ -55,7 +57,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -74,8 +76,8 @@ try {
           throw new Error('Use source scan|status');
         case 'doctor': return doctor(root, config);
         case 'runner':
-          if (action === 'status') return runnerStatus(root);
-          if (action === 'retry') return retryRunner(root);
+          if (action === 'status') return runnerStatus(root, config);
+          if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null });
           if (action === 'configure') return configureRunner(root, config);
           if (action === 'start') {
             const controller = new AbortController();
@@ -86,8 +88,8 @@ try {
           }
           throw new Error('Use runner start|status|retry|configure');
         case 'delivery':
-          if (action === 'sync') return syncDeliveries(root, config);
-          if (action === 'status') return deliveryStatus(root);
+          if (action === 'sync') return syncDeliveries(root, config, { target: values.target ?? null });
+          if (action === 'status') return deliveryStatus(root, config, values.target ?? null);
           throw new Error('Use delivery sync|status');
         case 'session':
           if (action === 'start') return startSession(root, config, { label: values.label });
@@ -101,11 +103,11 @@ try {
           try { return await watch(root, config, { once: values.once, signal: controller.signal, onReady: state => console.log(JSON.stringify({ event: 'ready', ...state })), onCheckpoint: manifest => console.log(JSON.stringify({ event: 'checkpoint', manifest })) }); }
           finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
         }
-        case 'context': return createContext(root, config, requireOption('manifest'), { spec: values.spec, adr: values.adr });
-        case 'prepare': return prepareIntegration(root, config, requireOption('manifest'), requireOption('adapter'));
+        case 'context': return createContext(root, config, requireOption('manifest'), { spec: values.spec, adr: values.adr, target: values.target });
+        case 'prepare': return prepareIntegration(root, config, requireOption('manifest'), requireOption('adapter'), { target: values.target });
         case 'execute': return executeContext(root, config, requireOption('context'), { execute: values.execute });
-        case 'verify': return verify(root, config, requireOption('manifest'));
-        case 'repair': return repair(root, config, requireOption('manifest'), { execute: values.execute, spec: values.spec, adr: values.adr });
+        case 'verify': return verify(root, config, requireOption('manifest'), { target: values.target });
+        case 'repair': return repair(root, config, requireOption('manifest'), { execute: values.execute, spec: values.spec, adr: values.adr, target: values.target });
         case 'review': {
           if (action === 'create') return createReview(root, config, requireOption('manifest'), requireOption('verification'));
           const status = { approve: 'approved', reject: 'rejected', 'request-changes': 'changes_requested' }[action];
@@ -133,7 +135,7 @@ try {
         case 'migrate':
           if (action === 'anchors') return migrateCommand(root, config, { manifest: values.manifest, output: values.output });
           throw new Error('Use migrate anchors');
-        case 'queue': return versionQueue(root, config);
+        case 'queue': return versionQueue(root, config, { target: values.target });
         case 'status': {
           const integrations = await detectIntegrations(root);
           return { sessions: await listSessions(root), baseline: await readJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: null }), queue: await versionQueue(root, config), integrations, notices: integrationNotices(integrations) };
