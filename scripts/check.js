@@ -2,7 +2,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configSchema } from '../src/config.js';
+import { configSchema, configSchemaV2 } from '../src/config.js';
+import { sidecarSchema, staticContractSchema, driverRequestSchema, driverResponseSchema } from '../src/protocol-schemas.js';
 import Ajv from 'ajv';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -20,9 +21,16 @@ async function walk(directory) {
   }
 }
 await walk(root);
-const validate = new Ajv({ strict: false }).compile(configSchema);
-const savedSchema = JSON.parse(await readFile(path.join(root, 'schemas/config.schema.json'), 'utf8'));
-if (JSON.stringify(savedSchema) !== JSON.stringify(configSchema)) throw new Error('Published config schema differs from engine schema');
+const published = {
+  'config.schema.json': configSchema, 'config.v2.schema.json': configSchemaV2, 'anchor-sidecar.schema.json': sidecarSchema,
+  'static-contract.schema.json': staticContractSchema, 'driver-request.schema.json': driverRequestSchema, 'driver-response.schema.json': driverResponseSchema
+};
+for (const [name, schema] of Object.entries(published)) {
+  const saved = JSON.parse(await readFile(path.join(root, 'schemas', name), 'utf8'));
+  if (JSON.stringify(saved) !== JSON.stringify(schema)) throw new Error(`Published schemas/${name} differs from the engine schema`);
+}
+const ajv = new Ajv({ strict: false });
+const validators = { 1: ajv.compile(configSchema), 2: ajv.compile(configSchemaV2) };
 const configFiles = (await readdir(path.join(root, 'templates')))
   .filter(name => /^protoflow(?:\.[a-z-]+)?\.config\.json$/.test(name))
   .map(name => `templates/${name}`);
@@ -33,6 +41,8 @@ for (const example of await readdir(path.join(root, 'examples'), { withFileTypes
 }
 for (const relative of configFiles) {
   const config = JSON.parse(await readFile(path.join(root, relative), 'utf8'));
+  const validate = validators[config.schemaVersion];
+  if (!validate) throw new Error(`${relative}: unknown schemaVersion ${config.schemaVersion}`);
   if (!validate(config)) throw new Error(`${relative}: ${JSON.stringify(validate.errors)}`);
 }
-console.log(`Syntax OK: ${count} JavaScript files; ${configFiles.length} example/template configs validated`);
+console.log(`Syntax OK: ${count} JavaScript files; ${Object.keys(published).length} published schemas in sync; ${configFiles.length} example/template configs validated`);

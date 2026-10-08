@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "screen": "tasks",
+  "states": {
+    "empty-error": {
+      "steps": [{ "action": "tap", "anchor": "tasks.add" }],
+      "expect": { "visible": ["tasks.error"] }
+    },
+    "added": {
+      "steps": [
+        { "action": "fill", "anchor": "tasks.input", "value": "Write tests" },
+        { "action": "tap", "anchor": "tasks.add" }
+      ],
+      "expect": { "hidden": ["tasks.error"] }
+    }
+  }
+}

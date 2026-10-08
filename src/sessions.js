@@ -3,6 +3,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readJson, writeJson, projectPath, hash, id, gitInfo } from './util.js';
 import { freezeVersion } from './versions.js';
+import { staticContract, contractScope, scopeLevel, AnchorLintError } from './anchors.js';
 
 const LEVELS = ['L0', 'L1', 'L2', 'L3'];
 const EXCLUDED = new Set(['node_modules', '.git', '.protoflow']);
@@ -161,8 +162,14 @@ export function classifyChanges(before, after, config, { level } = {}) {
     changes.push({ path: file, type, beforeHash: previous?.hash ?? null, afterHash: current?.hash ?? null, level: risk, mappings,
       diff: previous?.binary || current?.binary ? 'Binary asset changed' : textDiff(file, previous?.content, current?.content) });
   }
-  return { level: changes.reduce((result, change) => LEVELS.indexOf(change.level) > LEVELS.indexOf(result) ? change.level : result, 'L0'),
-    changes, mappings: [...new Set(changes.flatMap(change => change.mappings))] };
+  const fileLevel = changes.reduce((result, change) => LEVELS.indexOf(change.level) > LEVELS.indexOf(result) ? change.level : result, 'L0');
+  if (config.schemaVersion !== 2) return { level: fileLevel, changes, mappings: [...new Set(changes.flatMap(change => change.mappings))] };
+  // Anchored prototypes: the static contract gives scope; an invalid contract is never published as a version.
+  const afterContract = staticContract(after, config);
+  if (afterContract.errors.length) throw new AnchorLintError(afterContract.errors);
+  const scope = contractScope(staticContract(before, config), afterContract, changes.map(change => change.path));
+  const contractLevel = scopeLevel(scope, afterContract);
+  return { level: LEVELS.indexOf(contractLevel) > LEVELS.indexOf(fileLevel) ? contractLevel : fileLevel, changes, mappings: [], scope, contractWarnings: afterContract.warnings };
 }
 
 async function statePath(root, kind, identifier) {

@@ -30,9 +30,59 @@ export const configSchema = {
     } }
   }
 };
-const validate = new Ajv({ allErrors: true, strict: false }).compile(configSchema);
+const tier = { enum: ['required', 'advisory', 'off'] };
+const shared = configSchema.properties;
+/** schemaVersion 2: semantic anchors and per-platform targets replace component mappings (docs/proposals/0001). */
+export const configSchemaV2 = {
+  type: 'object', required: ['schemaVersion', 'prototypeDir', 'targets'], additionalProperties: false,
+  properties: {
+    schemaVersion: { const: 2 }, prototypeDir: shared.prototypeDir, source: shared.source, runner: shared.runner,
+    classification: shared.classification, policy: shared.policy, watch: shared.watch, adapters: shared.adapters,
+    anchors: { type: 'object', additionalProperties: false, properties: {
+      attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
+      tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }
+    } },
+    // One target per stream until multi-target queues (proposal phase P2).
+    targets: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'object', required: ['id', 'platform', 'driver'], additionalProperties: false, properties: {
+      id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' },
+      platform: { enum: ['web', 'electron', 'ios', 'android', 'flutter', 'react-native'] },
+      root: { type: 'string', minLength: 1 },
+      driver: { type: 'object', required: ['kind'], additionalProperties: false, properties: {
+        kind: { enum: ['playwright-web', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build
+      } },
+      build: shared.verification.properties.build, functional: shared.verification.properties.functional,
+      locator: { type: 'object', additionalProperties: false, properties: { attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, strategy: { type: 'string', minLength: 1 } } },
+      tiers: { type: 'object', additionalProperties: false, properties: { structure: tier, tokens: tier, layout: tier, visual: tier } },
+      regression: { enum: ['all', 'affected', 'affected+smoke'] },
+      viewport: { type: 'object', additionalProperties: false, required: ['width', 'height'], properties: { width: { type: 'integer', minimum: 1, maximum: 8192 }, height: { type: 'integer', minimum: 1, maximum: 8192 }, scale: { type: 'number', minimum: 0.5, maximum: 4 } } },
+      visual: { type: 'object', additionalProperties: false, properties: { mode: { enum: ['pixel', 'perceptual'] }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, pixelThreshold: { type: 'number', minimum: 0, maximum: 1 }, minSimilarity: { type: 'number', minimum: 0, maximum: 1 } } },
+      layout: { type: 'object', additionalProperties: false, properties: { position: { type: 'number', minimum: 0, maximum: 1 }, size: { type: 'number', minimum: 0, maximum: 1 }, absolute: { anyOf: [{ type: 'null' }, { type: 'number', minimum: 0 }] } } },
+      tokens: { type: 'object', additionalProperties: false, properties: { deltaE: { type: 'number', minimum: 0 }, fontSize: { type: 'number', minimum: 0 }, radius: { type: 'number', minimum: 0 } } },
+      deviations: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['anchor', 'allow'], properties: { anchor: { type: 'string', minLength: 1 }, allow: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } } } } },
+      timeoutMs: { type: 'integer', minimum: 100, maximum: 600000 }
+    } } }
+  }
+};
+const ajv = new Ajv({ allErrors: true, strict: false });
+const validate = ajv.compile(configSchema);
+const validateV2 = ajv.compile(configSchemaV2);
+async function loadConfigV2(root, config) {
+  if (!validateV2(config)) throw new Error(`Invalid ProtoFlow config: ${JSON.stringify(validateV2.errors)}`);
+  if (config.source) validateSource(config.source);
+  await projectPath(root, config.prototypeDir);
+  for (const evidence of [config.runner?.spec, config.runner?.adr].filter(Boolean)) await projectPath(root, evidence);
+  if (config.anchors?.tokens) await projectPath(root, config.anchors.tokens);
+  if (new Set(config.targets.map(target => target.id)).size !== config.targets.length) throw new Error('Duplicate target id');
+  for (const target of config.targets) {
+    if (target.root && target.root !== '.') await projectPath(root, target.root);
+    if (target.driver.kind === 'playwright-web' && !target.driver.urlTemplate) throw new Error(`Target ${target.id}: playwright-web requires driver.urlTemplate`);
+    if (target.driver.kind === 'external' && !target.driver.command) throw new Error(`Target ${target.id}: external driver requires driver.command`);
+  }
+  return config;
+}
 export async function loadConfig(root) {
   const config = await readJson(await projectPath(root, 'protoflow.config.json'));
+  if (config?.schemaVersion === 2) return loadConfigV2(root, config);
   if (!validate(config)) throw new Error(`Invalid ProtoFlow config: ${JSON.stringify(validate.errors)}`);
   if (config.source) validateSource(config.source);
   await projectPath(root, config.prototypeDir);

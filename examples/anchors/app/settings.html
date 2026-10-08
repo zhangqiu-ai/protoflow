@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Settings · App</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<main class="screen" data-testid="settings">
+  <header data-testid="settings.header">
+    <h1 data-testid="settings.title">Settings</h1>
+    <a data-testid="settings.back" href="tasks.html">Back</a>
+  </header>
+  <label data-testid="settings.notify"><input data-testid="settings.notify-toggle" id="reminder" type="checkbox"> Daily reminder</label>
+  <button data-testid="settings.save" id="persist" type="button">Save</button>
+  <p data-testid="settings.saved" class="saved" id="confirmation" hidden>Saved.</p>
+</main>
+<script src="settings.js"></script>
+</body>
+</html>

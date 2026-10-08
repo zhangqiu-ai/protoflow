@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "prototypeDir": "prototype",
+  "anchors": { "attribute": "data-pf", "requireScreenAnchor": true, "tokens": "prototype/tokens.json" },
+  "targets": [
+    {
+      "id": "web",
+      "platform": "web",
+      "root": "app",
+      "driver": { "kind": "playwright-web", "urlTemplate": "app/{page}.html" },
+      "build": { "argv": ["node", "build.js"] },
+      "functional": { "argv": ["node", "../../node_modules/@playwright/test/cli.js", "test", "-c", "playwright.config.js"] },
+      "viewport": { "width": 800, "height": 600, "scale": 1 },
+      "visual": { "mode": "pixel", "maxDiffRatio": 0.01 }
+    }
+  ],
+  "policy": { "maxRepairAttempts": 2, "requireHumanReview": true, "sequentialVersions": true },
+  "adapters": { "codex": { "command": null } }
+}

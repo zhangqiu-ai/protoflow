@@ -8,6 +8,8 @@ import { versionQueue } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, saveSourceState, validateSource } from './source.js';
 import { assertDelivered, syncDeliveries } from './delivery.js';
+import { snapshot } from './sessions.js';
+import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 
 const runnerPath = '.protoflow/runner/state.json';
@@ -273,8 +275,11 @@ export async function configureRunner(root, config) {
   if (runner.status === 'RUNNING' || state.entries.some(entry => entry.status === 'RUNNING')) throw new Error('Stop the runner and inspect interrupted execution before reconfiguring');
   for (const previous of state.entries) assertNoActiveProcesses(previous);
   const old = await readJson(await projectPath(runner.worktree, 'protoflow.config.json'));
-  const routing = value => ({ source: value.source, prototypeDir: value.prototypeDir, mappings: value.mappings.map(mapping => ({ id: mapping.id, prototypeFiles: mapping.prototypeFiles })) });
-  if (hash(routing(old)) !== hash(routing(config))) throw new Error('Cannot change source/prototypeDir/mapping ownership in an existing stream');
+  // Anchored streams are owned by source, prototypeDir and target identities; v1 streams also by mapping ownership.
+  const routing = value => value.schemaVersion === 2
+    ? { schemaVersion: 2, source: value.source, prototypeDir: value.prototypeDir, targets: value.targets.map(target => ({ id: target.id, platform: target.platform })) }
+    : { source: value.source, prototypeDir: value.prototypeDir, mappings: value.mappings.map(mapping => ({ id: mapping.id, prototypeFiles: mapping.prototypeFiles })) };
+  if (hash(routing(old)) !== hash(routing(config))) throw new Error('Cannot change source/prototypeDir/targets or mapping ownership in an existing stream');
   const current = state.entries.find(entry => entry.status !== 'PASS');
   if (current && (await versionQueue(runner.worktree, old)).versions.find(version => version.id === current.manifestId)?.acceptedBy) throw new Error('Recover the interrupted PASS with the original config before reconfiguring');
   runner.configurationHistory = [...(runner.configurationHistory ?? []), { previousHash: runner.configHash, configHash: hash(config), previousConfig: old, updatedAt: new Date().toISOString() }];
@@ -310,12 +315,25 @@ export async function doctor(root, config) {
     if (result.status !== 'PASS') throw new Error(result.stderr || 'Codex unavailable'); return result.stdout.trim();
   });
   await check('verification', () => {
+    if (config.schemaVersion === 2) {
+      const target = config.targets[0];
+      if (!target.build || !target.functional) throw new Error(`Target ${target.id} requires build and functional commands`);
+      if (config.policy?.sequentialVersions === false) throw new Error('Runner requires FIFO');
+      return `target ${target.id} (${target.platform}, ${target.driver.kind}): build + functional + anchored tiers`;
+    }
     if (!config.verification?.build || !config.verification?.functional || !config.visual?.scenes?.length) throw new Error('Build, functional (Playwright), and visual scenes are required');
     if (!config.mappings.length) throw new Error('Configure prototype/application mappings');
     if (config.policy?.sequentialVersions === false) throw new Error('Runner requires FIFO');
     return 'build + functional + visual configured';
   });
   await check('chromium', async () => { const browser = await chromium.launch(); await browser.close(); return 'launch OK'; });
+  if (config.schemaVersion === 2) await check('anchors', async () => {
+    // Git-source prototypes are linted per commit at scan time; a local prototype is linted here.
+    if (config.source) return 'linted per commit during source scan';
+    const contract = staticContract(await snapshot(root, config), config);
+    if (contract.errors.length) throw new Error(contract.errors.join('; '));
+    return `${Object.keys(contract.screens).length} screen(s), ${contract.warnings.length} warning(s)`;
+  });
   await check('skill', async () => { await fs.access(await projectPath(root, '.agents/skills/protoflow/SKILL.md')); return 'installed'; });
   return { status: checks.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', checks, engine: fileURLToPath(new URL('../', import.meta.url)), progress: await runnerStatus(root) };
 }

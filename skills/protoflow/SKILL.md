@@ -7,7 +7,16 @@ description: Use ProtoFlow to turn prototype changes into mapped application cha
 
 ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程，目標專案只保留 Skill、`protoflow.config.json`、`AGENTS.md` 約定與 `.protoflow/` 證據。使用已安裝的 `protoflow` CLI；若命令不可用，先定位共享引擎並使用 `node <engine>/bin/protoflow.js`，不要將引擎複製進目標專案。
 
-## 原型結構與映射
+## 語意錨點（schemaVersion 2）
+
+`protoflow.config.json` 為 `schemaVersion: 2` 時以錨點取代 mapping（共享引擎 `docs/proposals/0001-anchor-contracts.md`）：
+
+- 原型每頁一個畫面錨點（`<body data-pf="<screen>" data-pf-role="screen">`），追蹤的元素以 `data-pf="<screen>.<name>"` 標記，`data-pf-role` 為 region／element／action／input；狀態寫在 `<page>.pf.json`。新頁面或缺錨點時先執行 `protoflow anchors suggest --patch-file .protoflow/anchors.patch`，把建議交給使用者審閱 ID 後才提交原型；不要自行在原型 repo 推送錨點修改。`protoflow anchors lint` 必須 PASS。
+- 實作時讀 context 的 `anchors`：`screens` 是本版受影響畫面的合約，`target.convention` 說明本平台如何帶上錨點 ID，`anchorIndex` 列出既有錨點在程式碼中的位置。每個錨點必須以**完全相同的 ID** 出現在應用中；畫面需可由 `urlTemplate`（Web）或外部驅動器到達。以錨點 ID 搜尋程式碼找實作位置，不需要也不要新增 mapping。
+- verify 的 `visual.tiers` 依序是 structure（文字、數量、順序、互動、sidecar 期望）、tokens、layout、visual；`visual.scenes[].tiers[].reasons` 指出具體錨點。修復時依原因修改應用，不修改原型、合約或門檻。
+- v1 專案遷移：`protoflow migrate anchors` 產生草稿（原型 patch、應用 patch、v2 配置）；原型 patch 屬設計端，套用前需使用者確認。
+
+## 原型結構與映射（schemaVersion 1）
 
 按可獨立瀏覽、修改及驗收的頁面適度拆分原型，再抽出實際共用的 tokens、styles、scripts 與 assets。保留既有應用元件架構，不將原型目錄鏡像到應用；同一 HTML 可列入多筆 mapping，分別指向頁面中不同區域的應用元件。不要套用其他專案或範例的頁面、元件名稱。
 

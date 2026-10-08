@@ -316,10 +316,11 @@ async function publishCheckpoint(root, config, repository, sha, before, after, o
     await loadVersion(root, config, existing);
     return existing;
   }
+  // Classify first: an anchored prototype with an invalid contract must not leave a frozen version behind.
+  const classification = classifyChanges(before, after, config);
   // A crash before publishing a manifest leaves only this deterministic incomplete store.
   await fs.rm(await projectPath(root, `.protoflow/versions/${manifestId}`), { recursive: true, force: true });
   await freezeVersion(root, manifestId, after);
-  const classification = classifyChanges(before, after, config);
   const subject = (await git(repository, ['show', '-s', '--format=%s', sha])).trim();
   const manifest = { schemaVersion: 1, version: 1, id: manifestId, sessionId: null, createdAt: new Date().toISOString(),
     summary: subject, beforeHash: before.hash, afterHash: after.hash, ...classification,
@@ -355,15 +356,25 @@ export async function scanSource(root, config) {
     const added = [];
     for (const sha of commits) {
       const after = await gitSnapshot(repository, sha, config, { allowEmpty: !!cursor });
+      let accepted = true;
       if (before.hash !== after.hash) {
-        const manifest = await publishCheckpoint(root, config, repository, sha, before, after, state.entries.length + 1);
-        if (!state.entries.some(entry => entry.sha === sha)) state.entries.push({ sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: manifest.source.ordinal, status: 'PENDING', attempts: [] });
-        added.push(manifest.id);
+        try {
+          const manifest = await publishCheckpoint(root, config, repository, sha, before, after, state.entries.length + 1);
+          if (!state.entries.some(entry => entry.sha === sha)) state.entries.push({ sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: manifest.source.ordinal, status: 'PENDING', attempts: [] });
+          added.push(manifest.id);
+          for (const rejection of state.rejected ?? []) rejection.foldedInto ??= sha;
+        } catch (error) {
+          if (error.code !== 'ANCHOR_LINT') throw error;
+          // An invalid commit is not a design version. Its changes fold into the next valid commit's diff,
+          // so nothing is skipped; the rejection stays visible until a later commit fixes it.
+          accepted = false;
+          state.rejected = [...(state.rejected ?? []).filter(item => item.sha !== sha), { sha, errors: error.errors, at: new Date().toISOString() }];
+        }
       }
       state.scannedSha = sha;
       state.status = 'READY'; state.error = null; state.lastScanAt = new Date().toISOString();
       await saveSourceState(root, state);
-      before = after;
+      if (accepted) before = after;
     }
     state.scannedSha = tip; state.status = 'READY'; state.error = null; state.lastScanAt = new Date().toISOString();
     await saveSourceState(root, state);
