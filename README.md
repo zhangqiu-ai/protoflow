@@ -102,7 +102,20 @@ protoflow install --personal --project /path/to/app
 
 將 `.protoflow/` 加入目標專案的 `.gitignore`，或明確選擇 evidence 版本化方式；`init` 會保留既有忽略策略。
 
-### 原型適度拆分
+### 語意錨點（schemaVersion 2，跨平台）
+
+`schemaVersion: 2` 以平台中立的**語意錨點**取代元件映射，設計見 [提案 0001](docs/proposals/0001-anchor-contracts.md)，可執行範例見 [examples/anchors](examples/anchors/)。
+
+- **原型**：每頁一個畫面錨點（建議 `<body data-pf="checkout" data-pf-role="screen">`），需要追蹤的元素標上 `data-pf="checkout.pay"`；狀態寫在同目錄的 `<page>.pf.json`，步驟只引用錨點。可選 `prototype/tokens.json`（W3C Design Tokens）。
+- **應用**：以該平台原生的測試標記帶上完全相同的 ID——Web／Electron `data-testid`、iOS `accessibilityIdentifier`、Android `testTag`、Flutter `Semantics(identifier:)`、React Native `testID`。
+- **配置**：`targets` 描述應用平台與驅動器（內建 `playwright-web`，原生平台以 `external` 驅動器協定接入，見 `schemas/driver-*.schema.json`）。不需要 `mappings`、`visual.scenes`，新增畫面也不需改配置。
+- **範圍**：checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響畫面與錨點；錨點無效的版本不會產生。
+- **分層驗收**：T1 結構語意、T2 token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM）。各 target 設定 `required`／`advisory`／`off`；Web 預設全部 required 並全量回歸，原生預設 T4 advisory、`affected+smoke` 回歸。
+- **工具**：`protoflow anchors lint|suggest`、`protoflow contract show --manifest <id>`、`protoflow migrate anchors`（v1 → v2 草稿：原型 patch、應用 patch、v2 配置）。
+
+`schemaVersion: 1` 的 mapping 流程維持不變，說明如下。
+
+### 原型適度拆分（schemaVersion 1）
 
 先依可獨立瀏覽、修改和驗收的頁面拆分，再整理共用 tokens、styles、scripts 與 assets。原型目錄不必對應應用元件目錄；同一 HTML 可透過多筆 mapping 對應導覽、頁面內容等不同元件。共用資源必須明確列入每個受影響 mapping 的 `prototypeFiles`，引擎依檔案變更保守展開影響範圍，selector 只用於定位與視覺驗證。
 
@@ -113,6 +126,9 @@ protoflow install --personal --project /path/to/app
 | 命令 | 作用 |
 |---|---|
 | `init` / `install [--skip-integrations]` | 建立配置與約定／安裝 Skill、Spec Kit 與 BMad |
+| `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
+| `contract show --manifest ID` | 版本的靜態 UI 合約與變更範圍（v2） |
+| `migrate anchors [--output DIR]` | v1 mapping → 錨點遷移草稿（不套用） |
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
 | `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
 | `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復 |

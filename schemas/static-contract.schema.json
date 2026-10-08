@@ -1,0 +1,209 @@
+{
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "extractorVersion",
+    "screens",
+    "pages",
+    "errors",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "extractorVersion": {
+      "type": "string"
+    },
+    "screens": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "page",
+          "anchors",
+          "states",
+          "resources"
+        ],
+        "properties": {
+          "page": {
+            "type": "string"
+          },
+          "sidecar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anchors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "role",
+                "parent",
+                "order"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+                },
+                "role": {
+                  "enum": [
+                    "screen",
+                    "region",
+                    "element",
+                    "action",
+                    "input"
+                  ]
+                },
+                "parent": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "order": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "repeat": {
+                  "type": "boolean"
+                },
+                "dynamic": {
+                  "type": "boolean"
+                },
+                "visualOnly": {
+                  "type": "boolean"
+                },
+                "tag": {
+                  "type": "string"
+                },
+                "inputType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "states": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "steps",
+                "expect"
+              ],
+              "properties": {
+                "fixture": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "action"
+                    ],
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "tap",
+                          "fill",
+                          "clear",
+                          "select",
+                          "toggle",
+                          "scroll-to",
+                          "back",
+                          "wait-for"
+                        ]
+                      },
+                      "anchor": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+                      },
+                      "value": {
+                        "type": "string"
+                      },
+                      "timeoutMs": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                },
+                "expect": {
+                  "type": "object",
+                  "properties": {
+                    "visible": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+                      }
+                    },
+                    "hidden": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "fixtures": {
+            "type": "object"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "pages": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@ import { snapshot } from './sessions.js';
 import { verifyVisual } from './visual.js';
 import { loadVersion } from './versions.js';
 import { assertCurrentVersion } from './queue.js';
+import { primaryTarget, targetSettings, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 
 const date = () => new Date().toISOString();
 const validId = value => {
@@ -28,6 +29,36 @@ async function manifestVersion(root, config, manifestId) {
 }
 const versionReference = version => ({ manifestId: version.manifestId, hash: version.hash, prototypeDir: version.prototypeDir });
 const versionInstructions = version => `Read the prototype for this version from ${version.prototypeDir}/ (a frozen copy). The live prototype directory may already contain newer versions; do not implement them.`;
+// How each platform carries an anchor ID on the implementing element (docs/proposals/0001-anchor-contracts.md §5).
+const ANCHOR_CONVENTIONS = {
+  web: attribute => `set ${attribute}="<anchor id>" on the element`,
+  electron: attribute => `set ${attribute}="<anchor id>" on the renderer element`,
+  ios: () => 'set .accessibilityIdentifier("<anchor id>") (SwiftUI) or accessibilityIdentifier (UIKit)',
+  android: () => 'set Modifier.testTag("<anchor id>") with testTagsAsResourceId enabled at the root (Compose), or the configured View locator',
+  flutter: () => 'wrap with Semantics(identifier: "<anchor id>") or a ValueKey("<anchor id>")',
+  'react-native': () => 'set testID="<anchor id>"'
+};
+const isV2 = config => config.schemaVersion === 2;
+const checkCommands = config => isV2(config) ? primaryTarget(config) : config.verification ?? {};
+/** Context section for anchored prototypes: scope, the affected part of the contract, target conventions and code hints. */
+async function anchorContext(root, config, manifest, version) {
+  const target = primaryTarget(config);
+  const settings = targetSettings(target);
+  const contract = await versionContract(root, config, version);
+  const affected = manifest.scope?.affected ?? Object.keys(contract.screens);
+  const index = await anchorIndex(root, config);
+  const screens = Object.fromEntries(affected.filter(id => contract.screens[id]).map(id => [id, contract.screens[id]]));
+  const ids = new Set(Object.values(screens).flatMap(screen => screen.anchors.map(anchor => anchor.id)));
+  const convention = ANCHOR_CONVENTIONS[target.platform](settings.locator.attribute);
+  const reach = target.driver.kind === 'playwright-web' ? `Each screen must be reachable at ${target.driver.urlTemplate} ({screen} = screen anchor id, {page} = prototype page path without extension).` : 'Each screen must be reachable by the configured external driver.';
+  return {
+    target: { id: target.id, platform: target.platform, root: target.root ?? '.', driver: target.driver.kind, locator: settings.locator, convention },
+    scope: manifest.scope ?? null, screens,
+    removedScreens: manifest.scope?.removed ?? [],
+    anchorIndex: index ? Object.fromEntries(Object.entries(index.anchors).filter(([id]) => ids.has(id))) : null,
+    instructions: `Target ${target.id} (${target.platform}) in ${target.root ?? '.'}: every prototype anchor (data-pf="<id>") of the affected screens must exist in the application with the identical id — ${convention}. ${reach} Text, order, visibility, interactions and the states in each screen's sidecar must match; styling must follow the prototype's design tokens. Locate existing implementations by searching the code for the anchor ids (anchorIndex lists known locations). Remove application screens listed in removedScreens.`
+  };
+}
 async function evidenceFile(root, relative) {
   const file = await projectPath(root, relative);
   const content = await readFile(file, 'utf8');
@@ -58,7 +89,7 @@ async function assertPlanningFresh(root, manifest, planning) {
 export async function createContext(root, config, manifestId, { spec, adr } = {}) {
   await assertCurrentVersion(root, config, manifestId);
   const { manifest, version } = await manifestVersion(root, config, manifestId);
-  const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
+  const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
   if (unmapped.length) throw new Error(`Map changed prototype files before execution: ${unmapped.join(', ')}`);
   const specEvidence = spec ? await evidenceFile(root, spec) : null;
   const adrEvidence = adr ? await evidenceFile(root, adr) : null;
@@ -69,20 +100,24 @@ export async function createContext(root, config, manifestId, { spec, adr } = {}
     try { decision = JSON.parse(adrEvidence.content); } catch { throw new Error('L3 ADR must be JSON with status, reviewer, manifestHash and decision'); }
     if (decision.status !== 'approved' || !decision.reviewer?.trim() || decision.manifestHash !== hash(manifest) || !decision.decision?.trim()) throw new Error('L3 architecture decision requires human approval bound to this manifestHash');
   }
+  const anchors = isV2(config) ? await anchorContext(root, config, manifest, version) : null;
+  const scopeInstruction = anchors ? `${anchors.instructions} Implement only this version's scope.` : 'Implement only mapped application changes.';
   return persist(root, 'contexts', {
     schemaVersion: 1, id: id('CTX'), createdAt: date(), manifestId, manifestHash: hash(manifest), manifest,
     prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: await applicationFingerprint(root, config), git: await gitInfo(root),
-    mappings: config.mappings.filter(mapping => manifest.mappings.includes(mapping.id)),
+    mappings: isV2(config) ? [] : config.mappings.filter(mapping => manifest.mappings.includes(mapping.id)),
+    ...(anchors && { anchors }),
     spec: specEvidence, adr: adrEvidence,
-    instructions: `${versionInstructions(version)} Implement only mapped application changes. Preserve prototype and unrelated user changes. Maintain and run repeatable Playwright regression tests. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
-    verification: config.verification ?? {}, visual: config.visual ?? {}
+    instructions: `${versionInstructions(version)} ${scopeInstruction} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
+    verification: isV2(config) ? { build: checkCommands(config).build ?? null, functional: checkCommands(config).functional ?? null } : config.verification ?? {},
+    visual: isV2(config) ? targetSettings(primaryTarget(config)) : config.visual ?? {}
   });
 }
 export async function prepareIntegration(root, config, manifestId, adapter) {
   if (!['specKit', 'bmad'].includes(adapter)) throw new Error('Adapter must be specKit or bmad');
   await assertCurrentVersion(root, config, manifestId);
   const { manifest, version } = await manifestVersion(root, config, manifestId);
-  const request = { schemaVersion: 1, kind: adapter, manifest, manifestHash: hash(manifest), prototypeVersion: versionReference(version), mappings: config.mappings, expected: adapter === 'bmad' ? 'ADR with explicit human decision; do not implement application code' : 'Specification, acceptance criteria, plan and tasks; do not implement application code' };
+  const request = { schemaVersion: 1, kind: adapter, manifest, manifestHash: hash(manifest), prototypeVersion: versionReference(version), mappings: config.mappings ?? [], ...(isV2(config) && { scope: manifest.scope ?? null }), expected: adapter === 'bmad' ? 'ADR with explicit human decision; do not implement application code' : 'Specification, acceptance criteria, plan and tasks; do not implement application code' };
   const result = await runCommand(root, config.adapters?.[adapter]?.command, request);
   let response = null;
   if (result.status === 'PASS') {
@@ -141,15 +176,19 @@ export async function verify(root, config, manifestId, { signal, onBeforeSpawn, 
     return result;
   };
   // Build may produce project assets. Bind evidence after build, before acceptance.
-  const build = await runPhase('build', config.verification?.build);
+  const commands = checkCommands(config);
+  const build = await runPhase('build', commands.build);
   const before = await applicationFingerprint(root, config);
-  const functional = await runPhase('functional', config.verification?.functional);
+  const functional = await runPhase('functional', commands.functional);
   const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
   if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
-  const visual = await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish });
+  const visual = isV2(config)
+    // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
+    ? await verifyTarget(root, config, manifest, version, { outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
+    : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
-  const missing = manifest.mappings.filter(mapping => !covered.has(mapping));
-  const unmapped = manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
+  const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
+  const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
   if (visual.status === 'PASS' && (missing.length || unmapped.length)) {
     visual.status = 'FAIL'; visual.reason = `Changed prototype mappings lack visual coverage: ${[...missing, ...unmapped].join(', ')}`;
   }
@@ -166,6 +205,8 @@ export async function verify(root, config, manifestId, { signal, onBeforeSpawn, 
   const checks = [build.status, functional.status, visual.status];
   const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
   const record = { schemaVersion: 1, id: verificationId, createdAt: date(), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, status };
+  // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
+  if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version));
   return persist(root, 'verifications', record);
 }
 export async function createReview(root, config, manifestId, verificationId) {
@@ -218,7 +259,7 @@ export async function createBaseline(root, config, reviewId) {
   }
   const data = { schemaVersion: 1, id: id('UI'), createdAt: date(), parent: latest.id, status: 'approved', manifestId: manifest.id, manifestHash: hash(manifest), reviewId, reviewHash: hash(review), reviewer: review.reviewer, reviewerKind: review.reviewerKind ?? 'human',
     prototype: { hash: manifest.afterHash, git: manifest.git?.head ?? null }, application: { hash: verification.project.hash, git: verification.git.head }, verificationId: verification.id, verificationHash: hash(verification),
-    spec: review.planning?.spec ?? null, adr: review.planning?.adr ?? null, changed: manifest.mappings, evidence: { build: verification.build.status, functional: verification.functional.status, visual: verification.visual.status, scenes: verification.visual.scenes, artifacts: verification.visual.artifacts } };
+    spec: review.planning?.spec ?? null, adr: review.planning?.adr ?? null, changed: manifest.scope?.affected ?? manifest.mappings, evidence: { build: verification.build.status, functional: verification.functional.status, visual: verification.visual.status, scenes: verification.visual.scenes, artifacts: verification.visual.artifacts } };
   await persist(root, 'baselines', data);
   await writeJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: data.id });
   return data;

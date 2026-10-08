@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "prototypeDir": "prototype",
+  "anchors": { "attribute": "data-pf", "requireScreenAnchor": true, "tokens": "prototype/tokens.json" },
+  "targets": [
+    {
+      "id": "web",
+      "platform": "web",
+      "root": "<application root>",
+      "driver": { "kind": "playwright-web", "urlTemplate": "<url or project path with {page} or {screen}>" },
+      "build": { "argv": ["<build>", "<args>"] },
+      "functional": { "argv": ["<test runner>", "<args>"] },
+      "viewport": { "width": 1280, "height": 800, "scale": 1 }
+    }
+  ],
+  "policy": { "maxRepairAttempts": 3, "requireHumanReview": true, "sequentialVersions": true },
+  "adapters": { "codex": { "command": null } }
+}

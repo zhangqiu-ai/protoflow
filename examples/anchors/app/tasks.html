@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tasks · App</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<main class="screen" data-testid="tasks">
+  <header data-testid="tasks.header">
+    <h1 data-testid="tasks.title">Today</h1>
+    <a data-testid="tasks.settings" href="settings.html">Settings</a>
+  </header>
+  <ul data-testid="tasks.list" id="tasks"></ul>
+  <form data-testid="tasks.form" id="new-task">
+    <input data-testid="tasks.input" id="title" type="text" placeholder="New task">
+    <button data-testid="tasks.add" type="submit">Add</button>
+  </form>
+  <p data-testid="tasks.error" class="error" id="problem" hidden>Enter a task first.</p>
+</main>
+<script src="tasks.js"></script>
+</body>
+</html>

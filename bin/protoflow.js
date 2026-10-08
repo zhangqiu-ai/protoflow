@@ -8,6 +8,7 @@ import { startSession, checkpoint, watch, listSessions } from '../src/sessions.j
 import { withLock, readJson, projectPath } from '../src/util.js';
 import { detectIntegrations, integrationNotices } from '../src/integrations.js';
 import { suggestMappings } from '../src/mappings.js';
+import { lintAnchors, suggestAnchorsCommand, showContract, migrateCommand } from '../src/anchor-commands.js';
 import { scanSource, sourceStatus } from '../src/source.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
@@ -23,7 +24,12 @@ Usage: protoflow <command> [action] --project <path> [options]
   install [--personal] [--skip-integrations]
                                          Install the Codex Skill, then Spec Kit + BMad
                                          (argv from adapters.<id>.install; null skips)
-  mappings suggest                       Draft mappings from prototype pages/resources
+  mappings suggest                       Draft mappings from prototype pages/resources (schemaVersion 1)
+  anchors lint|suggest [--manifest id] [--patch-file path]
+                                         Check data-pf anchors and sidecars / draft anchors as a patch
+  contract show --manifest id            Static UI contract and scope of a frozen version
+  migrate anchors [--manifest id] [--output dir]
+                                         Draft v1 mappings -> anchors (patches + v2 config; nothing applied)
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
@@ -49,7 +55,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -117,6 +123,16 @@ try {
         case 'mappings':
           if (action === 'suggest') return suggestMappings(root, config);
           throw new Error('Use mappings suggest');
+        case 'anchors':
+          if (action === 'lint') return lintAnchors(root, config, { manifest: values.manifest });
+          if (action === 'suggest') return suggestAnchorsCommand(root, config, { manifest: values.manifest, patchFile: values['patch-file'] });
+          throw new Error('Use anchors lint|suggest');
+        case 'contract':
+          if (action === 'show') return showContract(root, config, requireOption('manifest'));
+          throw new Error('Use contract show --manifest id');
+        case 'migrate':
+          if (action === 'anchors') return migrateCommand(root, config, { manifest: values.manifest, output: values.output });
+          throw new Error('Use migrate anchors');
         case 'queue': return versionQueue(root, config);
         case 'status': {
           const integrations = await detectIntegrations(root);
@@ -127,7 +143,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status';
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     console.log(JSON.stringify(result, null, 2));
     // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.
@@ -140,6 +156,9 @@ try {
   if (error.code === 'VERSION_ORDER') {
     console.error(JSON.stringify({ status: 'BLOCKED', error: error.message, queue: error.queue }));
     process.exitCode = 3;
+  } else if (error.code === 'ANCHOR_LINT') {
+    console.error(JSON.stringify({ status: 'ERROR', error: 'Prototype anchors are invalid', errors: error.errors }));
+    process.exitCode = 1;
   } else {
     console.error(JSON.stringify({ status: 'ERROR', error: error.message }));
     process.exitCode = 1;

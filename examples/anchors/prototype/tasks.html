@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tasks</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<main class="screen" data-pf="tasks" data-pf-role="screen">
+  <header data-pf="tasks.header" data-pf-role="region">
+    <h1 data-pf="tasks.title">Today</h1>
+    <a data-pf="tasks.settings" data-pf-role="action" href="settings.html">Settings</a>
+  </header>
+  <ul id="list" data-pf="tasks.list" data-pf-role="region">
+    <li data-pf="tasks.item" data-pf-repeat>Review prototype</li>
+    <li data-pf="tasks.item" data-pf-repeat>Ship version</li>
+  </ul>
+  <form id="form" data-pf="tasks.form" data-pf-role="region">
+    <input id="task" data-pf="tasks.input" data-pf-role="input" type="text" placeholder="New task">
+    <button data-pf="tasks.add" data-pf-role="action" type="submit">Add</button>
+  </form>
+  <p id="error" class="error" data-pf="tasks.error" hidden>Enter a task first.</p>
+</main>
+<script src="tasks.js"></script>
+</body>
+</html>

@@ -40,6 +40,10 @@ checkpoint 保存 exact before/after hashes、文字 diff、增刪改、映射�
 
 此邊界採檔案粒度的保守展開：selector 負責視覺定位，沒有 DOM diff、CSS 使用分析或 import 依賴圖。移動／刪除檔案時，需同步原型資源引用、映射與驗證場景；checkpoint hash／Git evidence 不等於 Git 版本鎖定或自動提交。拆分方法與範例見 [原型拆分指南](prototype-structure.md)。
 
+## 語意錨點（schemaVersion 2）
+
+`schemaVersion: 2` 以平台中立的錨點取代 mapping（[提案 0001](proposals/0001-anchor-contracts.md)）。`src/anchors.js` 從快照確定性解析靜態合約（畫面、錨點、自身文字、sidecar 狀態、資源引用），`classifyChanges` 以前後合約差異產生 manifest `scope` 並提高等級；合約有錯誤時不發佈版本，Git 來源把無效提交折入下一個有效版本。`src/targets.js` 依 scope 與回歸政策產生「畫面 × 狀態」場景，在受監督的 Chromium（`src/browser.js`）內以 `src/drivers/web.js` 擷取凍結原型，應用端由 web 驅動器或 `src/drivers/external.js` 的 argv／JSON 協定擷取，`src/tiers.js` 比較四層。驗證 PASS 後更新錨點索引作為下一次執行的提示。`schemaVersion: 1` 的 mapping 路徑保持不變。
+
 ## 版本佇列
 
 原型與正式應用是兩條版本流。設計端自由 checkpoint，每個 manifest 是一個原型版本；checkpoint 先把 `keepBytes` 快照寫入 `.protoflow/versions/<id>/files/`，最後寫 `index.json`，再發布 manifest，所以應用端看到的每個 manifest 都有完整凍結內容。`loadVersion` 以 index 重算 snapshot hash 並逐檔核對；沒有 index 的舊 manifest 只在現行原型仍等於 `afterHash` 時補凍結。

@@ -1,0 +1,136 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "target",
+    "screen",
+    "state",
+    "page",
+    "fixture",
+    "steps",
+    "anchors",
+    "viewport",
+    "outputDir"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "const": "capture"
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "id",
+        "platform",
+        "root"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        }
+      }
+    },
+    "screen": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+    },
+    "state": {
+      "type": "string"
+    },
+    "page": {
+      "type": "string"
+    },
+    "fixture": {
+      "type": "object",
+      "required": [
+        "data"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "enum": [
+              "tap",
+              "fill",
+              "clear",
+              "select",
+              "toggle",
+              "scroll-to",
+              "back",
+              "wait-for"
+            ]
+          },
+          "anchor": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+          },
+          "value": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "anchors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*(\\.[a-z0-9-]+)*$"
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "scale": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 4
+        }
+      }
+    },
+    "outputDir": {
+      "type": "string"
+    }
+  }
+}
