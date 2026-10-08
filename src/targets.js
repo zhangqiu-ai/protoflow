@@ -22,9 +22,15 @@ export function targetSettings(target) {
     tokens: { deltaE: 3, fontSize: 1, radius: 1, ...target.tokens }
   };
 }
-/** P1 runs one target per stream; multi-target queues are phase P2. */
-export function primaryTarget(config) {
+/** The target a command acts on: the named one, the only one, or an error asking for --target. */
+export function selectTarget(config, id) {
   if (!config.targets?.length) throw new Error('schemaVersion 2 requires at least one target');
+  if (id) {
+    const target = config.targets.find(item => item.id === id);
+    if (!target) throw new Error(`Unknown target: ${id}`);
+    return target;
+  }
+  if (config.targets.length > 1) throw new Error(`This project has several targets (${config.targets.map(item => item.id).join(', ')}); pass --target`);
   return config.targets[0];
 }
 
@@ -117,8 +123,8 @@ function summarize(scenes, policy) {
  * Verify one target against a frozen prototype version. Returns a visual-phase result compatible with verification
  * records: { status, mode: 'anchors', target, tiers, scenes, artifacts, prototypeSource: 'version' }.
  */
-export async function verifyTarget(root, config, manifest, version, { outDir, signal, onBeforeSpawn, onStart, onFinish } = {}) {
-  const target = primaryTarget(config);
+export async function verifyTarget(root, config, manifest, version, { target: targetId, outDir, signal, onBeforeSpawn, onStart, onFinish } = {}) {
+  const target = selectTarget(config, targetId);
   const settings = targetSettings(target);
   const contract = await versionContract(root, config, version);
   if (contract.errors.length) return { status: 'FAIL', mode: 'anchors', target: target.id, reason: `Prototype contract is invalid: ${contract.errors.join('; ')}`, scenes: [], artifacts: [], prototypeSource: 'version' };
@@ -192,8 +198,8 @@ export async function verifyTarget(root, config, manifest, version, { outDir, si
 
 const SKIP_DIRS = new Set(['.git', '.protoflow', 'node_modules', 'test-results', 'playwright-report', 'build', 'dist', '.gradle', 'DerivedData', 'Pods']);
 /** Where each anchor ID literally appears in the target's code: a hint for the executor, rebuilt after each PASS. */
-export async function updateAnchorIndex(root, config, contract) {
-  const target = primaryTarget(config);
+export async function updateAnchorIndex(root, config, contract, targetId) {
+  const target = selectTarget(config, targetId);
   const projectRoot = await realpath(root);
   const base = target.root && target.root !== '.' ? await projectPath(root, target.root) : projectRoot;
   const ids = [...new Set(Object.values(contract.screens).flatMap(screen => screen.anchors.map(anchor => anchor.id)))];
@@ -220,6 +226,6 @@ export async function updateAnchorIndex(root, config, contract) {
   await writeJson(await projectPath(root, `.protoflow/targets/${target.id}/anchor-index.json`), index);
   return index;
 }
-export async function anchorIndex(root, config) {
-  return readJson(await projectPath(root, `.protoflow/targets/${primaryTarget(config).id}/anchor-index.json`), null);
+export async function anchorIndex(root, config, targetId) {
+  return readJson(await projectPath(root, `.protoflow/targets/${selectTarget(config, targetId).id}/anchor-index.json`), null);
 }

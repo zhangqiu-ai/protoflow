@@ -63,6 +63,10 @@ protoflow runner start --project /path/to/app --once
 
 正常停止會終止當前 subprocess group、保存 STOPPED；下一次 start 不擅自重試。setup、Codex、build／functional 與 visual Chromium 在 spawn 前先保存 STARTING／pid:null 意圖，再保存 PID／PGID 與完成時間；正常返回且能證明 spawned:false（例如 ENOENT 或 spawn 前取消）的意圖可記錄已完成，仍可重新配置／重試；PID 尚未落地時崩潰，未知 PID 會保守阻止自動恢復，需人工檢查可能留下的程序。Visual 透過 Playwright BrowserServer 保存 browser PID／PGID，停止時關閉或終止整組並確認結束；launch 已嘗試但未取得 PID 的錯誤也保留未知啟動意圖，不能自動略過。POSIX 恢復檢查整個 subprocess group；leader 已死而 child 仍活也會阻止 retry／setup。命令正常退出但同組程序未退出時會終止該組並記錄 FAIL，不能 PASS 前進；尚未確認全組結束就不寫完成時間。 若 processGroupActive 仍為 true，立即阻塞，不能啟動後續 functional／visual、repair 或新 Codex；每次新 attempt 前也重新檢查舊的未完成程序，保留其 phase／PID／失敗證據。Windows 無法確認整個程序樹，MVP 保守拒絕受監督命令的自動執行／恢復；命令不得自行 detached／轉移子程序 group，這些形式不在 MVP 的自動恢復保證內。異常退出的 RUNNING 同樣需 `runner retry`，避免重複執行者；死 PID 的本機鎖可恢復，活躍或缺少 owner 的鎖拒絕略過。若 PASS verification 已落地但 completedSha 尚未更新，retry 後會核對 application/frozen/artifact hashes 再復原完成記錄。
 
+## 多目標（schemaVersion 2）
+
+`targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已接受的最新版本。單一 target 專案沿用原有檔案與路徑。
+
 ## 證據與順序
 
 `.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。

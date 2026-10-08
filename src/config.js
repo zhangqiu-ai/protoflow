@@ -42,8 +42,9 @@ export const configSchemaV2 = {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
       tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }
     } },
-    // One target per stream until multi-target queues (proposal phase P2).
-    targets: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'object', required: ['id', 'platform', 'driver'], additionalProperties: false, properties: {
+    // Each target advances through the same prototype versions independently (proposal 0001 §15.1).
+    release: { type: 'object', additionalProperties: false, properties: { requireTargets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' } } } },
+    targets: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'platform', 'driver'], additionalProperties: false, properties: {
       id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' },
       platform: { enum: ['web', 'electron', 'ios', 'android', 'flutter', 'react-native'] },
       root: { type: 'string', minLength: 1 },
@@ -73,6 +74,15 @@ async function loadConfigV2(root, config) {
   for (const evidence of [config.runner?.spec, config.runner?.adr].filter(Boolean)) await projectPath(root, evidence);
   if (config.anchors?.tokens) await projectPath(root, config.anchors.tokens);
   if (new Set(config.targets.map(target => target.id)).size !== config.targets.length) throw new Error('Duplicate target id');
+  if (config.targets.length > 1) {
+    // Separate roots let each target's application hash ignore the other targets' work.
+    const roots = config.targets.map(target => (target.root ?? '.').replace(/\/+$/, ''));
+    if (roots.some(item => item === '.' || item === '')) throw new Error('With several targets, every target needs its own root directory (not ".")');
+    for (const [i, a] of roots.entries()) for (const [j, b] of roots.entries()) {
+      if (i !== j && (a === b || a.startsWith(`${b}/`))) throw new Error(`Target roots must be distinct and not nested: ${a} and ${b}`);
+    }
+  }
+  for (const id of config.release?.requireTargets ?? []) if (!config.targets.some(target => target.id === id)) throw new Error(`release.requireTargets names unknown target: ${id}`);
   for (const target of config.targets) {
     if (target.root && target.root !== '.') await projectPath(root, target.root);
     if (target.driver.kind === 'playwright-web' && !target.driver.urlTemplate) throw new Error(`Target ${target.id}: playwright-web requires driver.urlTemplate`);

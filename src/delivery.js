@@ -1,17 +1,23 @@
 import { createReview, decideReview, createBaseline, loadArtifact } from './workflow.js';
-import { git, sourceStatus, saveSourceState } from './source.js';
+import { git } from './source.js';
+import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerStatePath, isMultiTarget } from './streams.js';
 import { projectPath, readJson, writeJson, runCommand, id } from './util.js';
 
-const deliveryPath = '.protoflow/delivery/state.json';
 // The automated approver is recorded as such; it never stands in for a named human.
 export const AUTOMATED_REVIEWER = 'ai:protoflow-runner';
 // Runner state, dependencies and test output never belong in an application commit; node_modules may be a symlink.
 const EXCLUDED = ['.protoflow', 'node_modules', 'test-results', 'playwright-report'];
 
-export async function deliveryStatus(root) {
-  return readJson(await projectPath(root, deliveryPath), { schemaVersion: 1, deliveries: [] });
+/** Delivery records; with several targets pass a target, or omit it to get every target's records. */
+export async function deliveryStatus(root, config = {}, target = null) {
+  if (isMultiTarget(config) && !target) {
+    const targets = {};
+    for (const item of config.targets) targets[item.id] = await deliveryStatus(root, config, item.id);
+    return { schemaVersion: 1, targets };
+  }
+  return readJson(await projectPath(root, deliveryStatePath(config, target)), { schemaVersion: 1, deliveries: [] });
 }
-async function saveDelivery(root, state) { await writeJson(await projectPath(root, deliveryPath), state); }
+async function saveDelivery(root, config, target, state) { await writeJson(await projectPath(root, deliveryStatePath(config, target)), state); }
 
 async function copyRecord(worktree, root, kind, recordId) {
   const record = await loadArtifact(worktree, kind, recordId);
@@ -20,6 +26,7 @@ async function copyRecord(worktree, root, kind, recordId) {
 
 /** Automated approval of the newest accepted version, bound to its verification exactly like a human review. */
 async function approve(root, config, worktree, entry) {
+  // The verification carries its target, so the review checks that target's application hash.
   const review = await createReview(worktree, config, entry.manifestId, entry.verificationId);
   const decided = await decideReview(worktree, config, review.id, {
     status: 'approved', reviewer: AUTOMATED_REVIEWER, reviewerKind: 'automated',
@@ -39,10 +46,10 @@ async function ghJson(worktree, args) {
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
 }
 
-function summary(delivery, entries, config) {
+function summary(delivery, entries, config, target) {
   const lines = entries.map(entry => `| \`${entry.sha.slice(0, 7)}\` | ${entry.manifestId} | ${entry.verificationId} | PASS |`);
   return [
-    `### ProtoFlow delivery ${delivery.id}`,
+    `### ProtoFlow delivery ${delivery.id}${target ? ` — target ${target}` : ''}`,
     '',
     '| Prototype commit | Manifest | Verification | Build / functional / visual |',
     '|---|---|---|---|',
@@ -61,13 +68,21 @@ function summary(delivery, entries, config) {
  * push to the delivery branch, a pull request with the evidence, and merge when configured.
  * Versions accepted since the last commit share it; in steady state that is exactly one version.
  */
-export async function syncDeliveries(root, config, { worktree } = {}) {
+export async function syncDeliveries(root, config, { worktree, target = null } = {}) {
   const options = config.runner?.delivery;
   if (!options) return { status: 'NOT_RUN', reason: 'runner.delivery is not configured' };
-  worktree ??= (await readJson(await projectPath(root, '.protoflow/runner/state.json'), null))?.worktree;
+  if (isMultiTarget(config) && !target) {
+    // Every target delivers independently on its own branch.
+    const results = {};
+    for (const item of config.targets) results[item.id] = await syncDeliveries(root, config, { target: item.id });
+    const statuses = Object.values(results).map(result => result.status);
+    return { status: statuses.includes('FAIL') ? 'FAIL' : statuses.includes('PASS') ? 'PASS' : statuses.every(item => item === 'NOT_RUN') ? 'NOT_RUN' : 'IDLE', targets: results };
+  }
+  worktree ??= (await readJson(await projectPath(root, runnerStatePath(config, target)), null))?.worktree;
+  const branch = deliveryBranch(config, target);
   if (!worktree) return { status: 'NOT_RUN', reason: 'Runner worktree does not exist yet' };
-  const source = await sourceStatus(root);
-  const state = await deliveryStatus(root);
+  const source = await loadProgress(root, config, target);
+  const state = await deliveryStatus(root, config, target);
   const pending = source.entries.filter(entry => entry.status === 'PASS' && !entry.deliveryId);
 
   if (pending.length) {
@@ -98,29 +113,31 @@ export async function syncDeliveries(root, config, { worktree } = {}) {
     }
     for (const entry of pending) entry.deliveryId = delivery.id;
     state.deliveries.push(delivery);
-    await saveDelivery(root, state);
-    await saveSourceState(root, source);
+    await saveDelivery(root, config, target, state);
+    await saveProgress(root, config, target, source);
   }
 
   const results = [];
   for (const delivery of state.deliveries.filter(item => !['MERGED', 'PR_OPEN_MANUAL'].includes(item.status))) {
     try {
       if (!delivery.steps.pushedAt) {
-        await git(worktree, ['push', '-q', options.remote ?? 'origin', `${delivery.commit}:refs/heads/${options.branch}`]);
+        await git(worktree, ['push', '-q', options.remote ?? 'origin', `${delivery.commit}:refs/heads/${branch}`]);
         delivery.steps.pushedAt = new Date().toISOString();
       }
       if (!delivery.pr) {
-        const open = await ghJson(worktree, ['pr', 'list', '--head', options.branch, '--base', options.baseBranch, '--state', 'open', '--json', 'number,url']);
+        const open = await ghJson(worktree, ['pr', 'list', '--head', branch, '--base', options.baseBranch, '--state', 'open', '--json', 'number,url']);
         delivery.pr = open?.[0] ?? null;
         if (!delivery.pr) {
-          const created = await gh(worktree, ['pr', 'create', '--base', options.baseBranch, '--head', options.branch, '--title', `ProtoFlow delivery: prototype ${delivery.shas.at(-1).slice(0, 7)}`, '--body', 'Automated application delivery from ProtoFlow. Each delivery is summarized in a comment below.']);
+          const created = await gh(worktree, ['pr', 'create', '--base', options.baseBranch, '--head', branch, '--title', `ProtoFlow delivery: prototype ${delivery.shas.at(-1).slice(0, 7)}`, '--body', 'Automated application delivery from ProtoFlow. Each delivery is summarized in a comment below.']);
           if (created.status !== 'PASS') throw new Error(`gh pr create failed: ${created.stderr.trim()}`);
-          delivery.pr = (await ghJson(worktree, ['pr', 'view', options.branch, '--json', 'number,url']));
+          // Look the new PR up among open PRs: the branch may also have older, merged PRs.
+          delivery.pr = (await ghJson(worktree, ['pr', 'list', '--head', branch, '--base', options.baseBranch, '--state', 'open', '--json', 'number,url']))?.[0] ?? null;
+          if (!delivery.pr) throw new Error(`gh pr create did not leave an open PR for ${branch}`);
         }
       }
       if (!delivery.steps.commentedAt) {
-        const entries = (await sourceStatus(root)).entries.filter(entry => delivery.versions.includes(entry.manifestId));
-        const comment = await gh(worktree, ['pr', 'comment', String(delivery.pr.number), '--body', summary(delivery, entries, config)]);
+        const entries = (await loadProgress(root, config, target)).entries.filter(entry => delivery.versions.includes(entry.manifestId));
+        const comment = await gh(worktree, ['pr', 'comment', String(delivery.pr.number), '--body', summary(delivery, entries, config, target)]);
         if (comment.status !== 'PASS') throw new Error(`gh pr comment failed: ${comment.stderr.trim()}`);
         delivery.steps.commentedAt = new Date().toISOString();
       }
@@ -132,8 +149,10 @@ export async function syncDeliveries(root, config, { worktree } = {}) {
           const merged = await gh(worktree, ['pr', 'merge', String(delivery.pr.number), '--merge', '--match-head-commit', delivery.commit]);
           if (merged.status !== 'PASS') throw new Error(`gh pr merge failed: ${merged.stderr.trim()}`);
         }
-        const after = await ghJson(worktree, ['pr', 'view', String(delivery.pr.number), '--json', 'state,mergeCommit,mergedAt']);
+        const after = await ghJson(worktree, ['pr', 'view', String(delivery.pr.number), '--json', 'state,mergeCommit,mergedAt,headRefOid']);
         if (after.state !== 'MERGED') throw new Error(`PR #${delivery.pr.number} is ${after.state}, not merged`);
+        // A merged PR only counts when it merged this delivery's exact commit.
+        if (after.headRefOid !== delivery.commit) throw new Error(`PR #${delivery.pr.number} merged ${after.headRefOid}, not delivery commit ${delivery.commit}`);
         delivery.mergeCommit = after.mergeCommit?.oid ?? null; delivery.steps.mergedAt = after.mergedAt;
         delivery.status = 'MERGED';
       } else delivery.status = 'PR_OPEN_MANUAL';
@@ -142,7 +161,7 @@ export async function syncDeliveries(root, config, { worktree } = {}) {
       delivery.status = 'FAIL'; delivery.error = error.message;
     }
     delivery.updatedAt = new Date().toISOString();
-    await saveDelivery(root, state);
+    await saveDelivery(root, config, target, state);
     results.push({ id: delivery.id, status: delivery.status, versions: delivery.shas, commit: delivery.commit, pr: delivery.pr?.url ?? null, mergeCommit: delivery.mergeCommit ?? null, error: delivery.error ?? null });
     // Later deliveries stack on this branch; keep order by stopping at the first failure.
     if (delivery.status === 'FAIL') break;
@@ -152,11 +171,11 @@ export async function syncDeliveries(root, config, { worktree } = {}) {
 }
 
 /** Pending commits must exist before the next version runs, so each commit holds only its own version. */
-export async function assertDelivered(root, config) {
+export async function assertDelivered(root, config, target = null) {
   if (!config.runner?.delivery) return;
-  const source = await sourceStatus(root);
+  const source = await loadProgress(root, config, target);
   if (source.entries.some(entry => entry.status === 'PASS' && !entry.deliveryId)) {
-    const result = await syncDeliveries(root, config);
+    const result = await syncDeliveries(root, config, { target });
     if (result.status === 'FAIL' && result.step === 'commit') throw new Error(`Delivery commit failed: ${result.reason}`);
   }
 }

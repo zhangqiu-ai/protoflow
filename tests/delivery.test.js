@@ -8,36 +8,11 @@ import { promisify } from 'node:util';
 import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
 import { sourceStatus, saveSourceState } from '../src/source.js';
 import { writeJson } from '../src/util.js';
+import { FAKE_GH } from './helpers/fake-gh.js';
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec('git', args, { cwd }).then(result => result.stdout.trim());
 
-/**
- * Local stand-in for the GitHub CLI: pull requests live in a JSON file and heads come from the real bare remote.
- * This exercises ProtoFlow's argv protocol only; real GitHub delivery is recorded separately as acceptance evidence.
- */
-const FAKE_GH = String.raw`#!/usr/bin/env node
-const fs = require('fs'); const { execFileSync } = require('child_process');
-const db = process.env.FAKE_GH_DB; const state = fs.existsSync(db) ? JSON.parse(fs.readFileSync(db, 'utf8')) : { prs: [], calls: [] };
-const args = process.argv.slice(2); state.calls.push(args);
-const save = () => fs.writeFileSync(db, JSON.stringify(state));
-const flag = name => args[args.indexOf(name) + 1];
-const head = branch => execFileSync('git', ['ls-remote', 'origin', 'refs/heads/' + branch]).toString().split('\t')[0] || null;
-const find = key => state.prs.find(pr => String(pr.number) === key || pr.head === key);
-const view = pr => ({ number: pr.number, url: 'https://github.test/pr/' + pr.number, state: pr.state, headRefOid: head(pr.head), mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergedAt: pr.mergedAt ?? null });
-const [group, verb] = args;
-if (process.env.FAKE_GH_FAIL === verb) { save(); console.error('simulated gh ' + verb + ' failure'); process.exit(1); }
-if (group === 'pr' && verb === 'list') { console.log(JSON.stringify(state.prs.filter(pr => pr.state === 'OPEN' && pr.head === flag('--head') && pr.base === flag('--base')).map(view))); }
-else if (group === 'pr' && verb === 'create') { state.prs.push({ number: state.prs.length + 1, head: flag('--head'), base: flag('--base'), title: flag('--title'), state: 'OPEN', comments: [] }); }
-else if (group === 'pr' && verb === 'view') { console.log(JSON.stringify(view(find(args[2])))); }
-else if (group === 'pr' && verb === 'comment') { find(args[2]).comments.push(flag('--body')); }
-else if (group === 'pr' && verb === 'merge') {
-  const pr = find(args[2]);
-  if (flag('--match-head-commit') !== head(pr.head)) { save(); console.error('head moved'); process.exit(1); }
-  pr.state = 'MERGED'; pr.mergeCommit = 'merge-' + pr.number; pr.mergedAt = new Date().toISOString();
-} else { save(); console.error('unsupported ' + args.join(' ')); process.exit(2); }
-save();
-`;
 
 async function fixture(t, { merge = 'auto', versions = 1 } = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-delivery-'));
@@ -151,4 +126,22 @@ test('a failed merge is retried later without recommitting or recommenting', asy
 test('delivery is NOT_RUN without configuration', async t => {
   const { root, config } = await fixture(t);
   assert.equal((await syncDeliveries(root, { ...config, runner: {} })).status, 'NOT_RUN');
+});
+
+test('a second delivery on the same branch opens and merges its own PR, not the earlier merged one', async t => {
+  const { root, worktree, config, gh } = await fixture(t);
+  const first = await syncDeliveries(root, config);
+  assert.equal(first.deliveries[0].status, 'MERGED');
+  // Next accepted version: new application content and a new PASS entry.
+  await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>v2</main>\n');
+  const state = await sourceStatus(root);
+  state.entries.push({ sha: '3'.repeat(40), manifestId: `git-${'3'.repeat(40)}`, ordinal: 2, status: 'PASS', verificationId: 'VER-2', attempts: [] });
+  await saveSourceState(root, state);
+  const second = await syncDeliveries(root, config);
+  assert.equal(second.status, 'PASS', JSON.stringify(second));
+  const delivery = second.deliveries.at(-1);
+  assert.equal(delivery.status, 'MERGED');
+  assert.equal(delivery.pr, 'https://github.test/pr/2');
+  assert.equal(delivery.mergeCommit, 'merge-2');
+  assert.deepEqual((await gh()).prs.map(pr => [pr.number, pr.state]), [[1, 'MERGED'], [2, 'MERGED']]);
 });
