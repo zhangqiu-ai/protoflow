@@ -1,7 +1,39 @@
 name: Test
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+# One run per pull request (or main push); a newer push cancels the older run.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  validate:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        run: node scripts/ci-changes.js "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
+  unit:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+  e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,4 +43,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run validate
+      - run: npm run test:e2e
+  # The single required check: passes when every needed job passed, or was skipped for a docs-only change.
+  validate:
+    needs: [changes, unit, e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All checks passed or were not needed
+        run: |
+          test "${{ needs.changes.result }}" = success
+          for result in "${{ needs.unit.result }}" "${{ needs.e2e.result }}"; do
+            case "$result" in success|skipped) ;; *) echo "A required job ended with: $result"; exit 1 ;; esac
+          done
