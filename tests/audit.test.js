@@ -215,3 +215,16 @@ test('synthetic protocol fixture: automated approval needs policy.autoApprove, i
   // Human approvals keep their default kind.
   assert.equal((await decideReview(root, config, next.id, { status: 'rejected', reviewer: 'Unit fixture reviewer' })).reviewerKind, 'human');
 });
+
+test('awaitGroupExit waits for a real process group to finish and reports survivors', async () => {
+  const { spawn } = await import('node:child_process');
+  const { awaitGroupExit, processGroupAlive } = await import('../src/util.js');
+  const start = seconds => { const child = spawn('sleep', [String(seconds)], { detached: true, stdio: 'ignore' }); child.unref(); return child.pid; };
+  const quick = start(0.3);
+  assert.equal(processGroupAlive(quick), true);
+  assert.equal(await awaitGroupExit(quick, 3000), true);
+  const slow = start(5);
+  assert.equal(await awaitGroupExit(slow, 200), false);
+  process.kill(-slow, 'SIGKILL');
+  assert.equal(await awaitGroupExit(slow, 3000), true);
+});

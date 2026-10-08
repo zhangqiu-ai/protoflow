@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { projectPath, processGroupAlive } from './util.js';
+import { projectPath, processGroupAlive, awaitGroupExit } from './util.js';
 
 /** Resolve a scene URL: http(s) as-is, otherwise a project-contained file URL. */
 export async function urlFor(root, value) {
@@ -35,7 +35,9 @@ export async function superviseBrowser(outDir, { signal, onBeforeSpawn, onStart,
     try { if (signal?.aborted) await (abortKill ?? server.kill()); else await server.close(); }
     catch (error) { closeError = error; }
     finally { clearTimeout(timer); }
-    if (pid && processGroupAlive(pid)) {
+    // Chromium helper processes (zygote, crashpad) can still be exiting when close() resolves; give the group a
+    // bounded grace period, then treat anything left as a surviving group.
+    if (pid && !(await awaitGroupExit(pid, 2000))) {
       closeError ??= new Error('Visual browser closed with a surviving subprocess group; terminated the group and blocked advancement');
       try { process.kill(-pid, 'SIGKILL'); } catch { /* Check the full group below. */ }
       const deadline = Date.now() + 2000;

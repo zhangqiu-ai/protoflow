@@ -133,6 +133,15 @@ export async function fingerprint(root, { exclude = [] } = {}) {
   return { hash: hash(files), files };
 }
 /** A detached POSIX command owns a process group whose ID is its leader PID. */
+/** Wait up to `graceMs` for a process group to finish exiting; true once it is gone. */
+export async function awaitGroupExit(pid, graceMs) {
+  const deadline = Date.now() + graceMs;
+  while (processGroupAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await delay(25);
+  }
+  return true;
+}
 export function processGroupAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Unknown process-group identity; inspect before recovery');
   if (process.platform === 'win32') return true; // Cannot prove an orphaned process tree has ended.
