@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 已接受；P0、P1 與外部驅動器協定已實作（見 §16） |
+| 狀態 | 已接受；P0、P1（含真實驗收）與外部驅動器協定已完成（見 §16） |
 | 日期 | 2026-10-08 |
 | 影響範圍 | 配置 schema、checkpoint／來源凍結、Context Package、驗證、Runner／交付 |
 | 相關文件 | [架構](../architecture.md)、[Git Runner](../git-runner.md)、[原型拆分](../prototype-structure.md)、[整合協定](../integrations.md) |
@@ -371,7 +371,7 @@ Context Package 對每個 target 提供：
 | 階段 | 內容 | 完成條件 |
 |---|---|---|
 | P0 規格 ✅ | 審定錨點語法、sidecar、合約、驅動器協定的 JSON Schema；決定 §15 待決問題 | Schema 與範例檢入；本提案狀態改為「已接受」 |
-| P1 Web 錨點化 ✅（真實驗收待完成） | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
+| P1 Web 錨點化 ✅ | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
 | P2 多目標與 Electron | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
 | P3 Android | `external` 驅動器協定實作、Maestro 參考驅動器、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
 | P4 iOS | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
@@ -432,10 +432,24 @@ Context Package 對每個 target 提供：
 
 Git 來源中錨點無效的提交不發佈為版本；`source/state.json` 的 `rejected[]` 記錄錯誤，掃描繼續。下一個有效提交的 diff 從上一個有效版本起算（該提交的變更不會遺失），並記為 `foldedInto`。這維持「不跨版本」：無效提交本來就不是一個設計版本。
 
-### 16.4 尚未完成
+### 16.4 真實驗收（2026-10-08）
 
-- P1 完成條件中的**真實驗收**：`protoflow-test` 遷移到錨點，並以真實 GitHub＋Codex 跑完含新增畫面的兩個版本。
+`protoflow-test` 以獨立分支執行：原型來源 `protoflow-anchors-20261008`（自 `6f5cb38` 起），應用分支 `anchors-acceptance`，交付分支 `protoflow/anchors-delivery`，真實 GitHub fetch 與真實 Codex（`gpt-5.6-terra`），`policy.autoApprove` 自動批准。
+
+| 版本 | 內容 | 等級／範圍 | Codex 修改 | 結果 |
+|---|---|---|---|---|
+| `85223b1` | 為登入與對話畫面加入錨點與 sidecar 狀態 | L2／`chat`、`login` | `app/chat.html`、`app/index.html` 加上 `data-testid`，更新測試 | 第一次 PASS；四層全過；PR #7 合併 |
+| `76b9a0a` | 新增 help 畫面 | L1／`help` | 新增 `app/help.html`、`app/help.css`、`tests/help.spec.js` | 第一次只有 Codex 自寫的功能測試失敗（四層已過），有限修復一次後 PASS；PR #8 合併 |
+
+- 兩個版本之間沒有執行 `runner configure`：新畫面由 Codex 依原型實作，驗收自動納入（Web 預設全量回歸，第二版驗證 6 個場景）。
+- 25 個錨點全部在錨點索引中找到應用端位置。
+- PR #8 合併時遇到 GitHub 503，`delivery sync` 從失敗步驟續做，未重複 commit 或留言。
+- 證據：驗收專案的 `.protoflow/acceptance/anchors-real-acceptance.json`（各 attempt 的 execution／verification、manifest／prototype／application hash、截圖 hash、程序紀錄）。
+
+### 16.5 尚未完成
+
 - P2–P5：多目標、Electron 驅動器、Android／iOS／Flutter／React Native 參考驅動器與範例應用。本機已有 iOS 模擬器，尚未安裝 Android SDK。
+- L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供；每版自動產生規格不在本提案範圍。
 
 ## 附錄 A：合約片段
 
