@@ -67,11 +67,17 @@ protoflow runner start --project /path/to/app --once
 
 `targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已接受的最新版本。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
 
+## CLI 輸出契約
+
+stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結果）；失敗時 stderr 最後一行是 JSON 錯誤，之前的行是提醒或 `ProtoFlow diagnostic:` 診斷。巡查或其他程式解析輸出時應依此規則，不要把整段 stderr 當 JSON。
+
 ## 證據與順序
 
 `.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。
 
-Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；未啟用 `policy.autoApprove` 時，Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。
+Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；未啟用 `policy.autoApprove` 時，Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。PASS 之後若有人工或獨立模型審查拒收（`rejected`／`changes_requested`），Runner 下一輪會把該 target 的同一版本重開為 PENDING 並重新執行；舊 PASS 與交付記在 `reopenings`（見提案 §16.8）。
+
+重開版本原有的未完成交付會保留為 `REVOKED` 歷史，讓 Runner 能產生新的驗收證據；舊 commit、審查及 PR 記錄不刪除。若舊交付已發佈且 PR 仍開啟，可以先在本機修復，但新的交付不會更新共用遠端分支；須先在外部處理舊 PR，再以新 verification 及獨立審查交付。引擎不會自行關閉被拒的 PR。
 
 ## 自動交付（commit → PR → 合併）
 

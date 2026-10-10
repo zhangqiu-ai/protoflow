@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 import { createContext, executeContext, verify, loadArtifact, applicationFingerprint } from './workflow.js';
-import { versionQueue } from './queue.js';
+import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix } from './streams.js';
@@ -117,13 +117,64 @@ async function exportEvidence(root, worktree, report) {
   await writeJson(await projectPath(root, `.protoflow/verifications/${report.id}.json`), { ...report, runnerWorktree: worktree });
 }
 
+/** Copy decided rejections (and their model evidence) between the project and the runner worktree so both queues agree. */
+async function shareRejections(root, worktree) {
+  const list = async base => {
+    const directory = await projectPath(base, '.protoflow/reviews');
+    try { return (await fs.readdir(directory)).filter(name => /^[a-zA-Z0-9_.-]+\.json$/.test(name)); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  };
+  for (const [from, to] of [[root, worktree], [worktree, root]]) {
+    const existing = new Set(await list(to));
+    for (const name of await list(from)) {
+      if (existing.has(name)) continue;
+      const review = await readJson(await projectPath(from, `.protoflow/reviews/${name}`));
+      if (!REJECTING.includes(review.status) || !review.reviewedAt) continue;
+      if (review.model?.path) {
+        const target = await projectPath(to, review.model.path);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.copyFile(await projectPath(from, review.model.path), target);
+      }
+      await writeJson(await projectPath(to, `.protoflow/reviews/${name}`), review);
+    }
+  }
+}
+/**
+ * A rejection recorded after a version passed reopens it for this stream: its PASS entry returns to PENDING and the
+ * previous verification, delivery and completion are kept in `reopenings`. Other targets' progress is not touched.
+ */
+async function reopenRejected(root, config, stream) {
+  const worktree = (await readJson(await projectPath(root, runnerStatePath(config, stream)), null))?.worktree ?? null;
+  if (worktree) await shareRejections(root, worktree);
+  const state = await loadProgress(root, config, stream);
+  const queue = await versionQueue(worktree ?? root, config, { target: stream ?? undefined });
+  const reopened = [];
+  for (const entry of state.entries) {
+    if (entry.status !== 'PASS') continue;
+    const version = queue.versions.find(item => item.id === entry.manifestId);
+    if (!version || version.acceptedBy || !version.rejections?.length) continue;
+    entry.reopenings = [...(entry.reopenings ?? []), { at: new Date().toISOString(), previousStatus: entry.status, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, completedAt: entry.completedAt ?? null, rejections: version.rejections }];
+    Object.assign(entry, { status: 'PENDING', verificationId: null, deliveryId: null, completedAt: null, error: null });
+    reopened.push(entry.manifestId);
+  }
+  if (!reopened.length) return reopened;
+  const open = state.entries.findIndex(entry => entry.status !== 'PASS');
+  state.completedSha = open > 0 ? state.entries[open - 1].sha : null;
+  await saveProgress(root, config, stream, state);
+  return reopened;
+}
+
 /** One source stream, one isolated application worktree, one bounded FIFO executor. No implicit commits or approval. */
 export async function runOnce(root, config, { signal, onEvent = () => {}, target: stream = null } = {}) {
   if (config.policy?.sequentialVersions === false) throw new Error('Git runner requires sequentialVersions');
   if (signal?.aborted) return { status: 'STOPPED' };
   const statePath = runnerStatePath(config, stream);
   const target = stream ?? undefined;
-  // Commit earlier accepted versions first (before reading state) so every commit holds a single version.
+  // Rejected versions reopen before delivery, so a rejected PASS is never committed or counted as done.
+  let reopened;
+  try { reopened = await reopenRejected(root, config, stream); }
+  catch (error) { return { status: 'BLOCKED', reason: `Review reconciliation failed: ${error.message}` }; }
+  if (reopened.length) await onEvent({ event: 'reopened', versions: reopened });
+  // Reconcile revoked delivery history, then commit earlier accepted versions so every commit holds its own version.
   try { await assertDelivered(root, config, stream); }
   catch (error) { return { status: 'BLOCKED', reason: error.message }; }
   const state = await loadProgress(root, config, stream);

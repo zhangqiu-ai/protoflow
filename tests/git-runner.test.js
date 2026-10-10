@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { scanSource, sourceStatus, git, gitSnapshot } from '../src/source.js';
 import { runOnce, retryRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
-import { verify } from '../src/workflow.js';
+import { verify, createReview, decideReview } from '../src/workflow.js';
 import { loadVersion } from '../src/versions.js';
 import { runCommand, withLock, hash, fingerprint, processGroupAlive } from '../src/util.js';
 
@@ -509,6 +509,80 @@ test('synthetic PASS crash recovery saves runner IDLE and permits configuration 
   assert.equal(state.entries[0].status, 'PASS'); assert.ok(state.entries[0].completedAt);
   assert.equal(state.completedSha, entry.sha); assert.equal(runner.status, 'IDLE'); assert.equal(runner.current, null);
   assert.equal((await configureRunner(root, config)).status, 'PASS');
+});
+test('a review rejection after PASS reopens the same version in the runner and keeps its history', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config); await runOnce(root, config); await retryRunner(root);
+  let { source: state, runner } = await runnerStatus(root);
+  const [first, second] = state.entries;
+  const manifest = JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/manifests', `${first.manifestId}.json`), 'utf8'));
+  // Synthetic PASS evidence, recovered by the runner like an interrupted PASS (no executor or browser involved).
+  const report = { id: 'VER-before-rejection', createdAt: new Date(Date.now() - 1000).toISOString(), manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir] }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
+  await fs.mkdir(path.join(runner.worktree, '.protoflow/verifications'), { recursive: true });
+  await fs.writeFile(path.join(runner.worktree, '.protoflow/verifications', `${report.id}.json`), JSON.stringify(report));
+  runner.status = 'RUNNING'; runner.current = first.manifestId;
+  await fs.writeFile(path.join(root, '.protoflow/runner/state.json'), JSON.stringify(runner));
+  assert.equal((await runOnce(root, config)).status, 'PASS');
+  assert.equal((await runOnce(root, config)).manifestId, second.manifestId, 'the runner moved on to the next version');
+  await retryRunner(root);
+
+  // A reviewer rejects the accepted verification in the runner worktree.
+  const review = await createReview(runner.worktree, config, first.manifestId, report.id);
+  await decideReview(runner.worktree, config, review.id, { status: 'changes_requested', reviewer: 'Fixture reviewer', findings: [{ severity: 'high', description: 'Root geometry differs' }] });
+  const events = [];
+  const blocked = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual(events[0], { event: 'reopened', versions: [first.manifestId] });
+  // The same version runs again (the fixture executor fails), not the next one.
+  assert.equal(blocked.status, 'BLOCKED'); assert.equal(blocked.manifestId, first.manifestId);
+  ({ source: state } = await runnerStatus(root));
+  const reopened = state.entries[0];
+  assert.equal(reopened.reopenings.length, 1);
+  assert.equal(reopened.reopenings[0].previousStatus, 'PASS');
+  assert.equal(reopened.reopenings[0].verificationId, report.id);
+  assert.deepEqual(reopened.reopenings[0].rejections.map(item => [item.reviewId, item.verificationId]), [[review.id, report.id]]);
+  assert.equal(reopened.verificationId, null); assert.equal(state.completedSha, null);
+  // Attempts and the earlier verification are history, never rewritten; the decision is shared with the project.
+  assert.ok(reopened.attempts.length >= 2);
+  assert.equal(JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/verifications', `${report.id}.json`), 'utf8')).status, 'PASS');
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, '.protoflow/reviews', `${review.id}.json`), 'utf8')).status, 'changes_requested');
+  assert.equal(state.entries[1].status, 'PENDING');
+  assert.equal((await versionQueue(runner.worktree, config)).current.id, first.manifestId);
+});
+test('revoked unfinished delivery history permits the same-version repair executor and preserves FIFO', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config); await runOnce(root, config); await retryRunner(root);
+  const { source: state, runner } = await runnerStatus(root), first = state.entries[0];
+  const manifest = JSON.parse(await fs.readFile(path.join(root, '.protoflow/manifests', `${first.manifestId}.json`), 'utf8'));
+  // Seed an already accepted version; this test verifies repair scheduling, not browser/provider acceptance.
+  const report = { id: 'VER-delivery-rejected', createdAt: new Date(Date.now() - 1000).toISOString(), manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir] }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
+  for (const base of [root, runner.worktree]) {
+    await fs.mkdir(path.join(base, '.protoflow/verifications'), { recursive: true });
+    await fs.writeFile(path.join(base, '.protoflow/verifications', `${report.id}.json`), JSON.stringify(report));
+  }
+  Object.assign(first, { status: 'PASS', verificationId: report.id, deliveryId: 'DLV-rejected', completedAt: new Date().toISOString() });
+  state.completedSha = first.sha;
+  await fs.writeFile(path.join(root, '.protoflow/source/state.json'), JSON.stringify(state));
+  const review = await createReview(runner.worktree, config, first.manifestId, report.id);
+  await decideReview(runner.worktree, config, review.id, { status: 'rejected', reviewer: 'Fixture reviewer' });
+  config.runner = { delivery: { remote: 'origin', branch: 'protoflow/delivery', baseBranch: 'main', merge: 'auto' } };
+  runner.configHash = hash(config);
+  await fs.writeFile(path.join(root, '.protoflow/runner/state.json'), JSON.stringify(runner));
+  const old = { id: first.deliveryId, status: 'COMMITTED', versions: [first.manifestId], shas: [first.sha], commit: (await git(runner.worktree, ['rev-parse', 'HEAD'])).trim(), steps: {} };
+  await fs.mkdir(path.join(root, '.protoflow/delivery'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/delivery/state.json'), JSON.stringify({ schemaVersion: 1, deliveries: [old] }));
+
+  const events = [], result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.equal(result.manifestId, first.manifestId); assert.match(result.reason, /exit 9/);
+  assert.deepEqual(events.filter(event => event.event === 'execute').map(event => event.manifestId), [first.manifestId]);
+  const after = await sourceStatus(root);
+  assert.equal(after.entries[0].attempts.length, first.attempts.length + 1);
+  assert.equal(after.entries[1].status, 'PENDING'); assert.equal(after.entries[1].attempts.length, 0);
+  assert.equal(after.entries[0].reopenings[0].deliveryId, old.id);
+  const [retired] = JSON.parse(await fs.readFile(path.join(root, '.protoflow/delivery/state.json'), 'utf8')).deliveries;
+  assert.equal(retired.status, 'REVOKED'); assert.equal(retired.commit, old.commit);
+  assert.equal(retired.revocation.previousStatus, 'COMMITTED');
 });
 test('all source entries PASS repair a stale runner RUNNING state before returning IDLE', async t => {
   const { root, config, shas } = await fixture(t);

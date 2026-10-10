@@ -23,3 +23,12 @@ test('unconfigured and native visual verification are explicitly NOT_RUN', async
   assert.equal(result.status, 'NOT_RUN');
   assert.match(result.reason, /Native UI/);
 });
+
+test('overlay uses actual source-over alpha at 50% application opacity', () => {
+  const before = new PNG({ width: 1, height: 1 }), after = new PNG({ width: 1, height: 1 });
+  before.data.set([0, 0, 0, 255]); after.data.set([255, 0, 0, 128]);
+  const overlay = PNG.sync.read(compareImages(PNG.sync.write(before), PNG.sync.write(after)).overlay);
+  assert.deepEqual([...overlay.data], [64, 0, 0, 255]);
+  before.data.set([0, 0, 0, 0]); after.data.set([255, 0, 0, 255]);
+  assert.deepEqual([...PNG.sync.read(compareImages(PNG.sync.write(before), PNG.sync.write(after)).overlay).data], [255, 0, 0, 128]);
+});

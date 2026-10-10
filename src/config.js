@@ -1,8 +1,10 @@
+import path from 'node:path';
 import { validateSource } from './source.js';
 import Ajv from 'ajv';
 import { readJson, projectPath } from './util.js';
 
 const command = { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['argv'], properties: { argv: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }, timeoutMs: { type: 'integer', minimum: 1, maximum: 3600000 } } }] };
+const functionalCommand = { anyOf: [...command.anyOf, { type: 'object', additionalProperties: false, required: ['adapter'], properties: { adapter: { const: 'acceptance' } } }] };
 const selectorPair = { type: 'object', required: ['prototype', 'application'], properties: { prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 } }, additionalProperties: false };
 export const configSchema = {
   type: 'object', required: ['schemaVersion', 'prototypeDir', 'mappings'], additionalProperties: false,
@@ -18,10 +20,10 @@ export const configSchema = {
     classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
     policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
-    verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: command } },
+    verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: functionalCommand } },
     adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: ['codex', 'independentReview'].includes(key) ? { command } : { command, install: command } }])) },
     visual: { type: 'object', additionalProperties: false, properties: {
-      mode: { enum: ['browser', 'native'] },
+      mode: { enum: ['browser', 'native', 'adapter'] },
       prototypeBaseUrl: { type: 'string', pattern: '^https?://' },
       maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, pixelThreshold: { type: 'number', minimum: 0, maximum: 1 }, geometryTolerance: { type: 'number', minimum: 0 }, styleProperties: { type: 'array', items: { type: 'string' } },
       scenes: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'prototypeUrl', 'applicationUrl', 'viewport'], properties: {
@@ -31,6 +33,7 @@ export const configSchema = {
   }
 };
 const tier = { enum: ['required', 'advisory', 'off'] };
+configSchema.properties.adapters.properties.acceptance = { type: 'object', additionalProperties: false, required: ['command'], properties: { command: command.anyOf[1], options: { type: 'object' } } };
 const shared = configSchema.properties;
 /** schemaVersion 2: semantic anchors and per-platform targets replace component mappings (docs/proposals/0001). */
 export const configSchemaV2 = {
@@ -49,9 +52,12 @@ export const configSchemaV2 = {
       platform: { enum: ['web', 'electron', 'ios', 'android', 'flutter', 'react-native'] },
       root: { type: 'string', minLength: 1 },
       driver: { type: 'object', required: ['kind'], additionalProperties: false, properties: {
-        kind: { enum: ['playwright-web', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build
+        kind: { enum: ['playwright-web', 'playwright-electron', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build,
+        // playwright-electron: entry relative to the target root, route template ('#/{screen}' or a page path), optional binary.
+        main: { type: 'string', minLength: 1 }, route: { type: 'string', minLength: 1 }, executablePath: { type: 'string', minLength: 1 },
+        args: { type: 'array', items: { type: 'string' } }, env: { type: 'object', additionalProperties: { type: 'string' } }
       } },
-      build: shared.verification.properties.build, functional: shared.verification.properties.functional,
+      build: command, functional: command,
       locator: { type: 'object', additionalProperties: false, properties: { attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, strategy: { type: 'string', minLength: 1 } } },
       tiers: { type: 'object', additionalProperties: false, properties: { structure: tier, tokens: tier, layout: tier, visual: tier } },
       regression: { enum: ['all', 'affected', 'affected+smoke'] },
@@ -87,6 +93,11 @@ async function loadConfigV2(root, config) {
     if (target.root && target.root !== '.') await projectPath(root, target.root);
     if (target.driver.kind === 'playwright-web' && !target.driver.urlTemplate) throw new Error(`Target ${target.id}: playwright-web requires driver.urlTemplate`);
     if (target.driver.kind === 'external' && !target.driver.command) throw new Error(`Target ${target.id}: external driver requires driver.command`);
+    if (target.driver.kind === 'playwright-electron') {
+      if (!target.driver.main || !target.driver.route) throw new Error(`Target ${target.id}: playwright-electron requires driver.main and driver.route`);
+      await projectPath(root, path.posix.join(target.root ?? '.', target.driver.main));
+      if (target.driver.executablePath) await projectPath(root, target.driver.executablePath);
+    }
   }
   return config;
 }
@@ -94,6 +105,7 @@ export async function loadConfig(root) {
   const config = await readJson(await projectPath(root, 'protoflow.config.json'));
   if (config?.schemaVersion === 2) return loadConfigV2(root, config);
   if (!validate(config)) throw new Error(`Invalid ProtoFlow config: ${JSON.stringify(validate.errors)}`);
+  if ((config.visual?.mode === 'adapter' || config.verification?.functional?.adapter === 'acceptance') && !config.adapters?.acceptance?.command) throw new Error('Configure adapters.acceptance.command for project acceptance');
   if (config.source) validateSource(config.source);
   await projectPath(root, config.prototypeDir);
   for (const evidence of [config.runner?.spec, config.runner?.adr].filter(Boolean)) await projectPath(root, evidence);

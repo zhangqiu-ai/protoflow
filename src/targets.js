@@ -5,8 +5,10 @@ import { staticContract } from './anchors.js';
 import { superviseBrowser, urlFor } from './browser.js';
 import { captureWeb } from './drivers/web.js';
 import { captureExternal } from './drivers/external.js';
+import { captureElectron, captureElectronPrototype } from './drivers/electron.js';
 import { compareStructure, compareTokens, compareLayout, compareVisual, tierVerdict, flattenTokens, TIERS } from './tiers.js';
 import { projectPath, writeJson, readJson } from './util.js';
+import { PNG } from 'pngjs';
 
 const SAME_TECHNOLOGY = new Set(['web', 'electron']);
 /** Defaults by platform: web-like targets can match pixels; native targets use relative layout and perceptual visuals. */
@@ -61,6 +63,24 @@ export function scenesFor(contract, scope, regression) {
   return scenes;
 }
 
+/** Size problems of captures against the requested viewport: reported viewport and screenshot pixels must both match. */
+export function captureSizeIssues(viewport, captures) {
+  const scale = viewport.scale ?? 1;
+  const pixels = { width: Math.round(viewport.width * scale), height: Math.round(viewport.height * scale) };
+  const issues = [];
+  for (const [side, capture] of Object.entries(captures)) {
+    const reported = capture.viewport ?? {};
+    if (reported.width !== viewport.width || reported.height !== viewport.height || (reported.scale ?? 1) !== scale) {
+      issues.push(`${side} viewport ${reported.width}×${reported.height}@${reported.scale ?? 1} does not match requested ${viewport.width}×${viewport.height}@${scale}`);
+    }
+    if (capture.screenshot) {
+      const image = PNG.sync.read(capture.screenshot);
+      if (image.width !== pixels.width || image.height !== pixels.height) issues.push(`${side} screenshot ${image.width}×${image.height} px does not match requested ${pixels.width}×${pixels.height} px`);
+    }
+  }
+  return issues;
+}
+
 function fillTemplate(template, { screen, page, state }, prototypeDir) {
   const relative = path.posix.relative(prototypeDir.split(path.sep).join('/'), page).replace(/\.html?$/i, '');
   return template.replaceAll('{screen}', screen).replaceAll('{page}', relative).replaceAll('{state}', state);
@@ -86,6 +106,7 @@ async function captureApplication(root, config, target, settings, browser, scene
     await hooks.onFinish?.('visual-driver', pid, { status: outcome.status, processGroupActive: false });
     return outcome;
   }
+  if (target.driver?.kind === 'playwright-electron') return captureElectron(root, target, settings, request, hooks);
   if (target.driver?.kind !== 'playwright-web') return { status: 'NOT_RUN', reason: `driver kind ${target.driver?.kind} is not available in this phase` };
   const template = target.driver.urlTemplate;
   if (!template) return { status: 'FAIL', reason: 'playwright-web target requires driver.urlTemplate' };
@@ -151,25 +172,57 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
       const request = driverRequest(target, settings, scene, screen, state, `${outRelative}/${target.id}/${id}/driver`);
       const { anchors } = request;
       let prototype;
-      try {
-        const url = pathToFileURL(await projectPath(root, `${version.directory}/${screen.page}`)).href;
-        prototype = await captureWeb(browser, { url, attribute, anchors, steps: state.steps, fixture: request.fixture.data, viewport: settings.viewport });
-      } catch (error) {
-        entry.reason = `prototype state is unreachable: ${error.message.split('\n')[0]}`;
-        results.push(entry); continue;
+      const prototypeUrl = pathToFileURL(await projectPath(root, `${version.directory}/${screen.page}`)).href;
+      if (target.driver?.kind === 'playwright-electron') {
+        // Same engine on both sides: the frozen prototype is rendered by the target's Electron build.
+        const reference = await captureElectronPrototype(root, target, settings, request, { url: prototypeUrl, attribute }, hooks);
+        if (reference.runtime) {
+          const runtimeFile = path.join(sceneDir, 'prototype-runtime.json');
+          await writeFile(runtimeFile, `${JSON.stringify(reference.runtime, null, 2)}\n`);
+          entry.artifacts.push(runtimeFile);
+          entry.prototypeRuntime = reference.runtime;
+        }
+        if (reference.status !== 'PASS') {
+          entry.status = reference.status === 'NOT_RUN' ? 'NOT_RUN' : 'FAIL';
+          entry.reason = reference.status === 'NOT_RUN' ? reference.reason : `prototype state is unreachable: ${reference.reason}`;
+          for (const tier of TIERS) entry.tiers[tier] = { status: entry.status === 'NOT_RUN' ? 'NOT_RUN' : 'FAIL', reasons: [entry.reason] };
+          artifacts.push(...entry.artifacts); results.push(entry); continue;
+        }
+        prototype = reference.capture;
+      } else {
+        try {
+          prototype = await captureWeb(browser, { url: prototypeUrl, attribute, anchors, steps: state.steps, fixture: request.fixture.data, viewport: settings.viewport });
+        } catch (error) {
+          entry.reason = `prototype state is unreachable: ${error.message.split('\n')[0]}`;
+          results.push(entry); continue;
+        }
       }
       const app = await captureApplication(root, config, target, settings, browser, scene, request, hooks);
       const write = async (name, buffer) => { const file = path.join(sceneDir, `${name}.png`); await writeFile(file, buffer); entry.artifacts.push(file); };
       await write('prototype', prototype.screenshot);
+      if (app.runtime) {
+        // Electron runtime evidence: versions, executable, PID, route, actual viewport and exit.
+        const runtimeFile = path.join(sceneDir, 'runtime.json');
+        await writeFile(runtimeFile, `${JSON.stringify(app.runtime, null, 2)}\n`);
+        entry.artifacts.push(runtimeFile);
+        entry.runtime = app.runtime;
+      }
       if (app.status !== 'PASS') {
         entry.status = app.status; entry.reason = app.reason;
         for (const tier of TIERS) entry.tiers[tier] = { status: app.status === 'FAIL' ? 'FAIL' : 'NOT_RUN', reasons: [app.reason] };
       } else {
         if (app.capture.screenshot) await write('application', app.capture.screenshot);
+        // Every driver must capture at exactly the requested size; equal but wrong sizes on both sides are not a match.
+        const sizeIssues = captureSizeIssues(settings.viewport, { prototype, application: app.capture });
+        if (sizeIssues.length) {
+          entry.status = 'FAIL'; entry.reason = sizeIssues.join('; ');
+          for (const tier of TIERS) entry.tiers[tier] = { status: 'FAIL', reasons: sizeIssues };
+          artifacts.push(...entry.artifacts); results.push(entry); continue;
+        }
         const tiers = {
           structure: compareStructure(screen, state, prototype, app.capture),
           tokens: compareTokens(screen, prototype, app.capture, { tokens, ...settings.tokens }),
-          layout: compareLayout(scene.screen, screen, prototype, app.capture, settings.layout),
+          layout: compareLayout(scene.screen, screen, prototype, app.capture, { ...settings.layout, viewport: settings.viewport }),
           visual: compareVisual(screen, prototype, app.capture, settings.visual)
         };
         if (tiers.visual.images?.diff) await write('diff', tiers.visual.images.diff);

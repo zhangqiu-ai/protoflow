@@ -7,6 +7,7 @@ import { hash, id, fingerprint, projectPath, readJson, writeJson, runCommand } f
 import { loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, deliveryBranch, isMultiTarget } from './streams.js';
 import { loadVersion } from './versions.js';
+import { verificationRevocation } from './queue.js';
 import { deliveryGit as git, resolveDeliveryDestination } from './delivery-scope.js';
 
 const directory = '.protoflow/delivery/independent-reviews';
@@ -143,6 +144,11 @@ async function capture(root, config, options, ownedMerge = null) {
     const localManifest = await loadArtifact(worktree, 'manifests', entry.manifestId), localReport = await loadArtifact(worktree, 'verifications', entry.verificationId);
     if (manifest.id !== entry.manifestId || manifest.source?.sha !== entry.sha || manifest.source.repository !== config.source.repository || report.id !== entry.verificationId || report.manifestId !== entry.manifestId || report.manifestHash !== hash(manifest) || report.prototypeHash !== manifest.afterHash || hash(report.project?.files) !== report.project?.hash || hash(localManifest) !== hash(manifest) || hash(contentReport(localReport)) !== hash(contentReport(report))) throw blocked('Source, manifest or new VER evidence binding changed');
     if (report.status !== 'PASS' || report.build?.status !== 'PASS' || report.functional?.status !== 'PASS' || report.visual?.status !== 'PASS' || report.changedDuringVerification) throw blocked('Delivery acceptance FAIL or NOT_RUN; complete PASS is required');
+    // Progress may still say PASS until the runner reopens it; rejection already withdraws delivery authority.
+    for (const evidenceRoot of new Set([root, worktree])) {
+      const revocation = await verificationRevocation(evidenceRoot, config, report);
+      if (revocation) throw blocked(`Delivery acceptance ${report.id} revoked by ${revocation.reviewId} (${revocation.status}); verify again after rejection`);
+    }
     if ((entry.manifestHash && entry.manifestHash !== hash(manifest)) || (entry.verificationHash && entry.verificationHash !== hash(report))) throw blocked('Accepted source hashes changed');
     await loadVersion(worktree, config, manifest);
     if (!Object.keys(report.artifactHashes ?? {}).length) throw blocked('Missing hashed acceptance artifacts');

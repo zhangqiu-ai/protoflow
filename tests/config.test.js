@@ -44,3 +44,20 @@ test('configuration publishes the independent review adapter and optional scoped
   await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config)); assert.deepEqual(await loadConfig(root), config);
   for (const paths of [[], ['app', 'app']]) { await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...config, runner: { delivery: { ...config.runner.delivery, paths } } })); await assert.rejects(loadConfig(root)); }
 });
+
+test('v1 project acceptance requires an adapter command and does not extend v2 functional commands', async t => {
+  const root = await target(t), config = await loadConfig(root);
+  config.verification.functional = { adapter: 'acceptance' };
+  config.visual.mode = 'adapter';
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await assert.rejects(loadConfig(root), /acceptance/);
+  config.adapters.acceptance = { command: { argv: ['node', 'acceptance.mjs'] }, options: { fixture: true } };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  assert.deepEqual(await loadConfig(root), config);
+  const v2 = { schemaVersion: 2, prototypeDir: 'prototype', targets: [{ id: 'web', platform: 'web', driver: { kind: 'playwright-web', urlTemplate: 'app/{page}.html' }, functional: { argv: ['node', 'test.mjs'] } }] };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(v2));
+  assert.deepEqual(await loadConfig(root), v2);
+  v2.targets[0].functional = { adapter: 'acceptance' };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(v2));
+  await assert.rejects(loadConfig(root));
+});

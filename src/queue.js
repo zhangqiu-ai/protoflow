@@ -11,14 +11,53 @@ async function records(root, kind) {
 
 const chronological = (a, b) => a.source?.identity && a.source.identity === b.source?.identity && a.source.ordinal && b.source.ordinal ? a.source.ordinal - b.source.ordinal : a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 
+/** Review decisions that withdraw an acceptance. Approval is separate: it never restores a rejected verification. */
+export const REJECTING = ['rejected', 'changes_requested'];
+
 /**
- * A prototype version is accepted once a PASS verification is bound to its exact manifest and prototype content.
- * With targets, only that target's verifications count; records made before targets existed belong to the first one.
+ * A decided rejection (human or independent model review) of a PASS verification revokes acceptance: for that
+ * verification's target, no verification of the rejected version or of a later version created up to the decision
+ * counts any more. Every record stays; only verification made after the decision can accept again.
  */
-export function acceptedBy(manifest, verifications, target, defaultTarget = target) {
+export function revocations(manifests, verifications, reviews, defaultTarget) {
+  const byId = new Map(verifications.map(item => [item.id, item]));
+  const order = new Map(manifests.map((manifest, index) => [manifest.id, index]));
+  return reviews.filter(review => REJECTING.includes(review.status) && review.reviewedAt).flatMap(review => {
+    const verification = byId.get(review.verificationId);
+    if (!verification || verification.status !== 'PASS' || verification.manifestId !== review.manifestId || !order.has(review.manifestId)) return [];
+    return [{ reviewId: review.id, status: review.status, reviewerKind: review.reviewerKind ?? 'human', reviewer: review.reviewer, at: review.reviewedAt,
+      manifestId: review.manifestId, verificationId: verification.id, target: verification.target ?? defaultTarget, index: order.get(review.manifestId) }];
+  });
+}
+const revokes = (revocation, item, index, defaultTarget) => revocation.index <= index && revocation.target === (item.target ?? defaultTarget) && !(item.createdAt > revocation.at);
+const publicRevocation = ({ index, ...revocation }) => revocation;
+
+/**
+ * A prototype version is accepted once a PASS verification is bound to its exact manifest and prototype content
+ * and no rejection revokes it. With targets, only that target's verifications count; records made before targets
+ * existed belong to the first one. `index` is the version's position in checkpoint order.
+ */
+export function acceptedBy(manifest, verifications, target, defaultTarget = target, { index = 0, revoked = [] } = {}) {
   return verifications.filter(item => item.manifestId === manifest.id && item.status === 'PASS' && item.manifestHash === hash(manifest) && item.prototypeHash === manifest.afterHash
-    && (target === undefined || (item.target ?? defaultTarget) === target))
+    && (target === undefined || (item.target ?? defaultTarget) === target)
+    && !revoked.some(revocation => revokes(revocation, item, index, defaultTarget)))
     .sort(chronological).at(-1) ?? null;
+}
+
+/** The rejection that keeps a verification from accepting its version, or null. */
+export async function verificationRevocation(root, config, verification) {
+  const { manifests, verifications, revoked, defaultTarget } = await queueRecords(root, config);
+  const index = manifests.findIndex(manifest => manifest.id === verification.manifestId);
+  const own = verifications.find(item => item.id === verification.id) ?? verification;
+  const found = index === -1 ? null : revoked.find(revocation => revokes(revocation, own, index, defaultTarget));
+  return found ? publicRevocation(found) : null;
+}
+
+async function queueRecords(root, config) {
+  const manifests = (await records(root, 'manifests')).sort(chronological);
+  const verifications = await records(root, 'verifications');
+  const defaultTarget = config.schemaVersion === 2 ? config.targets[0]?.id : undefined;
+  return { manifests, verifications, defaultTarget, revoked: revocations(manifests, verifications, await records(root, 'reviews'), defaultTarget) };
 }
 
 const stepsFor = (current, target) => {
@@ -42,20 +81,23 @@ function cursor(versions, accepted) {
  * by every target. `release` reports the newest version every required target has accepted.
  */
 export async function versionQueue(root, config, { target } = {}) {
-  const manifests = (await records(root, 'manifests')).sort(chronological);
-  const verifications = await records(root, 'verifications');
+  const { manifests, verifications, revoked } = await queueRecords(root, config);
   const sequential = config.policy?.sequentialVersions !== false;
   const ids = config.schemaVersion === 2 ? config.targets.map(item => item.id) : [];
   if (target && !ids.includes(target)) throw new Error(`Unknown target: ${target}`);
   const selected = target ?? (ids.length === 1 ? ids[0] : null);
-  const versions = manifests.map(manifest => {
-    const byTarget = Object.fromEntries(ids.map(id => [id, acceptedBy(manifest, verifications, id, ids[0])?.id ?? null]));
+  const versions = manifests.map((manifest, index) => {
+    const options = { index, revoked };
+    const byTarget = Object.fromEntries(ids.map(id => [id, acceptedBy(manifest, verifications, id, ids[0], options)?.id ?? null]));
     const count = Object.values(byTarget).filter(Boolean).length;
-    const acceptedById = ids.length ? (selected ? byTarget[selected] : count === ids.length ? 'all' : null) : acceptedBy(manifest, verifications)?.id ?? null;
+    const acceptedById = ids.length ? (selected ? byTarget[selected] : count === ids.length ? 'all' : null) : acceptedBy(manifest, verifications, undefined, undefined, options)?.id ?? null;
+    // Rejections that withdrew a PASS of this version (its own, or one of an earlier version decided after it).
+    const withdrawn = revoked.filter(revocation => verifications.some(item => item.manifestId === manifest.id && item.status === 'PASS' && revokes(revocation, item, index, ids[0])));
     return {
       id: manifest.id, createdAt: manifest.createdAt, summary: manifest.summary, level: manifest.level, source: manifest.source ?? null, mappings: manifest.mappings,
       acceptedBy: acceptedById,
-      ...(ids.length && { targets: byTarget, acceptance: count === ids.length ? 'accepted' : count ? 'partial' : 'pending' })
+      ...(ids.length && { targets: byTarget, acceptance: count === ids.length ? 'accepted' : count ? 'partial' : 'pending' }),
+      ...(withdrawn.length && { rejections: withdrawn.map(publicRevocation) })
     };
   });
   const top = cursor(versions, version => version.acceptedBy);
