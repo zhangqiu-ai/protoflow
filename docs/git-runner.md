@@ -65,7 +65,7 @@ protoflow runner start --project /path/to/app --once
 
 ## 多目標（schemaVersion 2）
 
-`targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已接受的最新版本。單一 target 專案沿用原有檔案與路徑。
+`targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已接受的最新版本。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
 
 ## 證據與順序
 
@@ -80,16 +80,21 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 ```json
 {
   "policy": {"autoApprove": true},
-  "runner": {"delivery": {"remote": "origin", "branch": "protoflow/delivery", "baseBranch": "main", "merge": "auto"}}
+  "runner": {"delivery": {"remote": "origin", "branch": "protoflow/delivery", "baseBranch": "main", "merge": "auto", "draft": true, "paths": ["app", "package.json"]}},
+  "adapters": {"independentReview": {"command": {"argv": ["node", "/absolute/shared-engine/scripts/codex-review-adapter.js"], "timeoutMs": 600000}}}
 }
 ```
 
-1. `policy.autoApprove: true` 時，以 `ai:protoflow-runner` 建立 `reviewerKind: automated` 的 Review 與 Baseline，綁定該版 verification；紀錄、commit trailer 與 PR 留言都明示這是自動批准，不是真人。
-2. 在隔離 worktree commit 應用改動，排除 `.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`。訊息含 `Prototype-Commit`、`Manifest`、`Verification` 與 `Approved-By` trailer。下一版開始前必須先 commit 上一版，所以穩定狀態下一個 commit 對應一個原型版本；啟用前已累積的 PASS 版本合成一個 commit 並逐一列出。
-3. 推送到 `delivery.branch`，重用或建立指向 `baseBranch` 的 PR，留言版本與驗證摘要。
-4. `merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併，只合併交付的確切 commit；`"none"` 留給人合併。
+1. 在隔離 worktree commit 應用改動，排除 `.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`。訊息列出 source、manifest 和 verification，獨立 review 尚未執行時不宣稱批准。
+2. 使用新 Codex read-only session review 已 commit 的完整應用；session 必須不同於原 executor JSONL 中的所有 session 與已知作者 thread。嚴格 structured verdict PASS 且無 findings 才能通過，綁定 HEAD/tree、完整內容、source/manifest/new VER/hash 和當前 remote base SHA。缺配置、缺原始 execution provenance、FAIL／NOT_RUN 或漂移一律 BLOCKED。
+3. `policy.autoApprove: true` 時才建立 `reviewerKind: automated` 的本地 Review／Baseline，明確引用独立 session 與 trace/hash；不冒充真人 ADR 或 GitHub review。接著普通推送至專用 `delivery.branch`，不推 main/base、不強推、不跟隨 tag。推送前、恢復時和合併前都重核對證據與 remote refs；只容許合法推送令 branch tip 精確成為被 review 的 commit。
+4. 重用或建立 PR 並留言證據。`merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併；不使用 `gh pr review --approve` 或 `--admin`，保留 branch protection。`"manual"`（兼容 `"none"`）留給人合併；draft PR 的後續 auto 版本必須通過自身 gate 才 ready 和 merge。已記錄 MERGED 的版本不重複處理。
 
-push、PR、留言或合併失敗保存在 `.protoflow/delivery/state.json`，`protoflow delivery sync` 從失敗步驟續做，不重複 commit 或留言；`protoflow delivery status` 讀取紀錄。需要 `gh` 已登入且對目標 repo 有寫入權。主 checkout 不會被 pull 或修改。
+多目標時每個 target 依序以自己的 worktree、交付分支 `<delivery.branch>/<id>` 與紀錄 `.protoflow/delivery/<id>.json` 走完上述步驟，各自取得獨立 review PASS；一個 target BLOCKED 不阻擋其他 target。交付 commit 不得包含兄弟 target 的 root。兄弟 target 先合併令 base 前進時，只在 base 的變更全部位於兄弟 root／prototype／runtime 目錄、且本 target application hash 不變時，才把精確 base SHA merge 進本 target worktree 後再 review；否則 BLOCKED 並需在新 base 上重新驗收。詳見 [獨立 review 的多目標交付](independent-review.md#多目標交付schemaversion-2)。
+
+push、PR、留言或合併失敗保存在 `.protoflow/delivery/state.json`（多目標為 `.protoflow/delivery/<id>.json`）；同一引擎程序內可從失敗步驟續做，不重複 commit 或留言。程序重啟後 `protoflow delivery sync` 不信任僅磁碟 PASS，須透過明確選定 deliveryId／reviewId 的 API 取得新實際 provider revalidation，詳見下方接口；`protoflow delivery status` 仍可讀取紀錄。需要 `gh` 已登入且對目標 repo 有寫入權。主 checkout 不會被 pull 或修改。
+
+獨立 review 的 BLOCKED 證據保持阻擋，不能以編輯狀態或自填 PASS 清除；需取得新的實際 review，並保留所需新驗收證據。[重用接口與私有 provenance 格式](independent-review.md) 可供其他受保護的交付流程使用。若缺當前 base 物件，request 只 fetch 該精確 SHA（`--no-tags --no-write-fetch-head`），不移動 main、index 或工作檔案。
 
 ### 定期巡查（Codex 自動化）
 

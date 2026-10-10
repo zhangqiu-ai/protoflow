@@ -6,7 +6,7 @@
   "engines": { "node": ">=22" },
   "bin": { "protoflow": "bin/protoflow.js" },
   "exports": { ".": "./src/index.js" },
-  "files": ["bin", "src", "skills", "templates", "schemas", "scripts/codex-adapter.js", "docs", "examples/modular", "examples/anchors", "README.md"],
+  "files": ["bin", "src", "skills", "templates", "schemas", "scripts/codex-adapter.js", "scripts/codex-review-adapter.js", "docs", "examples/modular", "examples/anchors", "README.md"],
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:e2e": "playwright test",

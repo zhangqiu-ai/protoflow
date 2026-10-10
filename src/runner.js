@@ -58,7 +58,7 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   const base = runner?.base ?? (await git(root, ['rev-parse', `${config.runner?.applicationRef ?? 'HEAD'}^{commit}`])).trim();
   const seed = await fingerprint(root, { exclude: [config.prototypeDir] });
   const branch = runner?.branch ?? `protoflow-runner-${id('local').toLowerCase()}`;
-  runner = { schemaVersion: 1, worktree, branch, base, configHash: hash(config), seedHash: seed.hash, status: 'INITIALIZING', createdAt: new Date().toISOString() };
+  runner = { schemaVersion: 1, worktree, branch, base, configHash: hash(config), seedHash: seed.hash, status: 'INITIALIZING', afterMergeAlignment: true, createdAt: new Date().toISOString() };
   await saveRunner(root, runner, statePath);
   try { await fs.access(path.join(worktree, '.git')); }
   catch { await git(root, ['worktree', 'add', '-b', branch, worktree, base]); }

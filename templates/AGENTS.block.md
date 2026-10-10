@@ -12,5 +12,5 @@
 - `schemaVersion: 2` 專案以語意錨點取代 mapping：原型 `data-pf` 錨點 ID 必須以相同 ID 出現在應用（Web `data-testid`、iOS `accessibilityIdentifier`、Android `testTag`、Flutter `Semantics(identifier:)`、RN `testID`）；`protoflow anchors lint` 須 PASS，錨點建議由使用者審閱後才提交原型。
 - 新增、變更、修復可由瀏覽器覆蓋的功能時，維護專案內 Node.js Playwright 回歸測試並以 runner 執行。
 - 修復循環以配置的上限停止；記錄真實 build、functional、visual 結果，未執行記錄為 `NOT_RUN`。
-- Review 與 UI Baseline 必須綁定當前 manifest、prototype、application 與驗證證據。只有配置 `policy.autoApprove: true` 時，Runner 才以 `ai:protoflow-runner`（`reviewerKind: automated`）自動批准 PASS 版本；其他情況自動代理不得代替人類批准，任何時候都不得把自動批准登記成真人。L3 ADR 仍需真人決策。
+- Review 與 UI Baseline 必須綁定當前 manifest、prototype、application 與驗證證據。只有配置 `policy.autoApprove: true` 且該交付已取得獨立 AI review PASS（`adapters.independentReview`）時，Runner 才以 `ai:codex-independent-review:<session>`（`reviewerKind: automated`）自動批准 PASS 版本；其他情況自動代理不得代替人類批准，任何時候都不得把自動批准登記成真人。L3 ADR 仍需真人決策。
 <!-- protoflow:end -->

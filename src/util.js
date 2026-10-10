@@ -151,7 +151,7 @@ export function processGroupAlive(pid) {
   }
   return false;
 }
-export async function runCommand(root, command, input = null, { signal, onBeforeSpawn, onStart } = {}) {
+export async function runCommand(root, command, input = null, { signal, onBeforeSpawn, onStart, env } = {}) {
   if (signal?.aborted) return { status: 'FAIL', aborted: true, spawned: false, exitCode: null, stdout: '', stderr: 'Stopped', processGroupActive: false };
   if (!command) return { status: 'NOT_RUN', spawned: false, exitCode: null, stdout: '', stderr: '' };
   if (!Array.isArray(command.argv) || !command.argv.length || command.argv.some(x => typeof x !== 'string')) throw new Error('Command must contain a non-empty argv array');
@@ -163,7 +163,7 @@ export async function runCommand(root, command, input = null, { signal, onBefore
   if (signal?.aborted) return { status: 'FAIL', aborted: true, spawned: false, exitCode: null, stdout: '', stderr: 'Stopped', processGroupActive: false };
 
   return new Promise(resolve => {
-    const child = spawn(command.argv[0], command.argv.slice(1), { cwd: root, shell: false, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const child = spawn(command.argv[0], command.argv.slice(1), { cwd: root, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     let stdout = '', stderr = '', settled = false, timedOut = false, overflow = false;
     const stop = () => {
       try { if (process.platform === 'win32') child.kill('SIGKILL'); else process.kill(-child.pid, 'SIGKILL'); } catch { /* process already exited */ }
@@ -175,8 +175,8 @@ export async function runCommand(root, command, input = null, { signal, onBefore
       if (key === 'stdout') stdout += chunk; else stderr += chunk;
       if (stdout.length + stderr.length > 4 * 1024 * 1024) { overflow = true; stop(); }
     };
-    child.stdout.on('data', capture('stdout'));
-    child.stderr.on('data', capture('stderr'));
+    child.stdout.setEncoding('utf8').on('data', capture('stdout'));
+    child.stderr.setEncoding('utf8').on('data', capture('stderr'));
     child.stdin.on('error', () => {});
     child.once('error', error => finish(null, error.message));
     child.once('close', code => finish(code));

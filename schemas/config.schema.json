@@ -110,8 +110,21 @@
             "merge": {
               "enum": [
                 "auto",
-                "none"
+                "none",
+                "manual"
               ]
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }
@@ -313,6 +326,41 @@
       "additionalProperties": false,
       "properties": {
         "codex": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "argv"
+                  ],
+                  "properties": {
+                    "argv": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3600000
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "independentReview": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
