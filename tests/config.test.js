@@ -36,3 +36,11 @@ test('configuration accepts glob classification and per-scene deterministic sett
   await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
   assert.deepEqual(await loadConfig(root), config);
 });
+
+test('configuration publishes the independent review adapter and optional scoped draft delivery', async t => {
+  const root = await target(t), config = await loadConfig(root);
+  config.runner = { delivery: { branch: 'protoflow/delivery', baseBranch: 'main', paths: ['app/clean-electron', 'package.json'], draft: true, merge: 'manual' } };
+  config.adapters.independentReview = { command: { argv: ['node', '/shared/scripts/codex-review-adapter.js'], timeoutMs: 600000 } };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config)); assert.deepEqual(await loadConfig(root), config);
+  for (const paths of [[], ['app', 'app']]) { await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...config, runner: { delivery: { ...config.runner.delivery, paths } } })); await assert.rejects(loadConfig(root)); }
+});

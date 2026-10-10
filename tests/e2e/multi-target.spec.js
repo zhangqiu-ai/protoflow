@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, access, copyFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -12,10 +12,12 @@ const cli = path.join(engine, 'bin/protoflow.js');
 
 /*
  * Multi-target runner end to end: one local Git prototype stream, two targets with separate roots, real Chromium
- * verification, automated approval and per-target delivery through a bare remote and a gh test double.
+ * verification, a per-target independent AI review gate, automated approval and per-target delivery through a bare
+ * remote. Test doubles stand in for gh, the Codex review provider and the github.com transport (FAKE fixtures only).
  * The executor is a deterministic stand-in for Codex: it copies the frozen prototype into its target's root,
- * renaming data-pf to data-testid; a marker file makes it fail for one target.
+ * renaming data-pf to data-testid, and prints a Codex-shaped JSONL session trace; a marker file makes it fail for one target.
  */
+const fixtureUrl = 'https://github.com/protoflow-fixture/application.git';
 const EXECUTOR = String.raw`
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -33,7 +35,8 @@ for (const entry of await fs.readdir(source, { recursive: true, withFileTypes: t
   if (/\.(html|js|css)$/.test(entry.name)) data = data.toString().replaceAll('data-pf=', 'data-testid=').replaceAll("'data-pf'", "'data-testid'");
   await fs.writeFile(to, data);
 }
-console.log(JSON.stringify({ status: 'done', target: target.id }));
+// Session provenance the review gate checks: one started, completed executor session.
+for (const event of [{ type: 'thread.started', thread_id: 'executor-' + target.id + '-' + process.pid }, { type: 'turn.started' }, { type: 'turn.completed' }]) console.log(JSON.stringify(event));
 `;
 
 const page = (screen, body) => `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>${screen}</title><link rel="stylesheet" href="style.css"></head>\n<body data-pf="${screen}" data-pf-role="screen">\n${body}\n</body></html>\n`;
@@ -41,6 +44,7 @@ const page = (screen, body) => `<!doctype html>\n<html lang="en"><head><meta cha
 async function setup() {
   const base = await mkdtemp(path.join(tmpdir(), 'protoflow-multi-'));
   const design = path.join(base, 'design'), remote = path.join(base, 'remote.git'), root = path.join(base, 'app'), bin = path.join(base, 'bin');
+  const transport = path.join(base, 'git-transport.json');
   const run = (cwd, ...args) => exec('git', args, { cwd }).then(result => result.stdout.trim());
   const identity = async cwd => { await run(cwd, 'config', 'user.email', 'fixture@protoflow.test'); await run(cwd, 'config', 'user.name', 'Fixture'); };
   for (const dir of [design, root, bin]) await mkdir(dir, { recursive: true });
@@ -73,7 +77,10 @@ async function setup() {
     targets: [target('web', 'web', 800), target('desktop', 'electron', 1100)],
     release: { requireTargets: ['web', 'desktop'] },
     policy: { maxRepairAttempts: 0, requireHumanReview: true, sequentialVersions: true, autoApprove: true },
-    adapters: { codex: { command: { argv: [process.execPath, 'executor.mjs', failMarker], timeoutMs: 60000 } } },
+    adapters: {
+      codex: { command: { argv: [process.execPath, 'executor.mjs', failMarker], timeoutMs: 60000 } },
+      independentReview: { command: { argv: [process.execPath, path.join(engine, 'scripts/codex-review-adapter.js')], timeoutMs: 60000 } }
+    },
     source: { kind: 'git', repository: design, branch: 'prototypes', path: 'prototype', startSha: start },
     runner: { pollMs: 1000, spec: 'spec.md', delivery: { remote: 'origin', branch: 'protoflow/delivery', baseBranch: 'main', merge: 'auto' } }
   };
@@ -82,8 +89,16 @@ async function setup() {
   await writeFile(path.join(root, 'spec.md'), '# Reviewed specification\nThe home screen greets on request; the about screen is static.\n');
   for (const id of ['web', 'desktop']) { await mkdir(path.join(root, id)); await writeFile(path.join(root, id, '.gitkeep'), ''); }
   await run(root, 'add', '.'); await run(root, 'commit', '-q', '-m', 'Application'); await run(root, 'push', '-q', 'origin', 'main');
+  // Delivery only publishes to github.com; the git double maps that URL onto the bare remote.
+  await run(root, 'remote', 'set-url', 'origin', fixtureUrl);
+  const realGit = (await exec('which', ['git'])).stdout.trim();
+  await writeFile(transport, JSON.stringify({ realGit, urls: { [fixtureUrl]: remote }, log: path.join(base, 'git-calls.json') }));
   await writeFile(path.join(bin, 'gh'), FAKE_GH, { mode: 0o755 });
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_GH_DB: path.join(base, 'gh.json') };
+  for (const [name, fixture] of [['git', 'fake-delivery-git.cjs'], ['codex', 'fake-codex-review.cjs']]) {
+    await copyFile(path.join(engine, 'tests/fixtures', fixture), path.join(bin, name)); await chmod(path.join(bin, name), 0o755);
+  }
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_GH_DB: path.join(base, 'gh.json'), FAKE_DELIVERY_GIT: transport, FAKE_GH_REAL_REMOTE: remote };
+  for (const key of ['GH_REPO', 'GH_HOST', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE']) delete env[key];
   const cliRun = async (args, expected) => {
     let result;
     try { result = { code: 0, ...(await exec(process.execPath, [cli, ...args, '--project', root], { cwd: root, env, maxBuffer: 64 * 1024 * 1024 })) }; }
@@ -140,7 +155,7 @@ test('two targets advance through the same versions independently and deliver on
     const verifications = queue.versions.map(version => version.targets);
     expect(verifications.every(targets => targets.web && targets.desktop && targets.web !== targets.desktop)).toBe(true);
 
-    // Delivery: per-target branches and PRs, each version committed in its own target's root only.
+    // Delivery: per-target branches and PRs, each behind its own independent review, adding only its own target's root.
     const branches = (await run(remote, 'branch', '--list', 'protoflow/delivery/*')).split('\n').map(line => line.trim()).sort();
     expect(branches).toEqual(['protoflow/delivery/desktop', 'protoflow/delivery/web']);
     // One PR per delivered version on each target's branch: 2 versions × 2 targets.
@@ -150,16 +165,27 @@ test('two targets advance through the same versions independently and deliver on
     expect(pulls.filter(pr => pr.head === 'protoflow/delivery/desktop').flatMap(pr => pr.comments).join()).toMatch(/target desktop/);
     const deliveries = await cliRun(['delivery', 'status']);
     expect(Object.keys(deliveries.targets)).toEqual(['web', 'desktop']);
+    const reviews = new Set();
     for (const [id, other] of [['web', 'desktop'], ['desktop', 'web']]) {
       expect(deliveries.targets[id].deliveries.map(item => item.status)).toEqual(['MERGED', 'MERGED']);
-      // Each delivery commit only touches its own target's root.
-      for (const { commit: sha } of deliveries.targets[id].deliveries) {
-        const files = (await run(remote, 'show', '--name-only', '--format=', sha)).split('\n').filter(Boolean);
+      for (const delivery of deliveries.targets[id].deliveries) {
+        // Each delivery passed its own fresh review; the automated approval names that session, not the Runner.
+        expect(delivery.independentReviewAttempts.map(attempt => attempt.status)).toEqual(['PASS']);
+        expect(delivery.approval.reviewer).toBe(`ai:codex-independent-review:${delivery.independentSessionId}`);
+        expect(delivery.alignment.status, JSON.stringify(delivery.alignment)).toBe('PASS');
+        reviews.add(delivery.independentReviewId);
+        // What each PR adds to its base only touches its own target's root.
+        const files = (await run(remote, 'diff', '--name-only', delivery.baseSha, delivery.commit)).split('\n').filter(Boolean);
+        const sha = delivery.commit;
         expect(files.length).toBeGreaterThan(0);
         expect(files.every(file => file.startsWith(`${id}/`)), `${id} ${sha}: ${files.join(', ')}`).toBe(true);
         expect(files.some(file => file.startsWith(`${other}/`))).toBe(false);
       }
     }
+    expect(reviews.size).toBe(4);
+    // Desktop's first version forked before web's merges reached main, so it integrated that base first.
+    expect(deliveries.targets.desktop.deliveries[0].integration.baseSha).toBe(deliveries.targets.desktop.deliveries[0].baseSha);
+    expect(deliveries.targets.web.deliveries.every(item => !item.integration)).toBe(true);
     // Anchor indexes live in each target's worktree, where its executor reads them.
     for (const id of ['web', 'desktop']) await access(path.join(status.targets[id].runner.worktree, `.protoflow/targets/${id}/anchor-index.json`));
   } finally { await rm(fixture.base, { recursive: true, force: true }); }

@@ -192,7 +192,7 @@ test('command timeout terminates process and reports FAIL instead of acceptance'
   await assert.rejects(runCommand(root, { argv: [] }), /non-empty argv/);
 });
 
-test('synthetic protocol fixture: automated approval needs policy.autoApprove, is labelled automated and still checks evidence', async t => {
+test('synthetic protocol fixture: automated approval cannot self-approve without independent review evidence', async t => {
   const { root, manifest } = await fixture(t);
   const { verification, artifact } = await syntheticVerification(root, manifest);
   const automated = { status: 'approved', reviewer: 'ai:protoflow-runner', reviewerKind: 'automated' };
@@ -202,16 +202,13 @@ test('synthetic protocol fixture: automated approval needs policy.autoApprove, i
   await assert.rejects(decideReview(root, allowed, pending.id, { ...automated, status: 'rejected' }), /may only approve/);
   await assert.rejects(decideReview(root, allowed, pending.id, { ...automated, reviewerKind: 'robot' }), /human or automated/);
 
-  const approved = await decideReview(root, allowed, pending.id, automated);
-  assert.equal(approved.reviewerKind, 'automated');
-  const baseline = await createBaseline(root, allowed, approved.id);
-  assert.equal(baseline.reviewerKind, 'automated');
-  assert.equal(baseline.reviewer, 'ai:protoflow-runner');
+  await assert.rejects(decideReview(root, allowed, pending.id, automated), /independent AI review PASS/);
+  await assert.rejects(createBaseline(root, allowed, pending.id), /approved review/);
 
   // Automated approval is bound to the same evidence as a human one.
   const next = await createReview(root, allowed, manifest.id, verification.id);
   await fs.writeFile(artifact, 'tampered');
-  await assert.rejects(decideReview(root, allowed, next.id, automated), /Visual evidence changed/);
+  await assert.rejects(decideReview(root, allowed, next.id, automated), /independent AI review PASS/);
   // Human approvals keep their default kind.
   assert.equal((await decideReview(root, config, next.id, { status: 'rejected', reviewer: 'Unit fixture reviewer' })).reviewerKind, 'human');
 });

@@ -240,9 +240,15 @@ async function assertReviewFresh(root, config, review) {
   }
   if ((await applicationFingerprint(root, config, verification.target)).hash !== review.projectHash) throw new Error('Project changed since verification; rerun verify and review');
   await assertPlanningFresh(root, manifest, review.planning);
+  if (review.reviewerKind === 'automated') {
+    if (!review.independentReview?.root || !review.independentReview?.id) throw new Error('Automated baseline requires independent AI review PASS evidence');
+    const { assertIndependentReview } = await import('./delivery-review.js');
+    const independent = await assertIndependentReview(review.independentReview.root, config, review.independentReview.id, { worktree: root, published: 'either' });
+    if (independent.sessionId !== review.independentReview.sessionId || independent.traceHash !== review.independentReview.traceHash || independent.verdictHash !== review.independentReview.verdictHash || independent.binding.commit !== review.independentReview.commit || independent.binding.tree !== review.independentReview.tree || independent.binding.remote.baseSha !== review.independentReview.baseSha || !independent.binding.versions.some(version => version.manifestId === review.manifestId && version.verificationId === review.verificationId && version.applicationHash === review.projectHash)) throw new Error('Automated review provenance changed');
+  }
   return { manifest, verification };
 }
-export async function decideReview(root, config, reviewId, { status, reviewer, reviewerKind = 'human', notes = '', findings = [] }) {
+export async function decideReview(root, config, reviewId, { status, reviewer, reviewerKind = 'human', notes = '', findings = [], independentReview = null }) {
   if (!['approved', 'rejected', 'changes_requested'].includes(status)) throw new Error('Invalid review decision');
   if (!reviewer?.trim()) throw new Error('--reviewer is required');
   if (!['human', 'automated'].includes(reviewerKind)) throw new Error('reviewerKind must be human or automated');
@@ -252,8 +258,16 @@ export async function decideReview(root, config, reviewId, { status, reviewer, r
   if (findings.some(finding => !finding || typeof finding !== 'object' || typeof finding.description !== 'string' || !finding.description.trim() || !['critical', 'high', 'normal', 'low'].includes(finding.severity))) throw new Error('Each finding requires description and severity (critical|high|normal|low)');
   const review = await loadArtifact(root, 'reviews', reviewId);
   if (review.status !== 'pending') throw new Error('Review already decided; create a new review');
+  let independent = null;
+  if (reviewerKind === 'automated') {
+    if (!independentReview?.root || !independentReview?.id) throw new Error('Automated approval requires independent AI review PASS evidence');
+    const { assertIndependentReview } = await import('./delivery-review.js');
+    independent = await assertIndependentReview(independentReview.root, config, independentReview.id, { worktree: root, published: 'either' });
+    if (!independent.binding.versions.some(version => version.manifestId === review.manifestId && version.verificationId === review.verificationId && version.applicationHash === review.projectHash)) throw new Error('Independent review does not cover this approval evidence');
+    if (reviewer !== `ai:codex-independent-review:${independent.sessionId}`) throw new Error('Automated reviewer must identify the independent AI session');
+  }
   if (status === 'approved') await assertReviewFresh(root, config, review);
-  return persist(root, 'reviews', { ...review, status, reviewer, reviewerKind, reviewedAt: date(), notes, findings });
+  return persist(root, 'reviews', { ...review, status, reviewer, reviewerKind, independentReview: independent ? { root: independentReview.root, id: independent.id, sessionId: independent.sessionId, traceHash: independent.traceHash, verdictHash: independent.verdictHash, commit: independent.binding.commit, tree: independent.binding.tree, baseSha: independent.binding.remote.baseSha } : null, reviewedAt: date(), notes, findings });
 }
 export async function createBaseline(root, config, reviewId) {
   const review = await loadArtifact(root, 'reviews', reviewId);
@@ -265,7 +279,7 @@ export async function createBaseline(root, config, reviewId) {
     if (previous.reviewId === reviewId) return previous;
   }
   const data = { schemaVersion: 1, id: id('UI'), createdAt: date(), parent: latest.id, status: 'approved', manifestId: manifest.id, manifestHash: hash(manifest), reviewId, reviewHash: hash(review), reviewer: review.reviewer, reviewerKind: review.reviewerKind ?? 'human',
-    prototype: { hash: manifest.afterHash, git: manifest.git?.head ?? null }, application: { hash: verification.project.hash, git: verification.git.head }, verificationId: verification.id, verificationHash: hash(verification),
+    prototype: { hash: manifest.afterHash, git: manifest.git?.head ?? null }, application: review.reviewerKind === 'automated' ? { hash: verification.project.hash, git: review.independentReview.commit, tree: review.independentReview.tree, baseSha: review.independentReview.baseSha, verificationGit: verification.git.head } : { hash: verification.project.hash, git: verification.git.head }, verificationId: verification.id, verificationHash: hash(verification),
     spec: review.planning?.spec ?? null, adr: review.planning?.adr ?? null, changed: manifest.scope?.affected ?? manifest.mappings, evidence: { build: verification.build.status, functional: verification.functional.status, visual: verification.visual.status, scenes: verification.visual.scenes, artifacts: verification.visual.artifacts } };
   await persist(root, 'baselines', data);
   await writeJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: data.id });

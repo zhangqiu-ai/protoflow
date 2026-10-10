@@ -62,7 +62,7 @@ fingerprint 涵蓋專案檔案，排除 `.git`、`node_modules`、`.protoflow`�
 
 每份 verification 綁定 manifestHash、prototypeHash、project hash、Git HEAD、命令 exit code/logs、各 scene 結果和每份圖片／HTML artifact 的 SHA256。Review 決定綁定 verificationHash 與 projectHash。批准與 Baseline 再檢查原型、實作、規格、圖片和所有證據沒有變動。
 
-人工身分為本機明確輸入；此引擎不是加密簽章或身分驗證系統。Skill 禁止 agent 代替人類批准。`policy.autoApprove: true` 是唯一例外：Runner 交付時以 `ai:protoflow-runner` 記錄 `reviewerKind: automated` 的批准，檢查與人工批准相同的證據新鮮度，Baseline 也保留 `reviewerKind`；它不會被記錄成真人，也不適用 L3 ADR。`policy.requireHumanReview` 記錄 manifest 需 review 的意圖；初版正式 Baseline 一律要求人類批准，較嚴的最終 gate 不能由 false 略過。
+人工身分為本機明確輸入；此引擎不是加密簽章或身分驗證系統。Skill 禁止 agent 代替人類批准。`policy.autoApprove: true` 是唯一例外：Runner 交付時須先取得該交付（多目標時為該 target）的[獨立 AI review](independent-review.md) PASS，才以 `ai:codex-independent-review:<session>` 記錄 `reviewerKind: automated` 的批准，檢查與人工批准相同的證據新鮮度並綁定被 review 的 commit／tree／base，Baseline 也保留 `reviewerKind`；它不會被記錄成真人，也不適用 L3 ADR。`policy.requireHumanReview` 記錄 manifest 需 review 的意圖；初版正式 Baseline 一律要求人類批准，較嚴的最終 gate 不能由 false 略過。
 
 ## 自動修復
 
