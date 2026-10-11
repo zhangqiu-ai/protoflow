@@ -282,6 +282,7 @@ ProtoFlow 的目標是通用的原型驅動開發：同一份 HTML 原型，驅�
 
 - 比對合約 `layout` 中的關係：上下左右順序、包含、對齊（容差以 viewport 比例表示，預設 2%）。
 - 尺寸比例：錨點寬高相對 screen 的比例差在容差內（預設 5%）。
+- screen 根錨點本身以各側擷取的 viewport 為框比較位置與尺寸（同樣的容差），所以畫面只有一個根錨點時也有實際覆蓋，根幾何錯誤不會以 `checked: 0` 通過；缺 viewport 判 FAIL。
 - `deviations` 允許的差異（例如系統導覽列占位）先套用再比較。
 
 ### 7.4 T4 視覺
@@ -372,7 +373,7 @@ Context Package 對每個 target 提供：
 |---|---|---|
 | P0 規格 ✅ | 審定錨點語法、sidecar、合約、驅動器協定的 JSON Schema；決定 §15 待決問題 | Schema 與範例檢入；本提案狀態改為「已接受」 |
 | P1 Web 錨點化 ✅ | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
-| P2 多目標 ✅、Electron 驅動器（另一工作進行中） | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
+| P2 多目標 ✅、Electron 驅動器（§16.6） | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
 | P3 Android | `external` 驅動器協定實作、Maestro 參考驅動器、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
 | P4 iOS | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
 | P5 Flutter／React Native | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
@@ -457,11 +458,50 @@ Git 來源中錨點無效的提交不發佈為版本；`source/state.json` 的 `
 - **交付修正**：同一分支已有已合併的舊 PR 時，`gh pr create` 之後改以 open PR 查詢新 PR，且只有合併 head 等於交付 commit 才算 MERGED（`tests/delivery.test.js` 回歸測試）。
 - 測試：`tests/streams.test.js`（per-target 佇列、release、舊驗證歸屬、進度、應用 hash）；`tests/e2e/multi-target.spec.js`（本機 Git 來源、兩個 target、真實 Chromium 四層驗收、自動批准、per-target 分支交付；一個 target 執行失敗時另一個照常推進，retry 後依序補上，release 隨最慢的 target 前進）。
 
-### 16.6 尚未完成
+### 16.6 Electron 驅動器
 
-- Electron 驅動器（`playwright-electron`）由另一份進行中的工作負責，完成後整合為多目標架構中的一種 target。
-- P3–P5：Android／iOS／Flutter／React Native 參考驅動器與範例應用。本機已有 iOS 模擬器，尚未安裝 Android SDK。
-- L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供；每版自動產生規格不在本提案範圍。
+- `driver.kind: "playwright-electron"`：`main`（相對 target root 的 Electron 入口）、`route`（`#/{screen}` 或頁面路徑範本）、可選 `executablePath`、`args`、`env`。預設使用 target 或專案 `node_modules` 的 `electron`。
+- 每個場景以 Playwright `_electron` 啟動真實 Electron（`--force-device-scale-factor`），設定視窗內容尺寸、導向 route 後重新載入以套用 fixture，以與 web 驅動器相同的錨點邏輯重放狀態並從 Electron renderer 擷取元素與截圖；不以 HTML 複製、iframe 或 Chromium 冒充。
+- **同引擎比較**：Electron target 的凍結原型由同一個 Electron 版本的引擎檢視視窗（`src/drivers/electron-viewer.cjs`）渲染。Playwright Chromium 與 Electron 內建 Chromium 版本可能不同（實測 153 對 152），原生控制項像素不同；同引擎比較後四層維持 required、T4 維持像素門檻。
+- **程序監督與證據**：應用與原型參考分別為 `visual-electron`、`visual-electron-prototype` 階段，回報 PID、確認程序組結束；必須觀察到結束碼 0 且無訊號才算有效，否則 FAIL（PF-ELECTRON-EXIT-17）。`runtime.json`／`prototype-runtime.json` 記錄 Electron／Chrome／Node 版本、執行檔、參數、PID、URL、實際 viewport 與結束狀態，並納入 artifact hash。
+- **資料隔離**：每次擷取在應用入口載入前設定新的 `userData` 與 `sessionData`，實際路徑會記入 runtime 並核對；程序組確認結束後才移除暫存 profile。啟動已嘗試但未取得 PID 時保留 STARTING 與 profile，記錄 `PROCESS_START_UNKNOWN`，不得假定程序未啟動而自動重試。
+- **尺寸量測**：設定內容尺寸後量測實際 `innerWidth`／`innerHeight`／`devicePixelRatio`，必須等於配置；截圖 PNG 也必須等於配置尺寸乘 scale。`capture.viewport` 只記錄量測值。macOS 預設把視窗限制在螢幕可用區域內，引擎 viewer 以 `enableLargerThanScreen: true` 建立視窗；應用也需如此，否則判 FAIL 並說明。`targets.js` 對所有驅動器的兩側擷取再檢查一次，兩側同樣錯誤的尺寸（像素相同）也不算通過。
+- Electron 不可用（缺依賴、執行檔不存在、Windows）記 NOT_RUN；已嘗試啟動但 PID 不明則阻塞恢復，不假定未啟動。無法到達狀態記 FAIL。
+- 測試：`tests/e2e/electron.spec.js` 以真實 Electron 44.7.0 覆蓋 Web＋Electron 雙 target 四層 required、release 彙總、漂移、無法到達狀態、缺依賴 NOT_RUN、異常結束碼、實際 viewport 裁切、關閉逾時及中止。`tests/targets.test.js` 驗證兩側同樣錯誤的尺寸仍判 FAIL。CI 的 `electron` 專案在 macOS 執行，`chromium` 專案在 Ubuntu 執行；必要檢查 `validate` 同時等待兩者，不設環境 skip。
+- 啟動完成前退出時，viewer 與範例應用不讀取尚不可用的 `defaultSession`，亦不再建窗。獨立的空白 Electron 控制程式與兩個實際入口使用同一 30 秒期限，均須正常 exit 0、無 signal、全程序組自然結束；超時強制清理仍屬 FAIL。Electron 44.7 的空白控制程式在 macOS 上亦可能在主程序退出後再花約 16 秒才結束 helpers，這是觀測到的執行期行為，不能宣稱即時退出。
+
+### 16.7 CLI 輸出契約
+
+stdout 只放結果 JSON；失敗時 stderr 最後一行是 JSON 錯誤，之前的行是提醒或診斷。Node 執行期警告（例如 `FORCE_COLOR` 與 `NO_COLOR` 同時設定）由 `src/cli-diagnostics.js` 接管，以 `ProtoFlow diagnostic:` 在最終輸出前寫出（`tests/cli-output.test.js`）。
+
+### 16.8 拒收與重開生命週期
+
+PASS verification 之後的審查結論也可能是不通過。三種決定分開：
+
+| reviewerKind | 誰 | 可記錄 | 條件 |
+|---|---|---|---|
+| `human` | 具名真人（不得用 `ai:` 身分） | approved／rejected／changes_requested | 批准仍檢查證據新鮮度 |
+| `automated` | `policy.autoApprove` 的自動批准（`ai:` 身分） | 只能 approved | 需 `policy.autoApprove: true` 及當前內容綁定的獨立 AI review PASS 與 live attestation |
+| `model` | 獨立模型審查（`ai:` 身分） | 只能 rejected／changes_requested | 需 `model.evidence`：已完成的審查結果 JSON |
+
+模型審查證據必須含 `kind: "independent-model-review"`、`status: "FAIL"`、`reviewExecuted: true`、`sessionId`，以及與 review 相同的 `verificationId`、`verificationHash`、`manifestId`；若有 `target`、`applicationHash` 也必須相符。決定時 manifest、原型與 verification 的雜湊必須未變。原件逐位元複製到 `.protoflow/artifacts/<REV>/model-review.json`，review 記錄來源路徑、雜湊與 session；未提供 findings 時由模型結果轉入。CLI：`review request-changes --review ID --reviewer ai:codex:<session> --reviewer-kind model --model-evidence FILE [--model-session ID]`。
+
+任何拒收（rejected／changes_requested）只要針對 PASS verification，就撤銷該 verification 所屬 target 的驗收：該版本與其後版本中，建立時間不晚於決定時間的 verification 都不再算數。結果如下：
+
+- 佇列游標回到被拒版本，`verify`、`repair`、`context` 對同一 SHA 可再執行；FIFO 不變，後續版本仍不可越過。
+- 只有決定之後的新 verification 才能重新驗收；被拒的 verification 不能再被人工或政策批准。
+- `queue` 在版本上列出 `rejections`；`release` 不會因舊 PASS 放行。
+- 只影響該 verification 的 target，其他 target 的游標與進度不變。拒收 FAIL verification 只是紀錄，不撤銷任何東西。
+- Runner 每輪先在專案與 worktree 間同步已決定的拒收，把被拒的 PASS 進度條目改回 PENDING，舊 PASS、verification、delivery 與完成時間保存在 `reopenings`；attempts 與所有紀錄不刪改。重新驗收後會像新版本一樣交付。
+- 直接 `delivery sync`、既有 approval 重試與重啟後重新審查也檢查專案及 worktree 兩側的拒收，不得繞過重新驗收；兄弟 target 維持獨立。
+- 修復 context 帶 `rejections`（審查決定、findings 與模型證據），指示執行者逐項處理。
+
+測試：`tests/review-lifecycle.test.js`、`tests/git-runner.test.js`（拒收後 runner 重開同版本）、`tests/tiers.test.js`（單一根錨點的根幾何）。
+
+### 16.9 尚未完成
+
+- P3–P5：Android／iOS／Flutter／React Native 參考驅動器與範例應用（暫停）。
+- L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供。
 
 ## 附錄 A：合約片段
 

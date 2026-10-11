@@ -4,11 +4,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
+import { syncDeliveries, deliveryStatus, assertDelivered } from '../src/delivery.js';
+import { runOnce } from '../src/runner.js';
 import { sourceStatus, saveSourceState } from '../src/source.js';
-import { saveProgress } from '../src/streams.js';
+import { loadProgress, saveProgress } from '../src/streams.js';
 import { writeJson, hash, fingerprint, readJson } from '../src/util.js';
-import { applicationFingerprint } from '../src/workflow.js';
+import { applicationFingerprint, createReview, decideReview } from '../src/workflow.js';
 import { snapshot } from '../src/sessions.js';
 import { freezeVersion } from '../src/versions.js';
 import { assertIndependentReview, requestIndependentReview } from '../src/delivery-review.js';
@@ -88,9 +89,10 @@ async function fakeEnvironment(t, base, root, remote) {
 }
 
 /** Synthetic PASS and executor JSONL are protocol fixtures, never real acceptance/provider evidence. */
-async function acceptVersion({ root, worktree, config, sha, ordinal, verificationId, executionId, target }) {
+async function acceptVersion({ root, worktree, config, sha, ordinal, verificationId, executionId, target, reuseFrozen = false }) {
   const manifestId = `git-${sha}`;
-  const captured = await snapshot(worktree, config, { keepBytes: true }); await freezeVersion(worktree, manifestId, captured);
+  const captured = await snapshot(worktree, config, { keepBytes: true });
+  if (!reuseFrozen) await freezeVersion(worktree, manifestId, captured);
   // Deterministic, so several targets accepting one version share the identical manifest.
   const manifest = { id: manifestId, createdAt: '2026-01-01T00:00:00.000Z', level: 'L1', afterHash: captured.hash, mappings: [], changes: [], source: { ...config.source, sha, ordinal } };
   const artifact = `.protoflow/artifacts/${verificationId}/fixture.txt`; await fs.mkdir(path.dirname(path.join(worktree, artifact)), { recursive: true }); await fs.writeFile(path.join(worktree, artifact), 'FAKE ACCEPTANCE FIXTURE ONLY');
@@ -178,6 +180,311 @@ async function assertNoPublication(f) {
   const github = await readJson(path.join(f.base, 'gh.json'), { calls: [], prs: [] });
   assert.deepEqual(github.prs, []); assert.ok(github.calls.every(call => call[0] === 'api'));
 }
+
+/** Real review transitions over synthetic PASS fixtures; these are never provider/device acceptance. */
+async function rejectAcceptance(f, root, { status = 'rejected', verificationId = 'VER-1' } = {}) {
+  const verification = await readJson(path.join(root, `.protoflow/verifications/${verificationId}.json`));
+  const review = await createReview(root, f.config, verification.manifestId, verificationId);
+  return decideReview(root, f.config, review.id, { status, reviewer: 'FAKE fixture human', notes: 'FAKE rejection regression fixture only' });
+}
+
+/** New synthetic verification after repair; no provider or browser acceptance is claimed by these fixtures. */
+async function acceptRepair(f, index = 0) {
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), `<main>repaired v${index + 1}</main>\n`);
+  await acceptVersion({ ...f, sha: f.shas[index], ordinal: index + 1, verificationId: 'VER-repaired', executionId: 'EXEC-fixture-repaired', reuseFrozen: true });
+  const source = await sourceStatus(f.root), entry = source.entries[index];
+  Object.assign(entry, { status: 'PASS', verificationId: 'VER-repaired', completedAt: new Date().toISOString() });
+  entry.attempts.push({ executionId: 'EXEC-fixture-repaired', executionStatus: 'PASS', status: 'PASS' });
+  await saveSourceState(f.root, source);
+}
+
+/** Exit at a durable write boundary, leaving the same state a killed engine would leave on disk. */
+async function crashDeliverySync(f, boundary) {
+  const program = `
+    import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
+    const [inputRoot, configText, boundary] = process.argv.slice(1), root = await fs.realpath(inputRoot), original = fs.rename;
+    fs.rename = async (from, to) => {
+      if (boundary === 'progress' && to === root + '/.protoflow/source/state.json') process.exit(83);
+      if (boundary === 'pushed' && to === root + '/.protoflow/delivery/state.json') {
+        const latest = JSON.parse(await fs.readFile(from, 'utf8')).deliveries.at(-1);
+        if (latest.steps?.pushedAt && !latest.pr) process.exit(84);
+      }
+      return original(from, to);
+    };
+    syncBuiltinESMExports();
+    const { syncDeliveries } = await import(${JSON.stringify(new URL('../src/delivery.js', import.meta.url).href)});
+    await syncDeliveries(root, JSON.parse(configText));
+  `;
+  await assert.rejects(exec(process.execPath, ['--input-type=module', '-e', program, f.root, JSON.stringify(f.config), boundary]), error => error.code === (boundary === 'progress' ? 83 : 84));
+}
+
+test('FAKE crash recovery: saved delivery without progress link reopens by exact commit verification binding', async t => {
+  for (const binding of ['acceptance snapshot', 'legacy commit trailers']) await t.test(binding, async t => {
+    const f = await fixture(t);
+    await crashDeliverySync(f, 'progress');
+    const state = await deliveryStatus(f.root), old = state.deliveries[0];
+    if (binding === 'legacy commit trailers') { delete old.acceptance; await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state); }
+    assert.equal(old.status, 'COMMITTED'); assert.equal((await sourceStatus(f.root)).entries[0].deliveryId, undefined);
+    await rejectAcceptance(f, f.root);
+    const repair = await runOnce(f.root, f.config);
+    assert.equal(repair.status, 'NOT_RUN', JSON.stringify(repair));
+    const source = await sourceStatus(f.root), revoked = (await deliveryStatus(f.root)).deliveries[0];
+    assert.equal(source.entries[0].reopenings[0].deliveryId, null);
+    assert.equal(revoked.status, 'REVOKED'); assert.equal(revoked.commit, old.commit);
+    assert.deepEqual(revoked.revocation.versions, [{ manifestId: source.entries[0].manifestId, verificationId: 'VER-1' }]);
+    // Matching only the manifest list cannot retire a different, unbound commit.
+    const unrelated = { ...old, id: 'DLV-unrelated-commit', commit: old.baseSha, acceptance: undefined };
+    await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), { schemaVersion: 1, deliveries: [revoked, unrelated] });
+    await assert.rejects(assertDelivered(f.root, f.config), /Delivery is blocked/);
+    assert.equal((await deliveryStatus(f.root)).deliveries[1].status, 'BLOCKED');
+    await assert.rejects(git(f.remote, 'rev-parse', '--verify', 'refs/heads/protoflow/delivery'));
+    const github = await f.gh(); assert.deepEqual(github.prs, []);
+    assert.ok(github.calls.every(call => call[0] === 'api' || (call[0] === 'pr' && call[1] === 'list')));
+  });
+});
+
+test('FAKE crash recovery: successful push without publication markers cannot update an older open PR during repair', async t => {
+  const f = await fixture(t, { versions: 2, merge: 'none' });
+  const source = await sourceStatus(f.root); source.entries[1].status = 'PENDING'; await saveSourceState(f.root, source);
+  assert.equal((await syncDeliveries(f.root, f.config)).deliveries[0].status, 'PR_OPEN_MANUAL');
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), '<main>v2 before crash</main>\n');
+  await acceptVersion({ ...f, sha: f.shas[1], ordinal: 2, verificationId: 'VER-2', executionId: 'EXEC-fixture-2', reuseFrozen: true });
+  const current = await sourceStatus(f.root); current.entries[1].status = 'PASS'; await saveSourceState(f.root, current);
+  await crashDeliverySync(f, 'pushed');
+  const uncertain = (await deliveryStatus(f.root)).deliveries[1];
+  assert.equal(uncertain.status, 'COMMITTED'); assert.equal(uncertain.steps.pushedAt, undefined); assert.equal(uncertain.pr, undefined);
+  assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), uncertain.commit);
+  await rejectAcceptance(f, f.root, { verificationId: 'VER-2' });
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root)).deliveries[1].status, 'REVOKED');
+  await acceptRepair(f, 1);
+  const before = await f.gh(), callsBefore = (await f.gitCalls()).length;
+  const repaired = await syncDeliveries(f.root, f.config);
+  assert.equal(repaired.status, 'BLOCKED', JSON.stringify(repaired)); assert.match(repaired.deliveries[0].error, /revoked.*PR.*open.*resolve/i);
+  assert.deepEqual((await f.gh()).prs, before.prs);
+  assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), uncertain.commit);
+  assert.ok((await f.gitCalls()).slice(callsBefore).every(call => !call.args.includes('push')));
+});
+
+test('FAKE recovery: a resolved historical revocation permits later normal versions to reuse the accepted manual PR', async t => {
+  const f = await fixture(t, { merge: 'none' });
+  assert.equal((await syncDeliveries(f.root, f.config)).deliveries[0].status, 'PR_OPEN_MANUAL');
+  await rejectAcceptance(f, f.root);
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  const github = await f.gh(); github.prs[0].state = 'CLOSED'; await writeJson(path.join(f.base, 'gh.json'), github);
+  await acceptRepair(f);
+  const replacement = await syncDeliveries(f.root, f.config);
+  assert.equal(replacement.status, 'PASS', JSON.stringify(replacement)); assert.equal(replacement.deliveries[0].status, 'PR_OPEN_MANUAL');
+  const manual = (await deliveryStatus(f.root)).deliveries.at(-1), sha = '3'.repeat(40);
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), '<main>normal next version</main>\n');
+  await acceptVersion({ ...f, sha, ordinal: 2, verificationId: 'VER-normal-next', executionId: 'EXEC-fixture-normal-next' });
+  const source = await sourceStatus(f.root);
+  source.entries.push({ sha, manifestId: `git-${sha}`, ordinal: 2, status: 'PASS', verificationId: 'VER-normal-next', attempts: [{ executionId: 'EXEC-fixture-normal-next', executionStatus: 'PASS', status: 'PASS' }] });
+  await saveSourceState(f.root, source);
+  const next = await syncDeliveries(f.root, f.config);
+  assert.equal(next.status, 'PASS', JSON.stringify(next)); assert.equal(next.deliveries[0].status, 'PR_OPEN_MANUAL');
+  const latest = (await deliveryStatus(f.root)).deliveries.at(-1);
+  assert.equal(latest.pr.number, manual.pr.number); assert.equal(latest.pr.url, manual.pr.url); assert.notEqual(latest.commit, manual.commit);
+  assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), latest.commit);
+  assert.deepEqual((await f.gh()).prs.map(pr => [pr.state, pr.comments.length]), [['CLOSED', 1], ['OPEN', 2]]);
+
+  await t.test('lookup failure after a successful shared-PR push retains a durable association for retry', async () => {
+    const witness = path.join(f.base, 'at-shared-pr-push.json'), failure = path.join(f.base, 'lookup-failed-once');
+    const gitFile = path.join(f.base, 'bin/git'), ghFile = path.join(f.base, 'bin/gh');
+    const transport = await fs.readFile(gitFile, 'utf8');
+    await fs.writeFile(gitFile, transport.replace('process.exit(result.status ?? 2);', `
+      if (result.status === 0 && args[command] === 'push') fs.writeFileSync(${JSON.stringify(witness)}, JSON.stringify(JSON.parse(fs.readFileSync(${JSON.stringify(path.join(f.root, '.protoflow/delivery/state.json'))}, 'utf8')).deliveries.at(-1)));
+      process.exit(result.status ?? 2);
+    `));
+    const provider = await fs.readFile(ghFile, 'utf8');
+    await fs.writeFile(ghFile, provider.replace('#!/usr/bin/env node', `#!/usr/bin/env node
+      { const fs = require('node:fs'); const args = process.argv.slice(2);
+        if (args[0] === 'pr' && args[1] === 'list' && fs.existsSync(${JSON.stringify(witness)}) && !fs.existsSync(${JSON.stringify(failure)})) {
+          fs.writeFileSync(${JSON.stringify(failure)}, 'FAKE post-push lookup failure'); console.error('FAKE post-push lookup failure'); process.exit(7);
+        }
+      }
+    `));
+    const sha = '4'.repeat(40);
+    await fs.writeFile(path.join(f.worktree, 'app/index.html'), '<main>normal version with lookup failure</main>\n');
+    await acceptVersion({ ...f, sha, ordinal: 3, verificationId: 'VER-lookup-retry', executionId: 'EXEC-fixture-lookup-retry' });
+    const source = await sourceStatus(f.root);
+    source.entries.push({ sha, manifestId: `git-${sha}`, ordinal: 3, status: 'PASS', verificationId: 'VER-lookup-retry', attempts: [{ executionId: 'EXEC-fixture-lookup-retry', executionStatus: 'PASS', status: 'PASS' }] });
+    await saveSourceState(f.root, source);
+    const first = await syncDeliveries(f.root, f.config);
+    if (first.status === 'FAIL') assert.match(first.deliveries[0].error, /FAKE post-push lookup failure/);
+    else assert.equal(first.status, 'PASS', JSON.stringify(first));
+    const retry = await syncDeliveries(f.root, f.config);
+    assert.ok(['PASS', 'IDLE'].includes(retry.status), JSON.stringify(retry));
+    const atPush = await readJson(witness), delivered = (await deliveryStatus(f.root)).deliveries.at(-1);
+    assert.equal(atPush.pr?.number, manual.pr.number); assert.equal(atPush.pr?.url, manual.pr.url);
+    assert.equal(delivered.status, 'PR_OPEN_MANUAL'); assert.equal(delivered.pr.number, manual.pr.number);
+    assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), delivered.commit);
+    assert.deepEqual((await f.gh()).prs.map(pr => [pr.state, pr.comments.length]), [['CLOSED', 1], ['OPEN', 3]]);
+  });
+});
+
+test('FAKE provider: reopened rejected deliveries are retained as revoked history and permit a fresh same-version delivery', async t => {
+  for (const status of ['COMMITTED', 'FAIL', 'BLOCKED']) await t.test(status, async t => {
+    const f = await fixture(t, { versions: 2 });
+    const source = await sourceStatus(f.root); source.entries[1].status = 'PENDING'; await saveSourceState(f.root, source);
+    process.env.FAKE_REVIEW_MODE = 'fail';
+    assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+    const state = await deliveryStatus(f.root), old = state.deliveries[0]; old.status = status;
+    await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state);
+    const before = structuredClone(old), rejection = await rejectAcceptance(f, f.root);
+    const reviewFile = path.join(f.root, `.protoflow/delivery/independent-reviews/${old.independentReviewId}.json`), reviewBytes = await fs.readFile(reviewFile);
+
+    const reopened = await runOnce(f.root, f.config);
+    assert.equal(reopened.status, 'NOT_RUN', JSON.stringify(reopened));
+    const progress = await sourceStatus(f.root);
+    assert.deepEqual(progress.entries.map(entry => entry.status), ['PENDING', 'PENDING']);
+    assert.equal(progress.entries[0].reopenings[0].deliveryId, old.id);
+    assert.equal(progress.entries[0].reopenings[0].verificationId, 'VER-1');
+    const revoked = (await deliveryStatus(f.root)).deliveries[0];
+    assert.equal(revoked.status, 'REVOKED'); assert.equal(revoked.revocation.previousStatus, status);
+    assert.deepEqual(revoked.revocation.rejections.map(item => item.reviewId), [rejection.id]);
+    for (const field of ['id', 'commit', 'versions', 'shas', 'steps', 'independentReviewId', 'independentReviewAttempts']) assert.deepEqual(revoked[field], before[field]);
+    await assertDelivered(f.root, f.config); await assertNoPublication(f);
+    assert.equal((await syncDeliveries(f.root, f.config, { retryIndependentReview: { deliveryId: old.id, reviewId: old.independentReviewId } })).status, 'BLOCKED');
+
+    await acceptRepair(f);
+    const repaired = await syncDeliveries(f.root, f.config);
+    assert.equal(repaired.status, 'PASS', JSON.stringify(repaired));
+    const deliveries = (await deliveryStatus(f.root)).deliveries;
+    assert.equal(deliveries.length, 2); assert.equal(deliveries[0].status, 'REVOKED'); assert.equal(deliveries[1].status, 'MERGED');
+    assert.notEqual(deliveries[1].commit, old.commit); assert.notEqual(deliveries[1].independentReviewId, old.independentReviewId);
+    assert.deepEqual(deliveries[1].versions, old.versions);
+    assert.equal((await sourceStatus(f.root)).entries[0].deliveryId, deliveries[1].id);
+    assert.equal((await sourceStatus(f.root)).entries[1].status, 'PENDING');
+    assert.deepEqual(await fs.readFile(reviewFile), reviewBytes);
+    const request = await readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${deliveries[1].independentReviewId}/request.json`));
+    assert.deepEqual(request.binding.versions.map(item => item.verificationId), ['VER-repaired']);
+  });
+});
+
+test('FAKE provider: a revoked published PR allows repair but blocks replacement publication until external closure', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const old = (await deliveryStatus(f.root)).deliveries[0], before = await f.gh(); assert.ok(old.approval);
+  await rejectAcceptance(f, f.root);
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  await acceptRepair(f);
+  const replacement = await syncDeliveries(f.root, f.config);
+  assert.equal(replacement.status, 'BLOCKED', JSON.stringify(replacement));
+  assert.match(replacement.deliveries[0].error, /revoked.*PR.*open.*resolve/i);
+  const state = await deliveryStatus(f.root);
+  assert.equal(state.deliveries.length, 2); assert.equal(state.deliveries[0].status, 'REVOKED');
+  assert.deepEqual(state.deliveries[0].approval, old.approval); assert.deepEqual(state.deliveries[0].pr, old.pr);
+  assert.equal(state.deliveries[1].approval, undefined);
+  assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), old.commit);
+  const after = await f.gh(); assert.deepEqual(after.prs, before.prs);
+  assert.ok(after.calls.slice(before.calls.length).every(call => !['create', 'comment', 'ready', 'merge', 'close', 'edit'].includes(call[1])));
+  // A person resolves the old PR externally; the engine may now publish its newly verified delivery.
+  after.prs[0].state = 'CLOSED'; await writeJson(path.join(f.base, 'gh.json'), after);
+  const delivered = await syncDeliveries(f.root, f.config);
+  assert.equal(delivered.status, 'PASS', JSON.stringify(delivered));
+  assert.deepEqual((await f.gh()).prs.map(pr => pr.state), ['CLOSED', 'MERGED']);
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'REVOKED');
+});
+
+test('FAKE provider: a reopened manual PR becomes revoked history without authorizing replacement publication', async t => {
+  const f = await fixture(t, { merge: 'none' });
+  assert.equal((await syncDeliveries(f.root, f.config)).deliveries[0].status, 'PR_OPEN_MANUAL');
+  const old = (await deliveryStatus(f.root)).deliveries[0], before = await f.gh();
+  await rejectAcceptance(f, f.root);
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].revocation.previousStatus, 'PR_OPEN_MANUAL');
+  await acceptRepair(f);
+  const replacement = await syncDeliveries(f.root, f.config);
+  assert.equal(replacement.status, 'BLOCKED', JSON.stringify(replacement)); assert.match(replacement.deliveries[0].error, /revoked.*PR.*open.*resolve/i);
+  assert.deepEqual((await f.gh()).prs, before.prs);
+  assert.equal(await git(f.remote, 'rev-parse', 'refs/heads/protoflow/delivery'), old.commit);
+});
+
+test('FAKE provider: an ordinary unfinished delivery still blocks the runner without a decided rejection', async t => {
+  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const old = (await deliveryStatus(f.root)).deliveries[0];
+  await assert.rejects(assertDelivered(f.root, f.config), /Delivery is blocked/);
+  assert.equal((await runOnce(f.root, f.config)).status, 'BLOCKED');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'BLOCKED');
+  assert.equal((await sourceStatus(f.root)).entries[0].deliveryId, old.id);
+  // A reopening row by itself is not proof of a decided rejection.
+  const source = await sourceStatus(f.root), entry = source.entries[0];
+  entry.reopenings = [{ deliveryId: old.id, verificationId: entry.verificationId, rejections: [{ reviewId: 'REV-undecided' }] }];
+  Object.assign(entry, { status: 'PENDING', verificationId: null, deliveryId: null }); await saveSourceState(f.root, source);
+  await assert.rejects(assertDelivered(f.root, f.config), /Delivery is blocked/);
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'BLOCKED');
+  await assertNoPublication(f);
+});
+
+test('FAKE provider: rejected acceptance blocks review capture in either evidence location before any provider run', async t => {
+  for (const location of ['root', 'worktree']) for (const status of ['rejected', 'changes_requested']) await t.test(`${location}: ${status}`, async t => {
+    const f = await committedFixture(t);
+    const rejection = await rejectAcceptance(f, f[location], { status });
+    const review = await requestIndependentReview(f.root, f.config, f.reviewOptions);
+    assert.equal(review.status, 'BLOCKED', JSON.stringify(review));
+    assert.match(review.reason, /revoked/); assert.ok(review.reason.includes(rejection.id));
+    await assert.rejects(fs.access(path.join(f.worktree, '.protoflow/fixture-review/received.json')), { code: 'ENOENT' });
+    await assertNoPublication(f);
+  });
+});
+
+test('FAKE provider: direct delivery sync cannot approve or publish rejected PASS before runner reopens progress', async t => {
+  for (const location of ['root', 'worktree']) await t.test(location, async t => {
+    const f = await fixture(t); f.config.policy.autoApprove = true;
+    await rejectAcceptance(f, f[location]);
+    assert.equal((await sourceStatus(f.root)).entries[0].status, 'PASS');
+    const result = await syncDeliveries(f.root, f.config);
+    assert.equal(result.status, 'BLOCKED', JSON.stringify(result));
+    assert.match(result.deliveries[0].error, /revoked/);
+    assert.equal((await deliveryStatus(f.root)).deliveries[0].approval, undefined);
+    await assertNoPublication(f);
+  });
+});
+
+test('FAKE provider: rejection revokes a later PASS queued for direct delivery', async t => {
+  const f = await fixture(t, { versions: 2 }); f.config.policy.autoApprove = true;
+  const source = await sourceStatus(f.root); source.entries[0].deliveryId = 'DLV-fake-previous'; await saveSourceState(f.root, source);
+  const rejection = await rejectAcceptance(f, f.root);
+  const result = await syncDeliveries(f.root, f.config);
+  assert.equal(result.status, 'BLOCKED', JSON.stringify(result));
+  assert.match(result.deliveries[0].error, /VER-2.*revoked/); assert.ok(result.deliveries[0].error.includes(rejection.id));
+  await assertNoPublication(f);
+});
+
+test('FAKE provider: an existing approval cannot authorize merge after acceptance rejection in either evidence location', async t => {
+  for (const location of ['root', 'worktree']) await t.test(location, async t => {
+    const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+    assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+    const old = (await deliveryStatus(f.root)).deliveries[0]; assert.ok(old.approval);
+    await rejectAcceptance(f, f[location], { status: 'changes_requested' });
+    await assert.rejects(assertIndependentReview(f.root, f.config, old.independentReviewId, { published: true }), /revoked/);
+    const beforeCalls = (await f.gh()).calls.length;
+    const retry = await syncDeliveries(f.root, f.config);
+    assert.equal(retry.status, 'BLOCKED', JSON.stringify(retry)); assert.match(retry.deliveries[0].error, /revoked/);
+    const current = (await deliveryStatus(f.root)).deliveries[0]; assert.deepEqual(current.approval, old.approval);
+    assert.equal((await f.gh()).prs[0].state, 'OPEN');
+    assert.ok((await f.gh()).calls.slice(beforeCalls).every(call => !['create', 'comment', 'ready', 'merge'].includes(call[1])));
+  });
+});
+
+test('FAKE provider: a restarted engine cannot revalidate rejected acceptance to replace an existing approval', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const old = (await deliveryStatus(f.root)).deliveries[0];
+  const receivedFile = path.join(f.worktree, '.protoflow/fixture-review/received.json'), receivedBytes = await fs.readFile(receivedFile);
+  await rejectAcceptance(f, f.root);
+  const beforeCalls = (await f.gh()).calls.length;
+  const program = `import { syncDeliveries, deliveryStatus } from ${JSON.stringify(new URL('../src/delivery.js', import.meta.url).href)}; const root = process.argv[1], config = JSON.parse(process.argv[2]), old = (await deliveryStatus(root)).deliveries[0]; console.log(JSON.stringify({ result: await syncDeliveries(root, config, { retryIndependentReview: { deliveryId: old.id, reviewId: old.independentReviewId } }), state: await deliveryStatus(root) }));`;
+  const retry = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', program, f.root, JSON.stringify(f.config)])).stdout);
+  assert.equal(retry.result.status, 'BLOCKED', JSON.stringify(retry)); assert.match(retry.result.deliveries[0].error, /revoked/);
+  assert.deepEqual(retry.state.deliveries[0].approval, old.approval);
+  assert.deepEqual(await fs.readFile(receivedFile), receivedBytes);
+  assert.equal((await f.gh()).prs[0].state, 'OPEN');
+  assert.ok((await f.gh()).calls.slice(beforeCalls).every(call => !['create', 'comment', 'ready', 'merge'].includes(call[1])));
+});
 
 test('FAKE transport: differing fetch/push URLs bind base, refs, push and PR to the one push destination', async t => {
   const f = await fixture(t), pushRemote = path.join(f.base, 'push.git'), pushUrl = 'https://github.com/protoflow-fixture/destination.git';
@@ -609,6 +916,32 @@ async function multiFixture(t) {
   process.env.FAKE_GH_REAL_REMOTE = remote;
   return { root, remote, config, worktrees, gh: async () => JSON.parse(await fs.readFile(db, 'utf8')) };
 }
+
+test('multi-target FAKE provider: rejection blocks its delivery while the sibling target remains deliverable', async t => {
+  const f = await multiFixture(t);
+  await rejectAcceptance(f, f.root, { verificationId: 'VER-web', status: 'changes_requested' });
+  const result = await syncDeliveries(f.root, f.config);
+  assert.equal(result.status, 'BLOCKED', JSON.stringify(result));
+  assert.equal(result.targets.web.status, 'BLOCKED'); assert.match(result.targets.web.deliveries[0].error, /revoked/);
+  assert.equal(result.targets.desktop.status, 'PASS'); assert.equal(result.targets.desktop.deliveries[0].status, 'MERGED');
+  await assert.rejects(git(f.remote, 'rev-parse', '--verify', 'refs/heads/protoflow/delivery/web'));
+  assert.deepEqual((await f.gh()).prs.map(pr => [pr.head, pr.state]), [['protoflow/delivery/desktop', 'MERGED']]);
+});
+
+test('multi-target FAKE provider: retiring a reopened delivery leaves sibling progress and delivery independent', async t => {
+  const f = await multiFixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config, { target: 'web' })).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const sibling = await loadProgress(f.root, f.config, 'desktop');
+  await rejectAcceptance(f, f.root, { verificationId: 'VER-web', status: 'changes_requested' });
+  assert.equal((await runOnce(f.root, f.config, { target: 'web' })).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root, f.config, 'web')).deliveries[0].status, 'REVOKED');
+  assert.equal((await loadProgress(f.root, f.config, 'web')).entries[0].status, 'PENDING');
+  assert.deepEqual(await loadProgress(f.root, f.config, 'desktop'), sibling);
+  assert.equal((await syncDeliveries(f.root, f.config, { target: 'desktop' })).status, 'PASS');
+  assert.equal((await deliveryStatus(f.root, f.config, 'desktop')).deliveries[0].status, 'MERGED');
+  await assert.rejects(git(f.remote, 'rev-parse', '--verify', 'refs/heads/protoflow/delivery/web'));
+  assert.deepEqual((await f.gh()).prs.map(pr => pr.head), ['protoflow/delivery/desktop']);
+});
 
 test('multi-target: each target passes its own independent review and merges on its own branch; a sibling merge is integrated', async t => {
   const f = await multiFixture(t);

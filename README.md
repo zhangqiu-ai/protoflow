@@ -113,9 +113,13 @@ protoflow install --personal --project /path/to/app
 - **分層驗收**：T1 結構語意、T2 token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM）。各 target 設定 `required`／`advisory`／`off`；Web 預設全部 required 並全量回歸，原生預設 T4 advisory、`affected+smoke` 回歸。
 - **工具**：`protoflow anchors lint|suggest`、`protoflow contract show --manifest <id>`、`protoflow migrate anchors`（v1 → v2 草稿：原型 patch、應用 patch、v2 配置）。
 
+- **Electron**：`driver.kind: "playwright-electron"`（`main`、`route`）以 Playwright 啟動真實 Electron；原型參考也在同一 Electron 版本中渲染，四層維持 required，異常結束碼判 FAIL。
+- **專案驗收 adapter（v1）**：功能與應用擷取可透過雙向 JSONL 協定介接專案工具，程序啟動與完成均由共享引擎監督；配置與證據界線見 [acceptance-adapters.md](docs/acceptance-adapters.md)。
 - **多目標**：`targets` 可列出多個平台（各自獨立的 `root`），每個 target 依序推進同一串原型版本、有自己的 worktree 與交付分支（`<branch>/<id>`），一個 target 阻塞不影響其他。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已接受的最新版本。多目標時以 `--target <id>` 指定命令作用的 target。
 
 `schemaVersion: 1` 的 mapping 流程維持不變，說明如下。
+
+`npm run validate` 執行靜態檢查、單元測試與全部 Playwright 專案。CI 將 Chromium E2E 放在 Ubuntu、真實 Electron E2E 放在 macOS，兩者均受必要檢查 `validate` 約束；缺少原生執行環境不會以 skip 當作驗收通過。可用 `npm run test:e2e -- --project=chromium` 或 `--project=electron` 分別執行。
 
 ### 原型適度拆分（schemaVersion 1）
 
@@ -146,6 +150,7 @@ protoflow install --personal --project /path/to/app
 | `repair --manifest ID [--execute]` | 驗證→修復→再驗證，最多配置次數 |
 | `review create --manifest ID --verification ID` | 建立待人工判斷資料 |
 | `review approve\|reject\|request-changes --review ID --reviewer NAME` | 記錄人工決定 |
+| `review reject\|request-changes --review ID --reviewer ai:… --reviewer-kind model --model-evidence FILE` | 記錄綁定 verification 的獨立模型審查 FAIL；拒收 PASS 會重開該 target 的同一版本（提案 §16.8） |
 | `baseline create --review ID` / `baseline show` | 保存批准節點／讀取最新節點 |
 | `queue` | 原型版本佇列；應用端只處理 `current` |
 | `status` | 會話、最新 Baseline、版本佇列及 Spec Kit／BMad 安裝狀態 |

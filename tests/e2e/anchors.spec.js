@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { parseCliOutput } from '../helpers/cli-json.js';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -12,12 +13,14 @@ const cli = path.join(engine, 'bin/protoflow.js');
 const playwrightCli = path.join(engine, 'node_modules/@playwright/test/cli.js');
 
 async function command(root, args, expectedCode = 0, env = {}) {
+  const environment = { ...process.env, ...env };
+  delete environment.NO_COLOR;
+  delete environment.FORCE_COLOR;
   let result;
-  try { result = { code: 0, ...(await exec(process.execPath, [cli, ...args, '--project', root], { cwd: root, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...env } })) }; }
+  try { result = { code: 0, ...(await exec(process.execPath, [cli, ...args, '--project', root], { cwd: root, maxBuffer: 64 * 1024 * 1024, env: environment })) }; }
   catch (error) { result = { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
-  const output = result.stdout?.trim() || result.stderr;
   let json;
-  try { json = JSON.parse(output); } catch { throw new Error(`${args.join(' ')} returned invalid JSON: ${output}`); }
+  try { json = parseCliOutput(result.stdout, result.stderr); } catch { throw new Error(`${args.join(' ')} returned invalid JSON:\n${result.stdout}\n${result.stderr}`); }
   const scenes = json.visual?.scenes?.map(scene => `${scene.id}:${scene.status} ${JSON.stringify(Object.fromEntries(Object.entries(scene.tiers).map(([tier, value]) => [tier, value.reasons?.slice(0, 2)])))}`);
   expect(result.code, `${args.join(' ')}\n${json.error ?? json.visual?.reason ?? ''}\n${scenes?.join('\n') ?? ''}\n${json.functional?.stdout?.slice(-800) ?? ''}`).toBe(expectedCode);
   return json;
@@ -73,7 +76,13 @@ test('each tier reports its own kind of drift', async () => {
   const root = await project();
   try {
     const manifest = await command(root, ['checkpoint']);
-    const verifyFailing = async () => (await command(root, ['verify', '--manifest', manifest.id], 1)).visual;
+    const verifyFailing = async () => {
+      const record = await command(root, ['verify', '--manifest', manifest.id], 1);
+      const diagnostic = JSON.stringify(record, null, 2);
+      expect(record.status, diagnostic).toBe('FAIL');
+      expect(record.visual, diagnostic).toBeDefined();
+      return record.visual;
+    };
 
     let restore = await edit(root, 'app/tasks.html', '<h1 data-testid="tasks.title">Today</h1>', '<h1 data-testid="tasks.title">Tomorrow</h1>');
     let visual = await verifyFailing();
@@ -135,7 +144,7 @@ test('invalid anchors are reported and never become a version', async () => {
     const lint = await command(root, ['anchors', 'lint'], 1);
     expect(lint.errors.join('\n')).toMatch(/broken\.html: Invalid anchor id "Bad Id"/);
     expect(lint.errors.join('\n')).toMatch(/broken\.html: expected exactly one data-pf-role="screen" anchor, found 0/);
-    const checkpoint = await command(root, ['checkpoint'], 1);
+    const checkpoint = await command(root, ['checkpoint'], 1, { NO_COLOR: '1', FORCE_COLOR: '1' });
     expect(checkpoint.error).toBe('Prototype anchors are invalid');
     expect((await command(root, ['queue'])).versions).toEqual([]);
   } finally { await rm(root, { recursive: true, force: true }); }

@@ -66,6 +66,19 @@ function inspect({ attribute, ids }) {
 }
 
 /**
+ * Replay a state on an already loaded page and collect anchor facts and a device-pixel screenshot.
+ * Shared by the web and Electron drivers so both sides of a comparison use identical logic.
+ */
+export async function captureOnPage(page, { attribute, anchors, steps = [], timeoutMs = 10000 }) {
+  await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
+  for (const step of steps) await perform(page, attribute, step);
+  await settle(page, timeoutMs);
+  const elements = await page.evaluate(inspect, { attribute, ids: anchors });
+  const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
+  return { elements, screenshot };
+}
+
+/**
  * Capture { viewport, screenshot, elements } for one screen state.
  * Throws when navigation or a step fails; the caller records that as the scene's failure.
  */
@@ -83,11 +96,7 @@ export async function captureWeb(browser, { url, attribute, anchors, steps = [],
     const page = await context.newPage();
     page.setDefaultTimeout(timeoutMs);
     await page.goto(url, { waitUntil: 'networkidle' });
-    await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
-    for (const step of steps) await perform(page, attribute, step);
-    await settle(page, timeoutMs);
-    const elements = await page.evaluate(inspect, { attribute, ids: anchors });
-    const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
+    const { elements, screenshot } = await captureOnPage(page, { attribute, anchors, steps, timeoutMs });
     return { viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale ?? 1 }, screenshot, elements };
   } finally {
     await context.close();

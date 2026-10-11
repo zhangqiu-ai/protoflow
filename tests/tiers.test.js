@@ -110,11 +110,28 @@ test('T3 layout: relative position and size, sibling relations and optional abso
   // A uniformly scaled screen (another device width) keeps relative layout.
   const scaled = capture();
   for (const element of Object.values(scaled.elements)) element.bounds = { x: element.bounds.x * 2, y: element.bounds.y * 2, width: element.bounds.width * 2, height: element.bounds.height * 2 };
+  scaled.viewport = { width: 800, height: 600, scale: 1 };
   assert.equal(compareLayout('home', screen, capture(), scaled).status, 'PASS');
   assert.match(compareLayout('home', screen, capture(), scaled, { absolute: 1 }).reasons.join(), /home\.title: x 20 vs 40 \(±1\)/);
   const swapped = compareLayout('home', screen, capture(), capture({ 'home.go': { bounds: box(20, 250, 100, 40) } }));
   assert.match(swapped.reasons.join('\n'), /home\.go: y 23\.3% vs 83\.3%/);
   assert.match(swapped.reasons.join('\n'), /home\.go is above home\.email in the prototype but below in the application/);
+});
+
+test('T3 layout checks the screen root against the viewport, even when it is the only anchor', () => {
+  // The frozen login root: a BODY whose first margin collapses through it (0,44,1440,646) in a 1440×1000 viewport.
+  const only = { id: 'login', anchors: [{ id: 'login', role: 'screen' }] };
+  const viewport = { width: 1440, height: 1000, scale: 1 };
+  const root = bounds => ({ viewport, elements: { login: { count: 1, visible: true, index: 0, bounds, text: '' } } });
+  const prototype = root(box(0, 44, 1440, 646));
+  const fullViewport = compareLayout('login', only, prototype, root(box(0, 0, 1440, 1000)));
+  assert.equal(fullViewport.status, 'FAIL');
+  assert.equal(fullViewport.checked, 1);
+  assert.match(fullViewport.reasons.join(), /login \(screen root, relative to the viewport\): y 4\.4% vs 0\.0%, height 64\.6% vs 100\.0%/);
+  const matching = compareLayout('login', only, prototype, root(box(0, 44, 1440, 646)));
+  assert.deepEqual([matching.status, matching.checked], ['PASS', 1]);
+  // Without a viewport the root cannot be placed: never a silent PASS.
+  assert.equal(compareLayout('login', only, { elements: prototype.elements }, { elements: prototype.elements }).status, 'FAIL');
 });
 
 test('T4 visual: pixel mode and perceptual SSIM, with dynamic anchors masked', () => {

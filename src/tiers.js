@@ -218,24 +218,33 @@ function relation(a, b, epsilon) {
 }
 
 /** T3: positions and sizes relative to the screen anchor, sibling relations, and optional absolute geometry. */
-export function compareLayout(screenId, screen, prototype, application, { position = 0.02, size = 0.05, absolute = null } = {}) {
+/**
+ * T3: anchors are compared relative to their screen root; the screen root itself is compared relative to the
+ * viewport, so a root with the wrong geometry fails even when it is the only anchor of its screen.
+ */
+export function compareLayout(screenId, screen, prototype, application, { position = 0.02, size = 0.05, absolute = null, viewport = null } = {}) {
   const reasons = [];
   let checked = 0;
   const leftScreen = element(prototype, screenId).bounds, rightScreen = element(application, screenId).bounds;
   if (!leftScreen || !rightScreen || !leftScreen.width || !rightScreen.width) return result([`screen anchor ${screenId} has no bounds`], 0, 'FAIL');
   const normalized = (box, frame) => ({ x: (box.x - frame.x) / frame.width, y: (box.y - frame.y) / frame.height, width: box.width / frame.width, height: box.height / frame.height });
-  const anchors = uniqueAnchors(screen).filter(anchor => !anchor.repeat && anchor.id !== screenId);
-  const visible = anchors.filter(anchor => element(prototype, anchor.id).visible && element(application, anchor.id).visible && element(prototype, anchor.id).bounds && element(application, anchor.id).bounds);
-  for (const anchor of visible) {
+  const compare = (label, left, right, leftFrame, rightFrame) => {
     checked++;
-    const left = element(prototype, anchor.id).bounds, right = element(application, anchor.id).bounds;
-    const a = normalized(left, leftScreen), b = normalized(right, rightScreen);
+    const a = normalized(left, leftFrame), b = normalized(right, rightFrame);
     const issues = [];
     for (const key of ['x', 'y']) if (Math.abs(a[key] - b[key]) > position) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
     for (const key of ['width', 'height']) if (Math.abs(a[key] - b[key]) > size) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
     if (absolute !== null) for (const key of ['x', 'y', 'width', 'height']) if (Math.abs(left[key] - right[key]) > absolute) issues.push(`${key} ${left[key]} vs ${right[key]} (±${absolute})`);
-    if (issues.length) reasons.push(`${anchor.id}: ${issues.join(', ')}`);
-  }
+    if (issues.length) reasons.push(`${label}: ${issues.join(', ')}`);
+  };
+  // Each side's root is placed in its own capture viewport (equal to the requested one, see captureSizeIssues).
+  const frames = [prototype.viewport ?? viewport, application.viewport ?? viewport];
+  if (frames.some(frame => !frame?.width || !frame?.height)) return result(['layout comparison needs both capture viewports to check the screen root'], 0, 'FAIL');
+  const [leftFrame, rightFrame] = frames.map(frame => ({ x: 0, y: 0, width: frame.width, height: frame.height }));
+  compare(`${screenId} (screen root, relative to the viewport)`, leftScreen, rightScreen, leftFrame, rightFrame);
+  const anchors = uniqueAnchors(screen).filter(anchor => !anchor.repeat && anchor.id !== screenId);
+  const visible = anchors.filter(anchor => element(prototype, anchor.id).visible && element(application, anchor.id).visible && element(prototype, anchor.id).bounds && element(application, anchor.id).bounds);
+  for (const anchor of visible) compare(anchor.id, element(prototype, anchor.id).bounds, element(application, anchor.id).bounds, leftScreen, rightScreen);
   const byParent = new Map();
   for (const anchor of visible) byParent.set(anchor.parent, [...(byParent.get(anchor.parent) ?? []), anchor.id]);
   for (const ids of byParent.values()) {

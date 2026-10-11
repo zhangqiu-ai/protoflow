@@ -143,3 +143,23 @@ test('runner configure keeps target identity fixed for anchored streams', async 
   const tuned = structuredClone(exampleConfig); tuned.targets[0].tiers = { visual: 'advisory' };
   assert.equal((await configureRunner(root, tuned)).status, 'PASS');
 });
+
+test('captures must match the requested viewport even when both sides are equally wrong', async () => {
+  const { captureSizeIssues } = await import('../src/targets.js');
+  const png = (width, height) => PNG.sync.write(new PNG({ width, height }));
+  const requested = { width: 1440, height: 1000, scale: 1 };
+  // Both sides clamped by the same screen: identical pixels, still not a valid comparison.
+  const clamped = { viewport: { width: 1440, height: 814, scale: 1 }, screenshot: png(1440, 814) };
+  assert.deepEqual(captureSizeIssues(requested, { prototype: clamped, application: clamped }), [
+    'prototype viewport 1440×814@1 does not match requested 1440×1000@1',
+    'prototype screenshot 1440×814 px does not match requested 1440×1000 px',
+    'application viewport 1440×814@1 does not match requested 1440×1000@1',
+    'application screenshot 1440×814 px does not match requested 1440×1000 px'
+  ]);
+  // A capture that claims the requested viewport but delivers fewer pixels is caught by the PNG check.
+  const claimed = { viewport: { ...requested }, screenshot: png(1440, 814) };
+  assert.deepEqual(captureSizeIssues(requested, { application: claimed }), ['application screenshot 1440×814 px does not match requested 1440×1000 px']);
+  const exact = { viewport: { ...requested }, screenshot: png(1440, 1000) };
+  assert.deepEqual(captureSizeIssues(requested, { prototype: exact, application: exact }), []);
+  assert.deepEqual(captureSizeIssues({ width: 400, height: 300, scale: 2 }, { application: { viewport: { width: 400, height: 300, scale: 2 }, screenshot: png(800, 600) } }), []);
+});

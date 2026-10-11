@@ -3,10 +3,29 @@
   "version": "0.1.0",
   "description": "Shared prototype-driven engineering engine and Codex Skill",
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "protoflow": "bin/protoflow.js" },
-  "exports": { ".": "./src/index.js" },
-  "files": ["bin", "src", "skills", "templates", "schemas", "scripts/codex-adapter.js", "scripts/codex-review-adapter.js", "docs", "examples/modular", "examples/anchors", "README.md"],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "protoflow": "bin/protoflow.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "templates",
+    "schemas",
+    "scripts/codex-adapter.js",
+    "scripts/codex-review-adapter.js",
+    "scripts/acceptance-command.js",
+    "docs",
+    "examples/modular",
+    "examples/anchors",
+    "README.md"
+  ],
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:e2e": "playwright test",
@@ -20,5 +39,8 @@
     "pixelmatch": "7.2.0",
     "pngjs": "7.0.0",
     "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "electron": "44.7.0"
   }
 }

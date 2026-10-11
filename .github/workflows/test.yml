@@ -43,16 +43,35 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      - run: npm run test:e2e -- --project=chromium
+  electron:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      - run: npx playwright install chromium
+      - run: npm run test:e2e -- --project=electron
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: electron-failure-evidence
+          path: test-results/
   # The single required check: passes when every needed job passed, or was skipped for a docs-only change.
   validate:
-    needs: [changes, unit, e2e]
+    needs: [changes, unit, e2e, electron]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: All checks passed or were not needed
         run: |
           test "${{ needs.changes.result }}" = success
-          for result in "${{ needs.unit.result }}" "${{ needs.e2e.result }}"; do
+          for result in "${{ needs.unit.result }}" "${{ needs.e2e.result }}" "${{ needs.electron.result }}"; do
             case "$result" in success|skipped) ;; *) echo "A required job ended with: $result"; exit 1 ;; esac
           done

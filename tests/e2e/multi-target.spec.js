@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { FAKE_GH } from '../helpers/fake-gh.js';
+import { parseCliOutput } from '../helpers/cli-json.js';
 
 const exec = promisify(execFile);
 const engine = path.resolve('.');
@@ -41,7 +42,7 @@ for (const event of [{ type: 'thread.started', thread_id: 'executor-' + target.i
 
 const page = (screen, body) => `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>${screen}</title><link rel="stylesheet" href="style.css"></head>\n<body data-pf="${screen}" data-pf-role="screen">\n${body}\n</body></html>\n`;
 
-async function setup() {
+async function setup(environment = {}) {
   const base = await mkdtemp(path.join(tmpdir(), 'protoflow-multi-'));
   const design = path.join(base, 'design'), remote = path.join(base, 'remote.git'), root = path.join(base, 'app'), bin = path.join(base, 'bin');
   const transport = path.join(base, 'git-transport.json');
@@ -97,20 +98,26 @@ async function setup() {
   for (const [name, fixture] of [['git', 'fake-delivery-git.cjs'], ['codex', 'fake-codex-review.cjs']]) {
     await copyFile(path.join(engine, 'tests/fixtures', fixture), path.join(bin, name)); await chmod(path.join(bin, name), 0o755);
   }
-  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_GH_DB: path.join(base, 'gh.json'), FAKE_DELIVERY_GIT: transport, FAKE_GH_REAL_REMOTE: remote };
-  for (const key of ['GH_REPO', 'GH_HOST', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE']) delete env[key];
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_GH_DB: path.join(base, 'gh.json'), FAKE_DELIVERY_GIT: transport, FAKE_GH_REAL_REMOTE: remote, ...environment };
+  for (const key of ['GH_REPO', 'GH_HOST', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'NO_COLOR', 'FORCE_COLOR']) delete env[key];
   const cliRun = async (args, expected) => {
     let result;
     try { result = { code: 0, ...(await exec(process.execPath, [cli, ...args, '--project', root], { cwd: root, env, maxBuffer: 64 * 1024 * 1024 })) }; }
     catch (error) { result = { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
     if (expected !== undefined) expect(result.code, `${args.join(' ')}\n${result.stdout}\n${result.stderr}`).toBe(expected);
-    const lines = (result.stdout || result.stderr).trim();
-    // runner start prints JSONL events, then the pretty-printed final result.
-    const json = JSON.parse(lines.startsWith('{"event"') ? lines.slice(lines.lastIndexOf('\n{\n') + 1) : lines);
-    return json;
+    return parseCliOutput(result.stdout, result.stderr);
   };
   return { base, root, remote, failMarker, commit, cliRun, run, gh: async () => JSON.parse(await readFile(env.FAKE_GH_DB, 'utf8')) };
 }
+
+test('CLI errors stay readable when the runner inherits conflicting color flags', async () => {
+  const fixture = await setup({ NO_COLOR: '1', FORCE_COLOR: '1' });
+  try {
+    const error = await fixture.cliRun(['verify', '--manifest', 'missing'], 1);
+    expect(error.status).toBe('ERROR');
+    expect(error.error).toMatch(/several targets .*pass --target/);
+  } finally { await rm(fixture.base, { recursive: true, force: true }); }
+});
 
 test('two targets advance through the same versions independently and deliver on their own branches', async () => {
   test.setTimeout(300000);

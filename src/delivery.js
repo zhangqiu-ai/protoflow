@@ -4,11 +4,13 @@ import { projectPath, readJson, writeJson, id, hash } from './util.js';
 import { requestIndependentReview, assertIndependentReview } from './delivery-review.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
 import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination } from './delivery-scope.js';
+import { verificationRevocation } from './queue.js';
 
 // The automated approver is recorded as such; it never stands in for a named human.
 export const AUTOMATED_REVIEWER = 'ai:codex-independent-review';
 // Runner state, dependencies and test output never belong in an application commit; node_modules may be a symlink.
 const EXCLUDED = ['.protoflow', 'node_modules', 'test-results', 'playwright-report'];
+const settled = delivery => ['MERGED', 'PR_OPEN_MANUAL', 'REVOKED'].includes(delivery.status);
 const protectedPath = /(?:^|\/)(?:\.git|\.protoflow|\.agents|\.codex|\.aws|\.ssh|node_modules|test-results|playwright-report|secrets?|credentials|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx))(?:\/|$)/i;
 function allowPath(value, config) {
   if (typeof value !== 'string' || !value || value.startsWith('/') || /[\s\\\0:*?\[\]]/.test(value) || value.split('/').some(part => !part || part === '.' || part === '..') || protectedPath.test(value) || value === config.prototypeDir || value.startsWith(`${config.prototypeDir}/`) || config.prototypeDir.startsWith(`${value}/`)) throw new Error(`Unsafe delivery allowlist path: ${value}`);
@@ -66,6 +68,85 @@ export async function deliveryStatus(root, config = {}, target = null) {
   return readJson(await projectPath(root, deliveryStatePath(config, target)), { schemaVersion: 1, deliveries: [] });
 }
 async function saveDelivery(root, config, target, state) { await writeJson(await projectPath(root, deliveryStatePath(config, target)), state); }
+
+/** A saved commit can precede its source link. Recover only the exact latest VER/manifest bound to that commit. */
+async function bindsUnlinkedReopening(root, delivery, entry, report) {
+  if (delivery.versions.at(-1) !== entry.manifestId || delivery.shas.at(-1) !== entry.sha || !/^[a-f0-9]{40}$/.test(delivery.commit ?? '')) return false;
+  const manifest = await loadArtifact(root, 'manifests', entry.manifestId);
+  if (manifest.source?.sha !== entry.sha || report.manifestHash !== hash(manifest)) return false;
+  const acceptance = { commit: delivery.commit, manifestId: entry.manifestId, verificationId: report.id, manifestHash: hash(manifest), verificationHash: hash(report) };
+  if (delivery.acceptance) return hash(delivery.acceptance) === hash(acceptance);
+  // Legacy records have the same hashes in their application commit's trailers.
+  let commit = delivery.commit;
+  if (delivery.integration) {
+    const integration = delivery.integration;
+    if (integration.commit !== commit || integration.baseSha !== delivery.baseSha || await git(root, ['rev-list', '--parents', '-n', '1', commit]) !== `${commit} ${integration.previousHead} ${integration.baseSha}`) return false;
+    commit = integration.previousHead;
+  }
+  const lines = (await git(root, ['show', '-s', '--format=%B', commit])).split('\n');
+  const trailers = { Manifest: entry.manifestId, Verification: report.id, 'Manifest-Hash': hash(manifest), 'Verification-Hash': hash(report), 'Application-Hash': report.project?.hash, 'Delivery-Base': delivery.baseSha };
+  return lines.includes(`Prototype-Commit: ${entry.sha}`) && Object.entries(trailers).every(([key, value]) => lines.filter(line => line.startsWith(`${key}: `)).join('\n') === `${key}: ${value}`);
+}
+
+/** Reopening withdraws only the old delivery's authority; retain every commit, review, approval and publication record. */
+async function reconcileReopenedDeliveries(root, config, target, source, state) {
+  let changed = false;
+  for (const delivery of state.deliveries.filter(item => !['MERGED', 'REVOKED'].includes(item.status))) {
+    const rejections = [], versions = [];
+    for (const entry of source.entries.filter(item => delivery.versions.includes(item.manifestId))) {
+      for (const reopening of entry.reopenings ?? []) {
+        if ((reopening.deliveryId && reopening.deliveryId !== delivery.id) || !reopening.verificationId) continue;
+        const report = await loadArtifact(root, 'verifications', reopening.verificationId);
+        if (report.manifestId !== entry.manifestId) continue;
+        const rejection = await verificationRevocation(root, config, report);
+        if (!rejection || !reopening.rejections?.some(item => item.reviewId === rejection.reviewId)) continue;
+        if (!reopening.deliveryId && !await bindsUnlinkedReopening(root, delivery, entry, report)) continue;
+        versions.push({ manifestId: entry.manifestId, verificationId: report.id });
+        if (!rejections.some(item => item.reviewId === rejection.reviewId)) rejections.push(rejection);
+      }
+    }
+    if (!rejections.length) continue;
+    delivery.revocation = { at: new Date().toISOString(), previousStatus: delivery.status, versions, rejections };
+    delivery.status = 'REVOKED'; changed = true;
+  }
+  if (changed) await saveDelivery(root, config, target, state);
+}
+
+/** A repair may run locally, but updating the shared branch would also update an unresolved rejected PR. */
+async function assertRevokedPublicationResolved(worktree, config, target, state, current) {
+  // Missing pushedAt/pr is uncertain: the push may have succeeded before its state write.
+  const revoked = state.deliveries.filter(item => item.status === 'REVOKED');
+  if (!revoked.length) return;
+  const destination = await resolveDeliveryDestination(worktree, config.runner.delivery.remote);
+  const branch = deliveryBranch(config, target);
+  const unresolved = pr => {
+    const error = new Error(`Revoked delivery PR #${pr.number} is still open; resolve it externally before publishing the repaired delivery`);
+    error.code = 'INDEPENDENT_REVIEW_BLOCKED'; return error;
+  };
+  for (const delivery of revoked.filter(item => item.pr)) {
+    const pr = await deliveryPullRequest(worktree, destination.repository, delivery.pr.number);
+    if (pr.html_url !== delivery.pr.url || pr.head?.ref !== branch || pr.base?.repo?.id !== destination.repository.id || pr.head?.repo?.id !== destination.repository.id) {
+      const error = new Error(`Revoked delivery ${delivery.id} PR identity changed; resolve it externally before publishing the repaired delivery`);
+      error.code = 'INDEPENDENT_REVIEW_BLOCKED'; throw error;
+    }
+    if (pr.state === 'open') throw unresolved(pr);
+    if (pr.state !== 'closed') { const error = new Error(`Revoked delivery ${delivery.id} PR state is unknown`); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; throw error; }
+  }
+  // A push/PR-create may have succeeded just before its state write failed. Do not adopt that old open PR.
+  const open = await ghJson(worktree, destination.repository, ['pr', 'list', '--head', branch, '--base', config.runner.delivery.baseBranch, '--state', 'open', '--json', 'number,url']);
+  let reusable = null;
+  for (const previous of open ?? []) {
+    if (previous.number === current.pr?.number) continue;
+    const live = await deliveryPullRequest(worktree, destination.repository, previous.number);
+    const repository = destination.repository;
+    const sameRepository = repo => repo?.id === repository.id && repo.full_name?.toLowerCase() === repository.nameWithOwner.toLowerCase() && repo.html_url === repository.url;
+    // Normal later versions may reuse an accepted manual PR, but a push gap must not make its old head authoritative.
+    const known = state.deliveries.find(item => item.status === 'PR_OPEN_MANUAL' && item.pr?.number === previous.number && item.pr.url === live.html_url && item.commit === live.head?.sha);
+    if (!known || live.number !== previous.number || live.html_url !== previous.url || live.state !== 'open' || live.head?.ref !== branch || live.base?.ref !== config.runner.delivery.baseBranch || !sameRepository(live.head?.repo) || !sameRepository(live.base?.repo)) throw unresolved(previous);
+    reusable ??= { number: live.number, url: live.html_url };
+  }
+  return reusable;
+}
 
 async function copyRecord(worktree, root, kind, recordId) {
   const record = await loadArtifact(worktree, kind, recordId);
@@ -149,11 +230,12 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   if (!worktree) return { status: 'NOT_RUN', reason: 'Runner worktree does not exist yet' };
   const source = await loadProgress(root, config, target);
   const state = await deliveryStatus(root, config, target);
+  await reconcileReopenedDeliveries(root, config, target, source, state);
   let revalidation = false;
   if (retryIndependentReview) {
     const { deliveryId, reviewId } = retryIndependentReview;
     const previous = state.deliveries.find(item => item.id === deliveryId);
-    if (Object.keys(retryIndependentReview).sort().join(',') !== 'deliveryId,reviewId' || !previous || ['MERGED', 'PR_OPEN_MANUAL'].includes(previous.status) || previous.independentReviewId !== reviewId) return { status: 'BLOCKED', reason: 'Review retry must explicitly select the current unfinished delivery and review attempt' };
+    if (Object.keys(retryIndependentReview).sort().join(',') !== 'deliveryId,reviewId' || !previous || settled(previous) || previous.independentReviewId !== reviewId) return { status: 'BLOCKED', reason: 'Review retry must explicitly select the current unfinished delivery and review attempt' };
     const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${reviewId}.json`), null);
     if (record?.status === 'PASS') {
       try { await assertIndependentReview(root, config, reviewId); }
@@ -208,6 +290,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         delivery.integration = await integrateBase(config, worktree, target, options, base);
         if (delivery.integration) delivery.commit = delivery.integration.commit;
       }
+      delivery.acceptance = { commit: delivery.commit, manifestId: last.manifestId, verificationId: last.verificationId, manifestHash: hash(manifest), verificationHash: hash(accepted) };
       delivery.status = 'COMMITTED'; delivery.steps.committedAt = new Date().toISOString();
     } catch (error) {
       // Nothing is linked to the versions, so the next sync repeats this delivery from the same content.
@@ -220,8 +303,9 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   }
 
   const results = [];
-  for (const delivery of state.deliveries.filter(item => !['MERGED', 'PR_OPEN_MANUAL'].includes(item.status))) {
+  for (const delivery of state.deliveries.filter(item => !settled(item))) {
     try {
+      await assertRevokedPublicationResolved(worktree, config, target, state, delivery);
       const revalidatingDelivery = revalidation && retryIndependentReview?.deliveryId === delivery.id;
       const gateOptions = { worktree, target, commit: delivery.commit, manifestIds: delivery.versions, expectedBaseSha: delivery.baseSha };
       if (!delivery.independentReviewId || retryIndependentReview?.deliveryId === delivery.id) {
@@ -243,7 +327,12 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         await saveDelivery(root, config, target, state);
       }
       if (!delivery.steps.pushedAt) {
+        const reusable = await assertRevokedPublicationResolved(worktree, config, target, state, delivery);
         const checked = await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: 'either' });
+        if (!delivery.pr && reusable) {
+          // Save the validated shared-PR identity before push; a later lookup failure cannot lose this association.
+          delivery.pr = reusable; await saveDelivery(root, config, target, state);
+        }
         if (checked.observedRemoteHead !== delivery.commit) await git(worktree, ['push', '--no-follow-tags', '-q', checked.binding.remote.url, `${delivery.commit}:refs/heads/${branch}`]);
         delivery.steps.pushedAt = new Date().toISOString();
         await saveDelivery(root, config, target, state);
@@ -321,9 +410,10 @@ export async function assertDelivered(root, config, target = null) {
   if (!config.runner?.delivery) return;
   const source = await loadProgress(root, config, target);
   const state = await deliveryStatus(root, config, target);
+  await reconcileReopenedDeliveries(root, config, target, source, state);
   const alignment = state.deliveries.find(item => item.status === 'MERGED' && item.alignment?.status === 'BLOCKED');
   if (alignment) throw new Error(`Merged delivery ${alignment.id} requires alignment recovery: ${alignment.alignment.reason}`);
-  if (source.entries.some(entry => entry.status === 'PASS' && !entry.deliveryId) || state.deliveries.some(delivery => !['MERGED', 'PR_OPEN_MANUAL'].includes(delivery.status))) {
+  if (source.entries.some(entry => entry.status === 'PASS' && !entry.deliveryId) || state.deliveries.some(delivery => !settled(delivery))) {
     const result = await syncDeliveries(root, config, { target });
     if (['FAIL', 'BLOCKED'].includes(result.status)) throw new Error(`Delivery is blocked: ${result.reason ?? result.deliveries?.find(item => item.error)?.error}`);
   }

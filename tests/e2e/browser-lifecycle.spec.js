@@ -20,6 +20,21 @@ async function groupEnded(pid) {
     await delay(10);
   }
 }
+async function stopBrowserGroup(pid, info) {
+  let signalError;
+  if (processGroupAlive(pid)) {
+    try { process.kill(-pid, 'SIGKILL'); } catch (error) { signalError = error; }
+  }
+  try { await groupEnded(pid); }
+  catch (error) {
+    if (signalError) throw new AggregateError([signalError, error], `${error.message}; SIGKILL failed: ${signalError.message}`);
+    throw error;
+  }
+  if (signalError) await info.attach('browser-group-signal-error', {
+    body: JSON.stringify({ pid, pgid: pid, signal: 'SIGKILL', code: signalError.code, error: signalError.message, processGroupActive: false }),
+    contentType: 'application/json'
+  });
+}
 
 test('real Chromium persists launch intent and PID before screenshots, and completes only after its group ends', async ({}, info) => {
   const events = [], record = {}, file = info.outputPath('browser-lifecycle.json');
@@ -141,7 +156,7 @@ for (const launchWindow of ['STARTING', 'RUNNING']) {
       } else {
         expect(processGroupAlive(browserPid)).toBe(true); await assert.rejects(retryRunner(root), /visual process group .*still active/);
         expect((await runOnce(root, config)).status).toBe('BLOCKED'); expect((await sourceStatus(root)).entries[0].attempts).toHaveLength(1);
-        process.kill(-browserPid, 'SIGKILL'); await groupEnded(browserPid);
+        await stopBrowserGroup(browserPid, info);
         expect((await retryRunner(root)).status).toBe('PASS');
         const recovered = await runOnce(root, config); expect(recovered.status).toBe('PASS');
         const final = await runnerStatus(root), rows = final.source.entries[0].attempts;
@@ -152,7 +167,7 @@ for (const launchWindow of ['STARTING', 'RUNNING']) {
       }
     } finally {
       worker?.kill('SIGKILL');
-      if (browserPid) { try { process.kill(-browserPid, 'SIGKILL'); } catch {} await groupEnded(browserPid); }
+      if (browserPid) await stopBrowserGroup(browserPid, info);
       await fs.rm(directory, { recursive: true, force: true });
     }
   });

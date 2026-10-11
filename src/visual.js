@@ -3,7 +3,8 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
-import { projectPath } from './util.js';
+import { projectPath, hash } from './util.js';
+import { runAcceptanceAdapter, sceneEvidenceHash, acceptanceApplicationUrl } from './acceptance.js';
 import { superviseBrowser, urlFor } from './browser.js';
 export { superviseBrowser, urlFor };
 
@@ -62,8 +63,10 @@ export function compareImages(beforeBuffer, afterBuffer, threshold = 0.1) {
   const sideBySide = new PNG({ width: before.width * 2, height: before.height });
   const count = pixelmatch(before.data, after.data, diff.data, before.width, before.height, { threshold, includeAA: false });
   for (let i = 0; i < before.data.length; i += 4) {
-    for (let channel = 0; channel < 3; channel++) overlay.data[i + channel] = Math.round((before.data[i + channel] + after.data[i + channel]) / 2);
-    overlay.data[i + 3] = 255;
+    const backgroundAlpha = before.data[i + 3] / 255, foregroundAlpha = after.data[i + 3] / 255 * 0.5;
+    const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+    for (let channel = 0; channel < 3; channel++) overlay.data[i + channel] = alpha ? Math.round((after.data[i + channel] * foregroundAlpha + before.data[i + channel] * backgroundAlpha * (1 - foregroundAlpha)) / alpha) : 0;
+    overlay.data[i + 3] = Math.round(alpha * 255);
   }
   PNG.bitblt(before, sideBySide, 0, 0, before.width, before.height, 0, 0);
   PNG.bitblt(after, sideBySide, 0, 0, after.width, after.height, before.width, 0);
@@ -116,29 +119,32 @@ async function prepare(page, url, scene, side) {
 }
 
 /** Browser evidence only: missing browsers and unsupported native surfaces never pass. */
-export async function verifyVisual(root, config, outDir, { version = null, liveMatches = true, signal, onBeforeSpawn, onStart, onFinish } = {}) {
+export async function verifyVisual(root, config, outDir, { version = null, liveMatches = true, signal, onBeforeSpawn, onStart, onFinish, evidence = {} } = {}) {
   const visual = config.visual ?? {};
   if (!visual.scenes?.length || visual.mode === 'native') {
     return { status: 'NOT_RUN', reason: visual.mode === 'native' ? 'Native UI requires a separately configured acceptance adapter; browser verification cannot cover it.' : 'No visual scenes configured.', scenes: [], artifacts: [] };
   }
-  return superviseBrowser(outDir, { signal, onBeforeSpawn, onStart, onFinish }, browser => collectVisualEvidence(root, config, outDir, browser, { version, liveMatches, signal }));
+  root = await realpath(root);
+  await mkdir(outDir, { recursive: true });
+  outDir = await realpath(outDir);
+  return superviseBrowser(outDir, { signal, onBeforeSpawn, onStart, onFinish }, browser => collectVisualEvidence(root, config, outDir, browser, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence }));
 }
 
-async function collectVisualEvidence(root, config, outDir, browser, { version, liveMatches, signal }) {
+async function collectVisualEvidence(root, config, outDir, browser, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence }) {
   const visual = config.visual ?? {};
   const results = [];
   const artifacts = [];
   const sources = new Set();
   for (const [index, scene] of visual.scenes.entries()) {
     if (signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
-    const result = { id: scene.id ?? `scene-${index + 1}`, status: 'PASS', reasons: [], mappings: [], artifacts: [] };
+    const result = { id: scene.id ?? `scene-${index + 1}`, status: 'PASS', reasons: [], mappings: [], artifacts: [], sceneHash: sceneEvidenceHash(scene), comparison: { alignment: 'none', masks: scene.masks ?? [], scale: 'css', includeAA: false, overlay: 'application 50% source-over prototype', pixelThreshold: visual.pixelThreshold ?? 0.1, maxDiffRatio: scene.maxDiffRatio ?? visual.maxDiffRatio ?? 0.01 } };
     let prototypeContext;
     let applicationContext;
     try {
       const options = { viewport: scene.viewport ?? { width: 1280, height: 720 }, deviceScaleFactor: scene.deviceScaleFactor ?? 1, locale: scene.locale ?? 'en-US', colorScheme: scene.colorScheme ?? 'light', timezoneId: scene.timezoneId ?? 'UTC', reducedMotion: 'reduce' };
       prototypeContext = await browser.newContext(options);
-      applicationContext = await browser.newContext(options);
-      for (const context of [prototypeContext, applicationContext]) {
+      if (visual.mode !== 'adapter') applicationContext = await browser.newContext(options);
+      for (const context of [prototypeContext, applicationContext].filter(Boolean)) {
         if (scene.fixture?.cookies?.length) await context.addCookies(scene.fixture.cookies);
         await context.addInitScript((fixture) => {
           window.__PROTOFLOW_FIXTURE__ = fixture;
@@ -146,15 +152,15 @@ async function collectVisualEvidence(root, config, outDir, browser, { version, l
         }, scene.fixture ?? {});
       }
       const prototype = await prototypeContext.newPage();
-      const application = await applicationContext.newPage();
+      const application = await applicationContext?.newPage();
       prototype.setDefaultTimeout(scene.timeoutMs ?? 10000);
-      application.setDefaultTimeout(scene.timeoutMs ?? 10000);
+      application?.setDefaultTimeout(scene.timeoutMs ?? 10000);
       const target = await prototypeTarget(root, config, scene, prototypeContext, { version, liveMatches });
       sources.add(target.source);
       result.prototypeSource = target.source;
       const prototypeUrl = target.url;
-      const applicationUrl = await urlFor(root, scene.applicationUrl);
-      await Promise.all([prepare(prototype, prototypeUrl, scene, 'prototype'), prepare(application, applicationUrl, scene, 'application')]);
+      const applicationUrl = visual.mode === 'adapter' ? await acceptanceApplicationUrl(root, config, scene.applicationUrl) : await urlFor(root, scene.applicationUrl);
+      await Promise.all([prepare(prototype, prototypeUrl, scene, 'prototype'), ...(application ? [prepare(application, applicationUrl, scene, 'application')] : [])]);
       const masksFor = async (page, side) => {
         const masks = [];
         for (const mask of scene.masks ?? []) {
@@ -166,7 +172,25 @@ async function collectVisualEvidence(root, config, outDir, browser, { version, l
         return masks;
       };
       const prototypeShot = await prototype.screenshot({ animations: 'disabled', scale: 'css', mask: await masksFor(prototype, 'prototype') });
-      const applicationShot = await application.screenshot({ animations: 'disabled', scale: 'css', mask: await masksFor(application, 'application') });
+      const prefix = `${index + 1}-${safeName(result.id)}`;
+      const retain = async (name, buffer) => { const filename = path.join(outDir, `${prefix}-${name}.png`); await writeFile(filename, buffer); result.artifacts.push(filename); artifacts.push(filename); };
+      await retain('prototype', prototypeShot);
+      let applicationShot, adapterResult;
+      if (visual.mode === 'adapter') {
+        const capturePath = await projectPath(root, path.relative(root, path.join(outDir, `${prefix}-capture.png`)));
+        const requestedCapture = { format: 'png', viewport: scene.viewport, scale: 'css', alignment: 'none', masks: (scene.masks ?? []).map(mask => mask.application), environment: { deviceScaleFactor: options.deviceScaleFactor, locale: options.locale, timezoneId: options.timezoneId, colorScheme: options.colorScheme, reducedMotion: options.reducedMotion } };
+        result.comparison.environment = requestedCapture.environment;
+        adapterResult = await runAcceptanceAdapter(root, config, 'visual', { ...evidence, scene, sceneHash: result.sceneHash, applicationUrl, capturePath, mappings: config.mappings, requestedCapture }, { signal, onBeforeSpawn, onStart, onFinish });
+        result.applicationSurface = adapterResult.applicationSurface;
+        result.adapter = adapterResult.adapter;
+        if (adapterResult.status === 'NOT_RUN') { result.status = 'NOT_RUN'; throw new Error(adapterResult.reason ?? 'Project application capture was not run'); }
+        if (adapterResult.status !== 'PASS') throw new Error(adapterResult.error ?? adapterResult.reason ?? 'Project application capture failed');
+        if (adapterResult.sceneId !== result.id || adapterResult.sceneHash !== result.sceneHash || hash(adapterResult.capture?.parameters) !== hash(requestedCapture) || adapterResult.capture?.path !== capturePath || adapterResult.stateReady !== true) throw new Error('Application capture dimensions/state/parameters do not match the requested scene');
+        applicationShot = await readFile(capturePath);
+        const capturedSize = PNG.sync.read(applicationShot);
+        if (capturedSize.width !== scene.viewport.width || capturedSize.height !== scene.viewport.height) { await retain('application', applicationShot); throw new Error('Application screenshot dimensions do not match the requested viewport'); }
+      } else applicationShot = await application.screenshot({ animations: 'disabled', scale: 'css', mask: await masksFor(application, 'application') });
+      await retain('application', applicationShot);
       const comparison = compareImages(prototypeShot, applicationShot, visual.pixelThreshold ?? 0.1);
       result.pixelDiffRatio = comparison.ratio;
       const maxRatio = scene.maxDiffRatio ?? visual.maxDiffRatio ?? 0.01;
@@ -185,12 +209,15 @@ async function collectVisualEvidence(root, config, outDir, browser, { version, l
         try {
           const properties = visual.styleProperties ?? DEFAULT_STYLES;
           const left = await inspectMapping(prototype, mapping.prototype, properties);
-          const right = await inspectMapping(application, mapping.application, properties);
+          const regions = adapterResult?.regions?.filter(region => region.id === mapping.id);
+          const right = application ? await inspectMapping(application, mapping.application, properties) : regions?.length === 1 ? { box: regions[0].box } : null;
+          if (!right || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(right.box?.[key])) || right.box.width <= 0 || right.box.height <= 0) throw new Error('Project capture must provide one valid image region for the mapping');
+          if (!application && (right.box.x < 0 || right.box.y < 0 || right.box.x + right.box.width > scene.viewport.width || right.box.y + right.box.height > scene.viewport.height)) throw new Error('Project mapping region is outside the captured viewport');
           check.prototype = left;
           check.application = right;
           const tolerance = mapping.geometryTolerance ?? visual.geometryTolerance ?? 1;
           for (const key of ['x', 'y', 'width', 'height']) if (Math.abs(left.box[key] - right.box[key]) > tolerance) check.reasons.push(`Geometry ${key}: ${left.box[key]} vs ${right.box[key]} (tolerance ${tolerance})`);
-          for (const property of properties) if (left.styles[property] !== right.styles[property]) check.reasons.push(`Style ${property}: ${left.styles[property]} vs ${right.styles[property]}`);
+          if (application) for (const property of properties) if (left.styles[property] !== right.styles[property]) check.reasons.push(`Style ${property}: ${left.styles[property]} vs ${right.styles[property]}`);
           const leftCrop = crop(prototypeShot, left.box);
           const rightCrop = crop(applicationShot, right.box);
           const leftSize = PNG.sync.read(leftCrop);
@@ -206,32 +233,29 @@ async function collectVisualEvidence(root, config, outDir, browser, { version, l
         }
         result.mappings.push(check);
       }
-      const prefix = `${index + 1}-${safeName(result.id)}`;
-      for (const [name, buffer] of Object.entries({ prototype: prototypeShot, application: applicationShot, diff: comparison.diff, overlay: comparison.overlay, 'side-by-side': comparison.sideBySide })) {
-        const filename = path.join(outDir, `${prefix}-${name}.png`);
-        await writeFile(filename, buffer);
-        result.artifacts.push(filename);
-        artifacts.push(filename);
-      }
-    } catch (error) { result.reasons.push(error.message); }
+      for (const [name, buffer] of Object.entries({ diff: comparison.diff, overlay: comparison.overlay, 'side-by-side': comparison.sideBySide })) await retain(name, buffer);
+    } catch (error) {
+      if (['PROCESS_START_UNKNOWN', 'PROCESS_GROUP_ACTIVE'].includes(error.code) || signal?.aborted || error.message.startsWith('STOPPED:')) throw error;
+      result.reasons.push(error.message);
+    }
     finally {
       await prototypeContext?.close();
       await applicationContext?.close();
     }
     if (signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
-    result.status = result.reasons.length ? 'FAIL' : 'PASS';
+    if (result.status !== 'NOT_RUN') result.status = result.reasons.length ? 'FAIL' : 'PASS';
     results.push(result);
   }
   const report = path.join(outDir, 'visual-review.html');
   await writeFile(report, renderReport(results));
   artifacts.push(report);
-  return { status: results.every((scene) => scene.status === 'PASS') ? 'PASS' : 'FAIL', scenes: results, artifacts, prototypeSource: sources.has('live') ? 'live' : 'version' };
+  return { status: results.some(scene => scene.status === 'FAIL') ? 'FAIL' : results.some(scene => scene.status === 'NOT_RUN') ? 'NOT_RUN' : 'PASS', scenes: results, artifacts, prototypeSource: sources.has('live') ? 'live' : 'version', applicationCapture: visual.mode === 'adapter' ? 'project-adapter' : 'browser' };
 }
 
 function renderReport(scenes) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow visual review</title><style>body{font:16px system-ui;margin:24px;background:#fafafa}section{border:1px solid #ddd;padding:16px;margin:24px 0}img{max-width:100%;display:block}.blink{display:grid}.blink img{grid-area:1/1}.blink img:last-child{animation:blink 1.2s steps(1) infinite}@keyframes blink{50%{opacity:0}}@media(prefers-reduced-motion:reduce){.blink img:last-child{animation:none;opacity:.5}}</style><h1>ProtoFlow visual review</h1><p>Browser evidence. Review geometry, styles, region differences and the full viewport. Blink view alternates prototype and application.</p>${scenes.map((scene) => {
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow visual review</title><style>body{font:16px system-ui;margin:24px;background:#fafafa}section{border:1px solid #ddd;padding:16px;margin:24px 0}img{max-width:100%;display:block}.blink{display:grid}.blink img{grid-area:1/1}.blink img:last-child{animation:blink 1.2s steps(1) infinite}@keyframes blink{50%{opacity:0}}@media(prefers-reduced-motion:reduce){.blink img:last-child{animation:none;opacity:.5}}</style><h1>ProtoFlow visual review</h1><p>Actual prototype and application captures. Full viewport and region pixel differences use recorded thresholds, masks and no alignment. Overlay uses application at 50% opacity over prototype. Blink view alternates the two captures.</p>${scenes.map((scene) => {
     const artifact = (suffix) => scene.artifacts.find((item) => item.endsWith(`-${suffix}.png`));
     const img = (suffix) => artifact(suffix) ? `<img alt="${escapeHtml(suffix)}" src="${escapeHtml(path.basename(artifact(suffix)))}">` : '';
-    return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}</h2><ul>${scene.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><h3>Blink</h3><div class="blink">${img('prototype')}${img('application')}</div><h3>Side by side</h3>${img('side-by-side')}<h3>Difference</h3>${img('diff')}<h3>Overlay</h3>${img('overlay')}<details><summary>Mapping evidence</summary><pre>${escapeHtml(JSON.stringify(scene.mappings, null, 2))}</pre></details></section>`;
+    return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}</h2><ul>${scene.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><pre>${escapeHtml(JSON.stringify({ sceneHash: scene.sceneHash, comparison: scene.comparison, pixelDiffRatio: scene.pixelDiffRatio, applicationSurface: scene.applicationSurface }, null, 2))}</pre><h3>Blink</h3><div class="blink">${img('prototype')}${img('application')}</div><h3>Side by side</h3>${img('side-by-side')}<h3>Difference</h3>${img('diff')}<h3>Overlay</h3>${img('overlay')}<details><summary>Mapping evidence</summary><pre>${escapeHtml(JSON.stringify(scene.mappings, null, 2))}</pre></details></section>`;
   }).join('')}</html>`;
 }

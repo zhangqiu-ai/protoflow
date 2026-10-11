@@ -1,10 +1,11 @@
 import path from 'node:path';
-import { readFile, mkdir, realpath } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand } from './util.js';
 import { snapshot } from './sessions.js';
 import { verifyVisual } from './visual.js';
+import { runAcceptanceAdapter } from './acceptance.js';
 import { loadVersion } from './versions.js';
-import { assertCurrentVersion } from './queue.js';
+import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
 import { selectTarget, targetSettings, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 
 const date = () => new Date().toISOString();
@@ -56,7 +57,9 @@ async function anchorContext(root, config, manifest, version, targetId) {
   const screens = Object.fromEntries(affected.filter(id => contract.screens[id]).map(id => [id, contract.screens[id]]));
   const ids = new Set(Object.values(screens).flatMap(screen => screen.anchors.map(anchor => anchor.id)));
   const convention = ANCHOR_CONVENTIONS[target.platform](settings.locator.attribute);
-  const reach = target.driver.kind === 'playwright-web' ? `Each screen must be reachable at ${target.driver.urlTemplate} ({screen} = screen anchor id, {page} = prototype page path without extension).` : 'Each screen must be reachable by the configured external driver.';
+  const reach = target.driver.kind === 'playwright-web' ? `Each screen must be reachable at ${target.driver.urlTemplate} ({screen} = screen anchor id, {page} = prototype page path without extension).`
+    : target.driver.kind === 'playwright-electron' ? `This is a real Electron application started from ${target.driver.main} in ${target.root ?? '.'}; each screen must be reachable in its window via route ${target.driver.route} ({screen} = screen anchor id).`
+    : 'Each screen must be reachable by the configured external driver.';
   return {
     target: { id: target.id, platform: target.platform, root: target.root ?? '.', driver: target.driver.kind, locator: settings.locator, convention },
     scope: manifest.scope ?? null, screens,
@@ -70,6 +73,15 @@ async function evidenceFile(root, relative) {
   const content = await readFile(file, 'utf8');
   if (!content.trim()) throw new Error(`Empty evidence: ${relative}`);
   return { path: relative, hash: hash(content), content };
+}
+/** Findings that reopened this target; legacy untargeted records belong to the first configured target. */
+async function rejectionFindings(root, version, config, target) {
+  const selected = isV2(config) ? selectTarget(config, target).id : undefined;
+  const rejections = (version?.rejections ?? []).filter(item => selected === undefined || (item.target ?? config.targets[0]?.id) === selected);
+  return Promise.all(rejections.map(async item => {
+    const review = await loadArtifact(root, 'reviews', item.reviewId);
+    return { reviewId: review.id, manifestId: review.manifestId, verificationId: review.verificationId, status: review.status, reviewerKind: review.reviewerKind ?? 'human', reviewer: review.reviewer, notes: review.notes, findings: review.findings, model: review.model ?? null };
+  }));
 }
 async function selectPlanning(root, manifest) {
   const { readdir } = await import('node:fs/promises');
@@ -93,7 +105,7 @@ async function assertPlanningFresh(root, manifest, planning) {
   }
 }
 export async function createContext(root, config, manifestId, { spec, adr, target } = {}) {
-  await assertCurrentVersion(root, config, manifestId, { target });
+  const queue = await assertCurrentVersion(root, config, manifestId, { target });
   const { manifest, version } = await manifestVersion(root, config, manifestId);
   const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
   if (unmapped.length) throw new Error(`Map changed prototype files before execution: ${unmapped.join(', ')}`);
@@ -107,6 +119,7 @@ export async function createContext(root, config, manifestId, { spec, adr, targe
     if (decision.status !== 'approved' || !decision.reviewer?.trim() || decision.manifestHash !== hash(manifest) || !decision.decision?.trim()) throw new Error('L3 architecture decision requires human approval bound to this manifestHash');
   }
   const anchors = isV2(config) ? await anchorContext(root, config, manifest, version, target) : null;
+  const rejections = await rejectionFindings(root, queue?.versions?.find(item => item.id === manifestId), config, target);
   const scopeInstruction = anchors ? `${anchors.instructions} Implement only this version's scope.` : 'Implement only mapped application changes.';
   return persist(root, 'contexts', {
     schemaVersion: 1, id: id('CTX'), createdAt: date(), manifestId, manifestHash: hash(manifest), manifest,
@@ -115,7 +128,8 @@ export async function createContext(root, config, manifestId, { spec, adr, targe
     mappings: isV2(config) ? [] : config.mappings.filter(mapping => manifest.mappings.includes(mapping.id)),
     ...(anchors && { anchors }),
     spec: specEvidence, adr: adrEvidence,
-    instructions: `${versionInstructions(version)} ${scopeInstruction} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
+    ...(rejections.length && { rejections }),
+    instructions: `${versionInstructions(version)} ${scopeInstruction}${rejections.length ? ' An earlier accepted implementation was rejected in review and this version was reopened; address every finding in rejections.' : ''} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
     verification: isV2(config) ? { build: checkCommands(config, target).build ?? null, functional: checkCommands(config, target).functional ?? null } : config.verification ?? {},
     visual: isV2(config) ? targetSettings(selectTarget(config, target)) : config.visual ?? {}
   });
@@ -186,13 +200,16 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   const commands = checkCommands(config, target);
   const build = await runPhase('build', commands.build);
   const before = await applicationFingerprint(root, config, target);
-  const functional = await runPhase('functional', commands.functional);
+  const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
+  const functional = !isV2(config) && commands.functional?.adapter === 'acceptance'
+    ? await runAcceptanceAdapter(root, config, 'functional', acceptanceEvidence, { signal, onBeforeSpawn, onStart, onFinish })
+    : await runPhase('functional', commands.functional);
   const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
   if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
   const visual = isV2(config)
     // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
     ? await verifyTarget(root, config, manifest, version, { target, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
-    : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish });
+    : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
   const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
   const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
@@ -234,6 +251,8 @@ async function assertReviewFresh(root, config, review) {
   const verification = await loadArtifact(root, 'verifications', review.verificationId);
   if (hash(manifest) !== review.manifestHash || hash(verification) !== review.verificationHash || verification.manifestHash !== hash(manifest)) throw new Error('Review evidence changed');
   if (verification.status !== 'PASS') throw new Error('Review approval requires PASS build, functional and visual verification');
+  const revocation = await verificationRevocation(root, config, verification);
+  if (revocation) throw new Error(`Verification ${verification.id} was rejected by ${revocation.reviewId} (${revocation.reviewerKind}, ${revocation.status}); verify the version again and review the new verification`);
   if (!Object.keys(verification.artifactHashes ?? {}).length) throw new Error('Missing visual evidence hashes');
   for (const [relative, expected] of Object.entries(verification.artifactHashes)) {
     if (hash(await readFile(await projectPath(root, relative))) !== expected) throw new Error('Visual evidence changed; rerun verification');
@@ -248,16 +267,63 @@ async function assertReviewFresh(root, config, review) {
   }
   return { manifest, verification };
 }
-export async function decideReview(root, config, reviewId, { status, reviewer, reviewerKind = 'human', notes = '', findings = [], independentReview = null }) {
+/**
+ * Independent model review evidence: a completed review JSON bound to this exact verification. Required fields:
+ * kind "independent-model-review", status "FAIL", reviewExecuted true, sessionId, verificationId, verificationHash and
+ * manifestId; target and applicationHash must match when present. verificationHash may be the record hash ProtoFlow
+ * uses (hash of the parsed verification) or the SHA-256 of the verification file's bytes; both bind the same content. decideReview copies the file into this review's artifacts.
+ */
+async function modelEvidence(root, review, verification, { evidence, session } = {}) {
+  const fileHash = hash(await readFile(await projectPath(root, `.protoflow/verifications/${validId(review.verificationId)}.json`)));
+  if (typeof evidence !== 'string' || !evidence.trim()) throw new Error('A model review requires model.evidence (the completed review result JSON)');
+  const source = path.resolve(await realpath(root), evidence);
+  const bytes = await readFile(source);
+  let data;
+  try { data = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('Model review evidence must be JSON'); }
+  const mismatch = [
+    data.kind !== 'independent-model-review' && 'kind is not independent-model-review',
+    data.reviewExecuted !== true && 'the review was not executed',
+    data.status !== 'FAIL' && `status is ${data.status}, a model review only records FAIL`,
+    (typeof data.sessionId !== 'string' || !data.sessionId.trim()) && 'sessionId is missing',
+    session && data.sessionId !== session && `session ${data.sessionId} is not ${session}`,
+    data.verificationId !== review.verificationId && `verification ${data.verificationId} is not ${review.verificationId}`,
+    ![review.verificationHash, fileHash].includes(data.verificationHash) && 'verificationHash does not match the reviewed verification',
+    data.manifestId !== review.manifestId && `manifest ${data.manifestId} is not ${review.manifestId}`,
+    data.target !== undefined && data.target !== (verification.target ?? undefined) && `target ${data.target} is not ${verification.target}`,
+    data.applicationHash !== undefined && data.applicationHash !== review.projectHash && 'applicationHash does not match the verified application'
+  ].filter(Boolean);
+  if (mismatch.length) throw new Error(`Model review evidence is not bound to this review: ${mismatch.join('; ')}`);
+  return { bytes, record: { source, path: `.protoflow/artifacts/${review.id}/model-review.json`, hash: hash(bytes), verificationHashForm: data.verificationHash === review.verificationHash ? 'record' : 'file', sessionId: data.sessionId, completedAt: data.completedAt ?? null, status: data.status }, findings: data.modelResult?.findings ?? [] };
+}
+const MODEL_SEVERITY = { critical: 'critical', high: 'high', medium: 'normal', normal: 'normal', low: 'low' };
+
+/**
+ * Three separate decision kinds: a human (any decision), policy approval ("automated", approve only, needs
+ * policy.autoApprove) and an independent model review ("model", reject or request changes only, bound to its result).
+ * A rejection of a PASS verification reopens that version for its target (see queue.js revocations).
+ */
+export async function decideReview(root, config, reviewId, { status, reviewer, reviewerKind = 'human', notes = '', findings = [], model = null, independentReview = null }) {
   if (!['approved', 'rejected', 'changes_requested'].includes(status)) throw new Error('Invalid review decision');
   if (!reviewer?.trim()) throw new Error('--reviewer is required');
-  if (!['human', 'automated'].includes(reviewerKind)) throw new Error('reviewerKind must be human or automated');
+  if (!['human', 'automated', 'model'].includes(reviewerKind)) throw new Error('reviewerKind must be human, automated or model');
   // Automated approval is an explicit project policy and is always recorded as automated, never as a person.
-  if (reviewerKind === 'automated' && (config.policy?.autoApprove !== true || status !== 'approved')) throw new Error('Automated review decisions require policy.autoApprove and may only approve verified changes');
+  if (reviewerKind === 'automated' && (config.policy?.autoApprove !== true || status !== 'approved')) throw new Error('Automated review decisions require policy.autoApprove and may only approve verified changes; record an independent model review with reviewerKind model');
+  if (reviewerKind === 'model' && !REJECTING.includes(status)) throw new Error('An independent model review may only reject or request changes; approval is human or policy.autoApprove');
+  // AI identities are labelled ai:… and can never be recorded as a human, nor a person as an AI.
+  if ((reviewerKind === 'human') === reviewer.trim().startsWith('ai:')) throw new Error(reviewerKind === 'human' ? 'Human reviewers cannot use an ai: identity' : 'AI reviewers must use an ai: identity');
   if (!Array.isArray(findings)) throw new Error('findings must be an array');
-  if (findings.some(finding => !finding || typeof finding !== 'object' || typeof finding.description !== 'string' || !finding.description.trim() || !['critical', 'high', 'normal', 'low'].includes(finding.severity))) throw new Error('Each finding requires description and severity (critical|high|normal|low)');
   const review = await loadArtifact(root, 'reviews', reviewId);
   if (review.status !== 'pending') throw new Error('Review already decided; create a new review');
+  const verification = await loadArtifact(root, 'verifications', review.verificationId);
+  let modelResult = null;
+  if (reviewerKind === 'model') {
+    // The model judged exactly this manifest, prototype and verification (which binds the application content).
+    const { manifest } = await manifestVersion(root, config, review.manifestId);
+    if (hash(manifest) !== review.manifestHash || hash(verification) !== review.verificationHash || verification.manifestHash !== hash(manifest) || verification.prototypeHash !== manifest.afterHash) throw new Error('Review evidence changed');
+    modelResult = await modelEvidence(root, review, verification, model ?? {});
+    if (!findings.length) findings = modelResult.findings.map(item => ({ severity: MODEL_SEVERITY[item.severity] ?? 'normal', description: [item.file, item.reason ?? item.description].filter(Boolean).join(': ') }));
+  }
+  if (findings.some(finding => !finding || typeof finding !== 'object' || typeof finding.description !== 'string' || !finding.description.trim() || !['critical', 'high', 'normal', 'low'].includes(finding.severity))) throw new Error('Each finding requires description and severity (critical|high|normal|low)');
   let independent = null;
   if (reviewerKind === 'automated') {
     if (!independentReview?.root || !independentReview?.id) throw new Error('Automated approval requires independent AI review PASS evidence');
@@ -267,7 +333,19 @@ export async function decideReview(root, config, reviewId, { status, reviewer, r
     if (reviewer !== `ai:codex-independent-review:${independent.sessionId}`) throw new Error('Automated reviewer must identify the independent AI session');
   }
   if (status === 'approved') await assertReviewFresh(root, config, review);
-  return persist(root, 'reviews', { ...review, status, reviewer, reviewerKind, independentReview: independent ? { root: independentReview.root, id: independent.id, sessionId: independent.sessionId, traceHash: independent.traceHash, verdictHash: independent.verdictHash, commit: independent.binding.commit, tree: independent.binding.tree, baseSha: independent.binding.remote.baseSha } : null, reviewedAt: date(), notes, findings });
+  const decided = { ...review, status, reviewer, reviewerKind, independentReview: independent ? { root: independentReview.root, id: independent.id, sessionId: independent.sessionId, traceHash: independent.traceHash, verdictHash: independent.verdictHash, commit: independent.binding.commit, tree: independent.binding.tree, baseSha: independent.binding.remote.baseSha } : null, reviewedAt: date(), notes, findings };
+  if (modelResult) {
+    const file = await projectPath(root, modelResult.record.path);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, modelResult.bytes, { flag: 'wx' });
+    decided.model = modelResult.record;
+  }
+  if (REJECTING.includes(status)) {
+    decided.bound = { manifestHash: review.manifestHash, prototypeHash: verification.prototypeHash, verificationHash: review.verificationHash, verificationStatus: verification.status,
+      applicationHash: verification.project?.hash ?? null, applicationAtDecision: (await applicationFingerprint(root, config, verification.target)).hash,
+      reopens: verification.status === 'PASS' };
+  }
+  return persist(root, 'reviews', decided);
 }
 export async function createBaseline(root, config, reviewId) {
   const review = await loadArtifact(root, 'reviews', reviewId);

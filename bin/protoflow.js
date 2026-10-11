@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Must stay the first import: it takes over Node warnings before other modules load.
+import { flushDiagnostics } from '../src/cli-diagnostics.js';
 import path from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
@@ -43,13 +45,15 @@ Usage: protoflow <command> [action] --project <path> [options]
   verify --manifest id                   Build + functional + visual checks
   repair --manifest id [--execute] [--spec path] [--adr path]
   review create --manifest id --verification id
-  review approve|reject|request-changes --review id --reviewer name [--notes text]
+  review approve|reject|request-changes --review id --reviewer name [--notes text] [--findings file]
+  review reject|request-changes --review id --reviewer ai:<model> --reviewer-kind model --model-evidence file [--model-session id]
   baseline create --review id | show [--baseline id]
   queue [--target id]                    Prototype versions in order; each target works on its 'current'
   --target id                            Selects the target for context/prepare/verify/repair/runner retry/
                                          delivery when a schemaVersion 2 project has several targets
   status                                Sessions, latest baseline, version queue, Spec Kit/BMad
-All output is JSON. Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW,
+All output is JSON: stdout carries the result; on failure the last stderr line is the JSON error
+(earlier stderr lines are notices or diagnostics). Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW,
 3 BLOCKED: context/prepare/execute/verify/repair target a version other than the
 queue's current one; versions are accepted in checkpoint order (policy.sequentialVersions).
 External commands are argv arrays, run without a shell. Nothing commits or pushes.`;
@@ -57,7 +61,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -113,7 +117,8 @@ try {
           const status = { approve: 'approved', reject: 'rejected', 'request-changes': 'changes_requested' }[action];
           if (!status) throw new Error('Use review create|approve|reject|request-changes');
           const findings = values.findings ? await readJson(await projectPath(root, values.findings)) : [];
-          return decideReview(root, config, requireOption('review'), { status, reviewer: requireOption('reviewer'), notes: values.notes, findings });
+          const model = values['model-evidence'] ? { evidence: values['model-evidence'], session: values['model-session'] } : null;
+          return decideReview(root, config, requireOption('review'), { status, reviewer: requireOption('reviewer'), reviewerKind: values['reviewer-kind'] ?? 'human', notes: values.notes, findings, model });
         }
         case 'baseline':
           if (action === 'create') return createBaseline(root, config, requireOption('review'));
@@ -147,6 +152,7 @@ try {
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
     const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
+    flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));
     // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.
     for (const notice of result?.notices ?? []) console.error(`ProtoFlow: ${notice}`);
@@ -155,6 +161,7 @@ try {
     else if (['NOT_RUN', 'NEEDS_REVIEW'].includes(result?.status)) process.exitCode = 2;
   }
 } catch (error) {
+  flushDiagnostics();
   if (error.code === 'VERSION_ORDER') {
     console.error(JSON.stringify({ status: 'BLOCKED', error: error.message, queue: error.queue }));
     process.exitCode = 3;

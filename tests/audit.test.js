@@ -200,7 +200,7 @@ test('synthetic protocol fixture: automated approval cannot self-approve without
   await assert.rejects(decideReview(root, config, pending.id, automated), /policy\.autoApprove/);
   const allowed = { ...config, policy: { ...config.policy, autoApprove: true } };
   await assert.rejects(decideReview(root, allowed, pending.id, { ...automated, status: 'rejected' }), /may only approve/);
-  await assert.rejects(decideReview(root, allowed, pending.id, { ...automated, reviewerKind: 'robot' }), /human or automated/);
+  await assert.rejects(decideReview(root, allowed, pending.id, { ...automated, reviewerKind: 'robot' }), /human, automated or model/);
 
   await assert.rejects(decideReview(root, allowed, pending.id, automated), /independent AI review PASS/);
   await assert.rejects(createBaseline(root, allowed, pending.id), /approved review/);
