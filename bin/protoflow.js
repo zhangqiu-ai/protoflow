@@ -35,6 +35,10 @@ Usage: protoflow <command> [action] --project <path> [options]
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
+  delivery sync --retry-review --delivery id --review AIR-id [--target id]
+                                         Explicit fresh independent review of the selected current attempt:
+                                         an unattested PASS after restart, a BLOCKED attempt before approval,
+                                         or a transient network BLOCK after approval/push (never a FAIL verdict)
   doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
@@ -60,8 +64,8 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session'].map(key => [key, { type: 'string' }]))
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -92,7 +96,13 @@ try {
           }
           throw new Error('Use runner start|status|retry|configure');
         case 'delivery':
-          if (action === 'sync') return syncDeliveries(root, config, { target: values.target ?? null });
+          if (action === 'sync') {
+            if (!values['retry-review']) {
+              if (values.delivery) throw new Error('--delivery is only used with --retry-review');
+              return syncDeliveries(root, config, { target: values.target ?? null });
+            }
+            return syncDeliveries(root, config, { target: values.target ?? null, retryIndependentReview: { deliveryId: requireOption('delivery'), reviewId: requireOption('review') } });
+          }
           if (action === 'status') return deliveryStatus(root, config, values.target ?? null);
           throw new Error('Use delivery sync|status');
         case 'session':

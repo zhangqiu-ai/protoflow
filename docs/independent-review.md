@@ -44,7 +44,16 @@ await assertIndependentReview(projectRoot, config, review.id, { published: true 
 
 真正的授權錨點是共享引擎程序內、模組私有的 attestation；只有已實際完成的 adapter／provider PASS 才建立，綁定完整 AIR record、request、run、process 和 options。磁碟上的 JSON／JSONL 即使全部重算 hash 也不能建立或改寫這個錨點。程序重啟後錨點不存在，已保存的 PASS 只能供稽核，正常 sync 保守 BLOCKED；不自動重跑任何 review。需明確選定 deliveryId／reviewId 執行下述新 provider revalidation。應用與 executor 不得修改可信共享引擎或其程序記憶體；本地可寫的證據目錄不屬於可信授權儲存。
 
-binding 包含 HEAD/tree、主 root HEAD、完整 workspace content hash（含 live prototype）、application hash（排除 prototype）、source entry、manifest／新 VER 全 hash、frozen version 和 artifact 完整性、executor 文件與 trace/session、config 和 remote URL/base/head。只忽略 `.git`、`.protoflow`、node_modules 和測試輸出等既有 runtime 目錄。工作中的 application bytes／modes 必須吻合被 commit 的 tree。主 root 是 manifest／VER 權威；snapshot 只容許 top-level runnerWorktree 匯出 metadata 差異。
+binding 包含 HEAD/tree、主 root HEAD、完整 workspace content hash（含 live prototype）、application hash（排除 prototype）、source entry、manifest／新 VER 全 hash、frozen version 和 artifact 完整性、executor 文件與 trace/session、config 和 remote URL/base/head。只忽略 `.git`、`.protoflow`、node_modules 和測試輸出等既有 runtime 目錄。工作中的 application bytes／modes 必須吻合被 commit 的 tree。主 root 是 manifest／VER 權威；snapshot 只容許 top-level runnerWorktree 匯出 metadata 差異（只出現在 0.2.0 及以前匯出的主 root VER；0.2.1 起 Runner 匯出與 worktree 完全相同的紀錄）。
+
+reviewer 在 worktree 中只讀，看得到的是 worktree 的 VER 副本。為了讓 reviewer 重算的 hash 與 binding 比對同一份內容，`binding.versions[]` 每筆包含：
+
+- `manifestHash`：`hash(主 root .protoflow/manifests/<manifestId>.json 解析後的 JSON)`。
+- `verificationHash`：`hash(主 root .protoflow/verifications/<verificationId>.json 解析後的 JSON)`，交付、approval 與 commit trailer 使用的權威值。
+- `verificationFile`：reviewer 工作目錄（被 review 的 worktree）中的副本路徑 `.protoflow/verifications/<verificationId>.json`。
+- `verificationFileHash`：`hash(verificationFile 解析後的 JSON)`。
+
+`hash(x)` 是 `JSON.stringify(x)`（保留檔案中的 key 順序、無空白）UTF-8 bytes 的小寫 hex SHA-256；字串或檔案 bytes 則直接計算。兩份 VER 除了舊版主 root 的 `runnerWorktree` 外必須相同，否則在 provider 執行前 BLOCKED；因此新紀錄的 `verificationHash` 等於 `verificationFileHash`。review prompt 逐字說明上述定義，並要求 reviewer 以 `verificationFileHash` 比對它讀到的檔案。
 
 交付 remote 必須只有一個有效 push URL，且為 `https://github.com/OWNER/REPO[.git]` 或 `git@github.com:OWNER/REPO[.git]`。base／head 查詢、必要 fetch 與普通 push 使用同一個已綁定的 URL 字串；不同 fetch URL 不參與交付。多個 push URL、Git URL rewrite 與 `GIT_CONFIG*` 環境覆寫一律 BLOCKED；所有 review／交付 Git 操作移除外部 `GIT_*`、停用 hooks／fsmonitor，並固定 `--no-replace-objects`。拒絕 legacy `info/grafts`，另以引擎設定的 `GIT_GRAFT_FILE=/dev/null` 防止 graft 在檢查後影響命令；commit／tree／blob 檢查和 push 使用相同原始 objects。透過指定 `repos/OWNER/REPO` 與 `--hostname github.com` 的 `gh api` 解析 canonical repository ID／full_name／URL，拒絕轉向其他 repository；此身份也納入 binding。每個 `gh pr` 操作使用 `--repo github.com/OWNER/REPO`，移除環境 `GH_REPO` 並固定 `GH_HOST=github.com`。來源掃描仍可使用明確 local Git fixture；交付測試只在測試專用 Git executable 將上述 GitHub URL 映射至 local bare repository，production 沒有 fixture bypass。
 
@@ -74,7 +83,7 @@ v1 與單一 target 的 v2 專案沿用上述路徑與分支。`targets` 有多�
 - 兄弟 target 合併後 base 會前進，使本 target HEAD 不再以 current base 為祖先。此時交付先在 commit 後檢查：base 自分叉點以來變更的檔案若只在兄弟 target root、prototype 或 runtime 目錄內，才以 `--no-ff` 將精確 base SHA merge 進本 target worktree，且合併前後本 target 的 application hash 必須相同；否則 BLOCKED 並要求在新 base 上重新驗收。若 base 改了共享頂層檔案或本 target root，也一律 BLOCKED。合併結果記錄於 delivery `integration`，PR 留言標示，review 針對包含該 base 的 HEAD 與 `base..HEAD` diff 執行。單一 target 不做此整合，base 前進仍 BLOCKED。
 - merge 後的 Runner 對齊只作用於該 target 自身的 `.protoflow/runner/<id>/state.json` 與 worktree。
 
-正常 sync 不自動重跑 BLOCKED review。確認失敗原因後，可用明確接口啟動新 attempt：
+正常 sync 不自動重跑 BLOCKED review。確認失敗原因後，可用 CLI `protoflow delivery sync --retry-review --delivery <DLV> --review <AIR> [--target <id>]` 或明確接口啟動新 attempt：
 
 ```js
 await syncDeliveries(projectRoot, config, {
@@ -86,4 +95,12 @@ await syncDeliveries(projectRoot, config, {
 
 多目標時另傳 `target`；未指定 target 的重試直接 BLOCKED。
 
-失敗 review 重試只接受指定的當前 BLOCKED attempt，且 delivery 尚未 approval／push／PR。程序重啟後，這個相同的明確選取接口也接受尚未完成 delivery 的磁碟 PASS：必須沒有 live attestation，才建立新的 AIR 並實際執行 provider；既有 live attestation 有漂移時不能以此重試。新 request 重做全部 acceptance／HEAD／base 核對；已發布者仍須保持相同 commit／current base／PR 身份。舊 AIR record、process、raw trace 和 verdict 不覆寫，state 保存 independentReviewAttempts 及 supersedes。若曾 automated approval，新 provider PASS 後建立引用新 AIR 的 approval／baseline，原引用另存 approvalHistory，不把舊批准當新授權。真正 FAIL／BLOCKED 不會自動重試。直接呼叫 requestIndependentReview 每次也產生不同 AIR ID。
+明確重試只接受指定 delivery 的當前 attempt（`reviewId` 必須等於 `delivery.independentReviewId`），並依該 attempt 分三種情況：
+
+1. **程序重啟後的已保存 PASS**：必須沒有 live attestation，才建立新的 AIR 並實際執行 provider；既有 live attestation 有漂移時不能以此重試。
+2. **尚未 approval／push／PR 的 BLOCKED attempt**：例如 provider 未完成或 binding 核對失敗。
+3. **已 approval 或已 push 後、因暫時性基礎設施故障 BLOCKED 的 attempt**：只限 AIR 紀錄帶 `retryable: true` 與 `reasonCode: "TRANSIENT_INFRASTRUCTURE"`，即 Git transport、`gh api`／`gh pr` 的網路錯誤、HTTP 5xx 或代理 `CONNECT tunnel failed`，發生在 provider 之前，或 provider 回傳無 finding 的 PASS 之後。其他 BLOCKED（例如 HEAD／base／VER 漂移）在 approval／發布後不能以此重試。
+
+任何情況下，只要該 attempt 的 provider 曾回傳 FAIL、NOT_RUN 或任何 finding（從 run 讀取；adapter 拒收的輸出則掃描 raw trace 中每則 agent message），重試一律 BLOCKED：reviewer 的判斷是該 delivery 的最終結果，不能換一個 session 重抽。即使有人把該 AIR 紀錄改成 retryable 也一樣，因為判斷依據是 verdict 證據本身；verdict 證據與紀錄 hash 不符時同樣 BLOCKED。需要修正時記錄拒收、修復並以新 verification 交付。
+
+新 request 重做全部 acceptance／HEAD／base 核對；已發布者仍須保持相同 commit／current base／PR 身份。舊 AIR record、process、raw trace 和 verdict 不覆寫，state 保存 independentReviewAttempts 及 supersedes。若曾 automated approval（須目前仍啟用 `policy.autoApprove`），新 provider PASS 後建立引用新 AIR 的 approval／baseline，原引用另存 approvalHistory，不把舊批准當新授權，然後續做 PR、留言與合併。BLOCKED review 不會自動重試；交付結果的 `retryable` 與 `independentReviewId` 指出可用上述命令重試的 attempt。直接呼叫 requestIndependentReview 每次也產生不同 AIR ID。

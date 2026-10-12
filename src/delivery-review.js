@@ -45,6 +45,31 @@ export const reviewVerdictSchema = {
 };
 const validVerdict = new Ajv({ strict: false, allErrors: true }).compile(reviewVerdictSchema);
 function blocked(message) { const error = new Error(message); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; return error; }
+function keepTransient(error, cause) { if (cause.transient === true) error.transient = true; return error; }
+const verdictAllowsRetry = verdict => verdict === undefined || verdict === null || (verdict.status === 'PASS' && Array.isArray(verdict.findings) && !verdict.findings.length);
+/**
+ * The verdict a recorded attempt's provider returned, read from its run or, when the adapter rejected the output,
+ * from every agent message in the raw trace. null means no provider verdict exists. Inconsistent records throw.
+ */
+export async function recordedVerdict(root, record) {
+  if (record.runFile) {
+    const run = await readJson(await projectPath(root, record.runFile));
+    if ((record.runHash && hash(run) !== record.runHash) || (record.verdictHash && hash(run.verdict) !== record.verdictHash)) throw blocked('Independent review run evidence changed');
+    if (run.verdict) return run.verdict;
+  }
+  if (!record.processFile) return null;
+  const process = await readJson(await projectPath(root, record.processFile));
+  if (record.processHash && hash(process) !== record.processHash) throw blocked('Independent review process evidence changed');
+  let envelope;
+  try { envelope = JSON.parse(process.stdout); } catch { return null; }
+  const verdicts = [envelope?.verdict, ...String(envelope?.trace ?? '').split(/\r?\n/).flatMap(line => {
+    try { const event = JSON.parse(line); return event.type === 'item.completed' && event.item?.type === 'agent_message' ? [JSON.parse(event.item.text)] : []; }
+    catch { return []; }
+  })].filter(value => value && typeof value === 'object' && 'status' in value);
+  return verdicts.find(verdict => !verdictAllowsRetry(verdict)) ?? verdicts.at(-1) ?? null;
+}
+/** A FAIL, NOT_RUN or finding from the reviewer is a judgment, never an infrastructure failure to retry. */
+export const isRejectingVerdict = verdict => Boolean(verdict) && !verdictAllowsRetry(verdict);
 export function assertStructuredVerdict(verdict, request) {
   if (!validVerdict(verdict) || verdict.requestId !== request.id || verdict.bindingHash !== request.bindingHash) throw blocked('Independent review verdict is malformed or bound to another request');
   return verdict;
@@ -97,6 +122,7 @@ function reviewTarget(config, target) {
   if (!config.targets.some(item => item.id === target)) throw blocked('Independent review requires the delivering target');
   return target;
 }
+// ProtoFlow <= 0.2.0 exported the main-root VER with a top-level runnerWorktree path; that key is not evidence.
 const contentReport = ({ runnerWorktree, ...report }) => report;
 async function executorRecords(root, worktree, entries, external) {
   const locations = external ?? entries.flatMap(entry => (entry.attempts ?? []).filter(attempt => attempt.executionStatus === 'PASS' && attempt.executionId).map(attempt => ({ path: `.protoflow/contexts/${attempt.executionId}.json`, manifestId: entry.manifestId })));
@@ -153,7 +179,8 @@ async function capture(root, config, options, ownedMerge = null) {
     await loadVersion(worktree, config, manifest);
     if (!Object.keys(report.artifactHashes ?? {}).length) throw blocked('Missing hashed acceptance artifacts');
     for (const [file, expected] of Object.entries(report.artifactHashes)) if (hash(await fs.readFile(await projectPath(worktree, file))) !== expected) throw blocked('Acceptance artifact changed');
-    versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes) });
+    // verificationHash binds the authoritative main-root VER; the reviewer reads verificationFile in this checkout.
+    versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), verificationFile: `.protoflow/verifications/${report.id}.json`, verificationFileHash: hash(localReport), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes) });
   }
   if (application.hash !== versions.at(-1).applicationHash) throw blocked('Full application content drifted since the newest PASS verification');
   const executors = await executorRecords(root, worktree, entries, options.executorEvidence);
@@ -194,6 +221,7 @@ function recordPath(reviewId) {
 export async function requestIndependentReview(root, config, options) {
   const reviewId = id('AIR');
   const record = { schemaVersion: 1, id: reviewId, status: 'BLOCKED', createdAt: new Date().toISOString() };
+  let run;
   try {
     const command = await commandFor(config), binding = await capture(root, config, options);
     const worktree = options.worktree ?? root;
@@ -208,7 +236,6 @@ export async function requestIndependentReview(root, config, options) {
     await writeJson(await projectPath(root, processFile), result);
     Object.assign(record, { processFile, processHash: hash(result) });
     if (result.status !== 'PASS' || result.processGroupActive) throw blocked(`Independent review ${result.status}: provider did not complete safely`);
-    let run;
     try { run = JSON.parse(result.stdout); } catch { throw blocked('Independent review returned no strict structured run evidence'); }
     await writeJson(await projectPath(root, runFile), run);
     if (run?.verdict) Object.assign(record, { runFile, runHash: hash(run), sessionId: run.sessionId, traceHash: run.traceHash, verdictHash: hash(run.verdict) });
@@ -221,6 +248,8 @@ export async function requestIndependentReview(root, config, options) {
   } catch (error) {
     attestations.delete(await attestationKey(root, reviewId));
     record.status = 'BLOCKED'; record.reason = error.message;
+    // A network failure outside the provider's verdict may be retried explicitly; any FAIL/finding verdict never is.
+    if (error.transient === true && verdictAllowsRetry(run?.verdict)) Object.assign(record, { retryable: true, reasonCode: 'TRANSIENT_INFRASTRUCTURE' });
     await writeJson(await projectPath(root, recordPath(reviewId)), record);
     return record;
   }
@@ -228,16 +257,16 @@ export async function requestIndependentReview(root, config, options) {
 /** Recompute all evidence before each approval, push or merge; a legal push changes only the reviewed tip. */
 export async function assertIndependentReview(root, config, reviewId, options = {}) {
   try { return await assertRecordedReview(root, config, reviewId, options); }
-  catch (error) { if (error.code === 'INDEPENDENT_REVIEW_BLOCKED') throw error; throw blocked(`Independent review evidence unavailable: ${error.message}`); }
+  catch (error) { if (error.code === 'INDEPENDENT_REVIEW_BLOCKED') throw error; throw keepTransient(blocked(`Independent review evidence unavailable: ${error.message}`), error); }
 }
 /** For byte-preserving post-merge alignment only; still requires this process's live provider attestation. */
 export async function assertMergedIndependentReview(root, config, reviewId, mergeCommit) {
   try { return await assertRecordedReview(root, config, reviewId, { published: true }, mergeCommit); }
-  catch (error) { if (error.code === 'INDEPENDENT_REVIEW_BLOCKED') throw error; throw blocked(`Merged review evidence unavailable: ${error.message}`); }
+  catch (error) { if (error.code === 'INDEPENDENT_REVIEW_BLOCKED') throw error; throw keepTransient(blocked(`Merged review evidence unavailable: ${error.message}`), error); }
 }
 async function assertRecordedReview(root, config, reviewId, options, mergeCommit = null) {
   const record = await readJson(await projectPath(root, recordPath(reviewId)));
-  if (record.status !== 'PASS') throw blocked(`Independent review ${record.status}: ${record.reason ?? 'PASS evidence required'}`);
+  if (record.status !== 'PASS') { const error = blocked(`Independent review ${record.status}: ${record.reason ?? 'PASS evidence required'}`); error.transient = record.retryable === true; throw error; }
   const attestation = attestations.get(await attestationKey(root, reviewId));
   if (!attestation) { const error = blocked('Independent review lacks a live engine attestation; explicitly select a fresh provider revalidation after restart'); error.reasonCode = 'ENGINE_ATTESTATION_MISSING'; throw error; }
   const request = await readJson(await projectPath(root, record.requestFile)), run = await readJson(await projectPath(root, record.runFile)), process = await readJson(await projectPath(root, record.processFile));

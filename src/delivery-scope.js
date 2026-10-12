@@ -6,6 +6,15 @@ import { runCommand } from './util.js';
 
 const exec = promisify(execFile);
 function blocked(message) { const error = new Error(message); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; return error; }
+// Network, proxy and HTTP 5xx failures of Git transport or GitHub. They say nothing about the reviewed content.
+const TRANSIENT = [
+  /CONNECT tunnel failed/i, /\b(?:HTTP(?:\/[\d.]+)?|status(?: code)?|response|returned error:?)\s+5\d\d\b/i,
+  /Service Unavailable|Bad Gateway|Gateway Time-?out|Internal Server Error/i,
+  /Could not resolve host|Failed to connect to|Connection (?:timed out|refused|reset)|Operation timed out|i\/o timeout|TLS handshake timeout|unexpected EOF|early EOF|RPC failed|remote end hung up unexpectedly|SSL_ERROR_SYSCALL|Temporary failure in name resolution|network is unreachable|\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND)\b/i,
+];
+export const transientFailure = text => typeof text === 'string' && TRANSIENT.some(pattern => pattern.test(text));
+/** Mark an infrastructure error as retryable when its own command output shows a transient network failure. */
+export function markTransient(error, detail = error.stderr ?? error.message) { if (transientFailure(detail)) error.transient = true; return error; }
 function environment() {
   if (Object.keys(process.env).some(key => /^GIT_CONFIG(?:_|$)/.test(key))) throw blocked('Git configuration environment overrides are forbidden for delivery');
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_') && !['GH_REPO', 'GH_HOST', 'GITHUB_API_URL', 'GITHUB_SERVER_URL'].includes(key)));
@@ -18,7 +27,9 @@ export async function deliveryGit(root, args, { encoding = 'utf8' } = {}) {
   const graft = (await exec('git', [...prefix, 'rev-parse', '--git-path', 'info/grafts'], { cwd: root, env, timeout: 60000 })).stdout.trim();
   try { await fs.lstat(path.resolve(root, graft)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const result = await exec('git', [...prefix, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
+  let result;
+  try { result = await exec('git', [...prefix, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 }); }
+  catch (error) { throw markTransient(error, String(error.stderr ?? '')); }
   return encoding === 'buffer' ? result.stdout : result.stdout.trim();
 }
 
@@ -34,7 +45,7 @@ export function deliveryGh(worktree, repository, args) {
 export async function deliveryPullRequest(worktree, repository, number) {
   if (repository?.host !== 'github.com' || !/^[\w.-]+\/[\w.-]+$/.test(repository.nameWithOwner ?? '') || !Number.isSafeInteger(repository.id) || repository.id <= 0 || !Number.isSafeInteger(number) || number <= 0) throw blocked('Missing reviewed pull request repository identity');
   const result = await github(worktree, ['api', `repos/${repository.nameWithOwner}/pulls/${number}`, '--hostname', 'github.com']);
-  if (result.status !== 'PASS') throw blocked(`Pull request identity lookup failed: ${(result.stderr || result.error || '').trim()}`);
+  if (result.status !== 'PASS') { const detail = (result.stderr || result.error || '').trim(); throw markTransient(blocked(`Pull request identity lookup failed: ${detail}`), detail); }
   try { return JSON.parse(result.stdout); } catch { throw blocked('Malformed pull request identity'); }
 }
 
@@ -53,7 +64,7 @@ export async function resolveDeliveryDestination(worktree, remote = 'origin') {
   const requested = match[1];
   // gh api has no --repo flag: its literal endpoint and --hostname scope this read.
   const result = await github(worktree, ['api', `repos/${requested}`, '--hostname', 'github.com']);
-  if (result.status !== 'PASS') throw blocked(`Canonical GitHub repository lookup failed: ${(result.stderr || result.error || '').trim()}`);
+  if (result.status !== 'PASS') { const detail = (result.stderr || result.error || '').trim(); throw markTransient(blocked(`Canonical GitHub repository lookup failed: ${detail}`), detail); }
   let repository;
   try { repository = JSON.parse(result.stdout); } catch { throw blocked('Malformed canonical GitHub repository identity'); }
   if (!Number.isSafeInteger(repository?.id) || repository.id <= 0 || typeof repository.full_name !== 'string' || repository.full_name.toLowerCase() !== requested.toLowerCase() || repository.html_url !== `https://github.com/${repository.full_name}`) throw blocked('Canonical GitHub repository differs from the reviewed destination');

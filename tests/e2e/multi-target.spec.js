@@ -137,7 +137,8 @@ test('two targets advance through the same versions independently and deliver on
     expect(v1.acceptance).toBe('partial');
     expect(queue.targets.web.current).toBe(null);
     expect(queue.targets.desktop.current).toBe(v1.id);
-    expect(queue.release).toEqual({ requireTargets: ['web', 'desktop'], version: null, summary: null });
+    // With runner.delivery the release follows finished deliveries, not verification PASS alone.
+    expect(queue.release).toEqual({ requireTargets: ['web', 'desktop'], basis: 'delivery', version: null, summary: null });
     // Each target has its own worktree, runner state and progress.
     const status = await cliRun(['runner', 'status']);
     expect(status.targets.web.runner.worktree).toMatch(/-web$/);
@@ -190,6 +191,14 @@ test('two targets advance through the same versions independently and deliver on
       }
     }
     expect(reviews.size).toBe(4);
+    // The reviewer reads the worktree VER; the review binds the main-root copy. Both must be the same record
+    // (the FAKE reviewer recomputes the bound hash from its checkout and returns FAIL on a mismatch).
+    for (const version of queue.versions) for (const id of ['web', 'desktop']) {
+      const file = `.protoflow/verifications/${version.targets[id]}.json`;
+      const [main, copy] = await Promise.all([root, status.targets[id].runner.worktree].map(async base => JSON.parse(await readFile(path.join(base, file), 'utf8'))));
+      expect(JSON.stringify(main)).toBe(JSON.stringify(copy));
+      expect(main.runnerWorktree).toBeUndefined();
+    }
     // Desktop's first version forked before web's merges reached main, so it integrated that base first.
     expect(deliveries.targets.desktop.deliveries[0].integration.baseSha).toBe(deliveries.targets.desktop.deliveries[0].baseSha);
     expect(deliveries.targets.web.deliveries.every(item => !item.integration)).toBe(true);

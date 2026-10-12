@@ -65,7 +65,7 @@ protoflow runner start --project /path/to/app --once
 
 ## 多目標（schemaVersion 2）
 
-`targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已接受的最新版本。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
+`targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態；`release.requireTargets` 的 `release.version` 是所有必要 target 都已完成的最新版本（依 checkpoint 順序取各 target 的共同前綴）。未啟用 `runner.delivery` 時「完成」指 verification 已接受（`release.basis: "verification"`）；啟用 `runner.delivery` 時（`release.basis: "delivery"`），該 target 的版本還必須已由交付完成：紀錄為 `MERGED`，或 `merge: "manual"` 下已交給人處理的 `PR_OPEN_MANUAL`。交付 BLOCKED／FAIL、尚未建立 PR 或已 `REVOKED` 的版本不計入 release；各版本的 `acceptance` 欄位仍只反映 verification。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
 
 ## CLI 輸出契約
 
@@ -73,7 +73,7 @@ stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結�
 
 ## 證據與順序
 
-`.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。
+`.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。Runner 匯出到主 checkout 的 VER 與 worktree 的副本是同一筆紀錄，不再附加任何 Runner metadata（0.2.0 及以前會加上頂層 `runnerWorktree`；worktree 路徑只記在 Runner 狀態）。獨立 review 綁定主 checkout 的 VER，reviewer 讀 worktree 副本，因此兩者的 hash 必須一致。
 
 Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；未啟用 `policy.autoApprove` 時，Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。PASS 之後若有人工或獨立模型審查拒收（`rejected`／`changes_requested`），Runner 下一輪會把該 target 的同一版本重開為 PENDING 並重新執行；舊 PASS 與交付記在 `reopenings`（見提案 §16.8）。
 
@@ -98,9 +98,24 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 
 多目標時每個 target 依序以自己的 worktree、交付分支 `<delivery.branch>/<id>` 與紀錄 `.protoflow/delivery/<id>.json` 走完上述步驟，各自取得獨立 review PASS；一個 target BLOCKED 不阻擋其他 target。交付 commit 不得包含兄弟 target 的 root。兄弟 target 先合併令 base 前進時，只在 base 的變更全部位於兄弟 root／prototype／runtime 目錄、且本 target application hash 不變時，才把精確 base SHA merge 進本 target worktree 後再 review；否則 BLOCKED 並需在新 base 上重新驗收。詳見 [獨立 review 的多目標交付](independent-review.md#多目標交付schemaversion-2)。
 
-push、PR、留言或合併失敗保存在 `.protoflow/delivery/state.json`（多目標為 `.protoflow/delivery/<id>.json`）；同一引擎程序內可從失敗步驟續做，不重複 commit 或留言。程序重啟後 `protoflow delivery sync` 不信任僅磁碟 PASS，須透過明確選定 deliveryId／reviewId 的 API 取得新實際 provider revalidation，詳見下方接口；`protoflow delivery status` 仍可讀取紀錄。需要 `gh` 已登入且對目標 repo 有寫入權。主 checkout 不會被 pull 或修改。
+push、PR、留言或合併失敗保存在 `.protoflow/delivery/state.json`（多目標為 `.protoflow/delivery/<id>.json`）；同一引擎程序內可從失敗步驟續做，不重複 commit 或留言。程序重啟後 `protoflow delivery sync` 不信任僅磁碟 PASS，須明確選定 deliveryId／reviewId 取得新實際 provider revalidation；`protoflow delivery status` 仍可讀取紀錄。需要 `gh` 已登入且對目標 repo 有寫入權。主 checkout 不會被 pull 或修改。
 
-獨立 review 的 BLOCKED 證據保持阻擋，不能以編輯狀態或自填 PASS 清除；需取得新的實際 review，並保留所需新驗收證據。[重用接口與私有 provenance 格式](independent-review.md) 可供其他受保護的交付流程使用。若缺當前 base 物件，request 只 fetch 該精確 SHA（`--no-tags --no-write-fetch-head`），不移動 main、index 或工作檔案。
+### 暫時性網路故障與明確重試
+
+Git transport（`ls-remote`／`fetch`／`push`）與 `gh api`／`gh pr` 的網路錯誤、HTTP 5xx（例如 `Service Unavailable`、`Bad Gateway`）和代理的 `CONNECT tunnel failed` 屬於暫時性基礎設施故障，與 reviewer verdict 及 binding 漂移分開記錄：
+
+- 交付步驟失敗時，交付紀錄與 `delivery sync` 結果帶 `retryable: true`；同一程序的下一次 sync 從失敗步驟續做。
+- 發生在獨立 review 期間（provider 之前的 base 查詢，或 provider 回傳 PASS 之後的重新核對）時，AIR 紀錄為 `BLOCKED`，並帶 `retryable: true`、`reasonCode: "TRANSIENT_INFRASTRUCTURE"`。reviewer 回傳 FAIL、NOT_RUN 或任何 finding 的 attempt 永遠不會被標為 retryable。
+
+重試必須明確選定當前交付與其當前 review attempt，必要時指定 target：
+
+```bash
+protoflow delivery sync --retry-review --delivery DLV-... --review AIR-... [--target web] --project /path/to/app
+```
+
+此命令總是建立新的 AIR 並實際執行 provider，接受以下情況：程序重啟後沒有 live attestation 的已保存 PASS；尚未 approval／push／PR 的 BLOCKED attempt；以及已 approval 或已 push 後，因暫時性網路故障 BLOCKED 的 attempt。新的 PASS 之後，引擎重新核對 commit、tree、base 與 PR 身份，建立引用新 AIR 的 automated approval（舊 approval 存入 `approvalHistory`），再續做 PR、留言與合併。reviewer 的 FAIL／NOT_RUN／finding 是最終判斷，任何情況都不重試；須記錄拒收（`review reject`）並在修復後以新 verification 交付。
+
+獨立 review 的 BLOCKED 證據保持阻擋，不能以編輯狀態或自填 PASS 清除；需以上述明確重試取得新的實際 review，並保留所需新驗收證據。[重用接口與私有 provenance 格式](independent-review.md) 可供其他受保護的交付流程使用。若缺當前 base 物件，request 只 fetch 該精確 SHA（`--no-tags --no-write-fetch-head`），不移動 main、index 或工作檔案。
 
 ### 定期巡查（Codex 自動化）
 
