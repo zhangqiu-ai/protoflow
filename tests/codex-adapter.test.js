@@ -51,3 +51,23 @@ test('Codex model options preserve workspace-write and unsupported bypass option
   assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '--model', 'metadata-supported-model', '--ephemeral', '-']);
   assert.equal((await run(root, context, 0, ['--dangerously-bypass-approvals-and-sandbox'])).exitCode, 1);
 });
+
+const isolation = ['--ignore-user-config', '-c', 'features.memories=false', '-c', 'approval_policy="never"'];
+test('Codex bridge isolates the executor from user config and memories when requested (mock, no provider)', async t => {
+  const root = await fixture(t);
+  const contextPackage = { kind: 'implement', instructions: 'Preserve prototype', manifest: { id: 'test' } };
+  // Engine path: adapters.codex.ignoreUserConfig arrives as stdin JSON and is not echoed into the prompt data.
+  assert.equal((await run(root, { ...contextPackage, executor: { ignoreUserConfig: true } }, 0, ['--model', 'm'])).exitCode, 0);
+  let received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
+  assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', ...isolation, '--model', 'm', '-']);
+  assert.ok(received.stdin.includes(JSON.stringify(contextPackage, null, 2)));
+  assert.doesNotMatch(received.stdin, /"executor"/);
+  // Direct argv form for adapters configured by hand.
+  assert.equal((await run(root, contextPackage, 0, ['--ignore-user-config'])).exitCode, 0);
+  received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
+  assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', ...isolation, '-']);
+  // Explicit false keeps the previous behavior.
+  assert.equal((await run(root, { ...contextPackage, executor: { ignoreUserConfig: false } })).exitCode, 0);
+  received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
+  assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '-']);
+});

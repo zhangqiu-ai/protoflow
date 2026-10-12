@@ -159,7 +159,8 @@ export async function executeContext(root, config, contextId, { execute = false,
   for (const evidence of [context.spec, context.adr].filter(Boolean)) {
     if ((await evidenceFile(root, evidence.path)).hash !== evidence.hash) throw new Error('Planning evidence changed; regenerate context');
   }
-  const request = { ...context, kind: repair ? 'repair' : 'implement', repair };
+  // Executor isolation travels in stdin JSON; the built-in Codex adapter honors it, custom adapters must implement it.
+  const request = { ...context, kind: repair ? 'repair' : 'implement', repair, ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } }) };
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: 'Use --execute after configuring the Codex adapter' };
   const command = config.adapters?.codex?.command;
   const before = await snapshot(root, config);

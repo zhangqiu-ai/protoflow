@@ -369,6 +369,9 @@
                   }
                 }
               ]
+            },
+            "ignoreUserConfig": {
+              "type": "boolean"
             }
           }
         },

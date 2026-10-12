@@ -46,3 +46,26 @@ test('with Node runtime warnings, a successful command keeps stdout pure JSON', 
   assert.equal(JSON.parse(lint.stdout).status, 'PASS');
   assert.match(lint.stderr, /ProtoFlow diagnostic: Warning/);
 });
+
+test('multi-target source status and runner status show per-target progress and exit 0', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-cli-status-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = id => ({ id, platform: 'web', root: id, driver: { kind: 'playwright-web', urlTemplate: `${id}/{page}.html` } });
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ schemaVersion: 2, prototypeDir: 'prototype', targets: [target('web'), target('desktop')] }));
+  const sha = 'a'.repeat(40);
+  await fs.mkdir(path.join(root, '.protoflow/source'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/source/state.json'), JSON.stringify({ schemaVersion: 1, status: 'READY', scannedSha: sha, completedSha: null, entries: [{ sha, manifestId: 'git-a', prototypeHash: 'h', ordinal: 1, status: 'PENDING', attempts: [] }] }));
+  for (const id of ['web', 'desktop']) {
+    await fs.mkdir(path.join(root, `.protoflow/targets/${id}`), { recursive: true });
+    await fs.writeFile(path.join(root, `.protoflow/targets/${id}/progress.json`), JSON.stringify({ schemaVersion: 1, target: id, entries: [{ sha, manifestId: 'git-a', prototypeHash: 'h', ordinal: 1, status: 'PASS', attempts: [] }], completedSha: sha }));
+  }
+  const source = await run(['source', 'status', '--project', root]);
+  assert.equal(source.code, 0);
+  assert.deepEqual(JSON.parse(source.stdout).entries.map(entry => [entry.status, entry.targets]), [['PASS', { web: 'PASS', desktop: 'PASS' }]]);
+  const runner = await run(['runner', 'status', '--project', root]);
+  assert.equal(runner.code, 0);
+  const status = JSON.parse(runner.stdout);
+  assert.equal(status.source.statusBasis, 'targets');
+  assert.equal(status.source.completedSha, sha);
+  assert.deepEqual(Object.fromEntries(Object.entries(status.targets).map(([id, item]) => [id, item.summary.status])), { web: 'IDLE', desktop: 'IDLE' });
+});

@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { versionQueue, assertCurrentVersion } from '../src/queue.js';
-import { loadProgress, saveProgress, streamTargets, runnerStatePath, deliveryBranch } from '../src/streams.js';
+import { loadProgress, saveProgress, streamTargets, runnerStatePath, deliveryBranch, sourceView } from '../src/streams.js';
+import { runnerStatus } from '../src/runner.js';
 import { saveSourceState } from '../src/source.js';
 import { applicationFingerprint } from '../src/workflow.js';
 import { hash, writeJson } from '../src/util.js';
@@ -103,4 +104,50 @@ test('with runner.delivery, release waits until every required target finished d
   assert.equal((await versionQueue(root, multi)).release.version, 'v2');
   // Verification acceptance itself is unchanged: both versions stay accepted by both targets.
   assert.deepEqual((await versionQueue(root, multi)).versions.map(version => version.acceptance), ['accepted', 'accepted']);
+});
+
+test('runner status reports multi-target progress per target; shared source entries are combined, not stale PENDING', async t => {
+  const root = await project(t, []);
+  const [a, b] = ['a'.repeat(40), 'b'.repeat(40)];
+  const scanned = { schemaVersion: 1, status: 'READY', scannedSha: b, completedSha: null, entries: [a, b].map((sha, index) => ({ sha, manifestId: `git-${sha[0]}`, prototypeHash: 'h', ordinal: index + 1, status: 'PENDING', attempts: [] })) };
+  await saveSourceState(root, scanned);
+  const web = await loadProgress(root, multi, 'web');
+  for (const entry of web.entries) entry.status = 'PASS';
+  await saveProgress(root, multi, 'web', { ...web, completedSha: b });
+  const ios = await loadProgress(root, multi, 'ios');
+  ios.entries[0].status = 'PASS';
+  await saveProgress(root, multi, 'ios', { ...ios, completedSha: a });
+
+  let status = await runnerStatus(root, multi);
+  assert.equal(status.source.statusBasis, 'targets');
+  assert.deepEqual(status.source.entries.map(entry => [entry.status, entry.recordedStatus, entry.targets]), [['PASS', 'PENDING', { web: 'PASS', ios: 'PASS' }], ['PARTIAL', 'PENDING', { web: 'PASS', ios: 'PENDING' }]]);
+  assert.equal(status.source.completedSha, a, 'completed by every target');
+  assert.deepEqual(status.targets.web.summary, { status: 'IDLE', completedSha: b, current: null, counts: { PASS: 2 } });
+  assert.deepEqual(status.targets.ios.summary, { status: 'PENDING', completedSha: a, current: { manifestId: 'git-b', sha: b }, counts: { PASS: 1, PENDING: 1 } });
+  assert.equal(status.targets.ios.runner, null);
+  assert.equal(status.runner, undefined);
+  assert.deepEqual(await sourceView(root, multi), status.source);
+
+  ios.entries[1].status = 'BLOCKED';
+  await saveProgress(root, multi, 'ios', { ...ios, completedSha: a });
+  assert.equal((await runnerStatus(root, multi)).source.entries[1].status, 'BLOCKED');
+  ios.entries[1].status = 'PASS';
+  await saveProgress(root, multi, 'ios', { ...ios, completedSha: b });
+  status = await runnerStatus(root, multi);
+  assert.deepEqual(status.source.entries.map(entry => entry.status), ['PASS', 'PASS'], 'a fully completed project does not look pending');
+  assert.equal(status.source.completedSha, b);
+  assert.equal(status.targets.ios.summary.status, 'IDLE');
+  // The stored source state is untouched; status only reads.
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, '.protoflow/source/state.json'), 'utf8')), scanned);
+});
+
+test('single-target and schemaVersion 1 runner status keep the stored source state shape', async t => {
+  const root = await project(t, []);
+  const state = { schemaVersion: 1, status: 'READY', scannedSha: 'a'.repeat(40), completedSha: null, entries: [{ sha: 'a'.repeat(40), manifestId: 'git-a', prototypeHash: 'h', ordinal: 1, status: 'PENDING', attempts: [] }] };
+  await saveSourceState(root, state);
+  const v1 = { schemaVersion: 1, prototypeDir: 'prototype', mappings: [] };
+  for (const config of [single, v1, null]) {
+    assert.deepEqual(await runnerStatus(root, config), { source: state, runner: null });
+    assert.deepEqual(await sourceView(root, config), state);
+  }
 });

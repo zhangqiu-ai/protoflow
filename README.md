@@ -137,7 +137,7 @@ protoflow install --personal --project /path/to/app
 | `migrate anchors [--output DIR]` | v1 mapping → 錨點遷移草稿（不套用） |
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
 | `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
-| `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復 |
+| `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復；多目標時 `runner status` 以各 target 進度合成 source entries 狀態（`statusBasis: "targets"`）並附每個 target 的 `summary` |
 | `delivery sync` / `delivery status` | commit 後先取得獨立 AI review PASS，再允許自動批准、推送、PR 與合併；多目標時每個 target 在 `<branch>/<id>` 各自通過 review；缺配置或證據漂移時 BLOCKED。網路／5xx 暫時故障標為 `retryable`，以 `delivery sync --retry-review --delivery <DLV> --review <AIR>` 明確重跑新 review（reviewer FAIL 不重試） |
 | `doctor` | 接入環境診斷 |
 | `session start` / `session list` | 設計會話及修改前快照 |
@@ -216,7 +216,7 @@ node bin/protoflow.js verify --project examples/demo --manifest MANIFEST_ID
 
 Spec Kit／BMad 由 `install` 安裝到目標專案，但仍是獨立工具：它們的 skills 由 Codex 或開發者在對話中使用，ProtoFlow 產生 request，接受 adapter 回傳的實際 artifact，**不把 agent skill 當 terminal 命令**。安裝與 adapter 接口已用本機測試替身驗證；真實安裝依賴網路與兩個上游專案的 CLI。官方來源：[Spec Kit](https://github.com/github/spec-kit)、[BMad](https://github.com/bmad-code-org/BMAD-METHOD)。
 
-Codex 橋接在 `scripts/codex-adapter.js`：配置 `argv: ["node", "/absolute/shared-engine/scripts/codex-adapter.js"]`。它將 Context Package 經 stdin 交給 `codex exec --json --sandbox workspace-write -`；需要已安裝且可使用的 Codex。命令參數已對照本機 CLI help 和 [官方非互動模式](https://developers.openai.com/codex/noninteractive)。Adapter 退出成功只表示程序完成，最終是否可批准仍由 `verify` 決定。
+Codex 橋接在 `scripts/codex-adapter.js`：配置 `argv: ["node", "/absolute/shared-engine/scripts/codex-adapter.js"]`。它將 Context Package 經 stdin 交給 `codex exec --json --sandbox workspace-write -`；需要已安裝且可使用的 Codex。命令參數已對照本機 CLI help 和 [官方非互動模式](https://developers.openai.com/codex/noninteractive)。設定 `adapters.codex.ignoreUserConfig: true` 可讓執行者不載入 `~/.codex/config.toml`（含 memories），避免個人記憶進入獨立 reviewer 會讀的 EXEC trace；代價是 config 中的模型、provider、MCP 與 sandbox 設定也不生效，詳見 [整合：Codex](docs/integrations.md#執行者隔離ignoreuserconfig)。Adapter 退出成功只表示程序完成，最終是否可批准仍由 `verify` 決定。
 
 交付另需配置 `adapters.independentReview.command`，使用共享 `scripts/codex-review-adapter.js`。它以既有 CLI 登入啟動新的 read-only、ephemeral Codex session；從完整 JSONL 保存真實 session、structured verdict 與 hash，不接受執行代理或 Runner 自填 PASS。詳見 [獨立 AI review gate 與重用接口](docs/independent-review.md)。這份 AI 證據不代替真人 ADR 或 GitHub approval，合併仍遵守 branch protection。
 

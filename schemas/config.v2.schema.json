@@ -237,6 +237,9 @@
                   }
                 }
               ]
+            },
+            "ignoreUserConfig": {
+              "type": "boolean"
             }
           }
         },

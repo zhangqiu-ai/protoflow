@@ -11,7 +11,8 @@ import { withLock, readJson, projectPath } from '../src/util.js';
 import { detectIntegrations, integrationNotices } from '../src/integrations.js';
 import { suggestMappings } from '../src/mappings.js';
 import { lintAnchors, suggestAnchorsCommand, showContract, migrateCommand } from '../src/anchor-commands.js';
-import { scanSource, sourceStatus } from '../src/source.js';
+import { scanSource } from '../src/source.js';
+import { sourceView } from '../src/streams.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
 import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
@@ -80,7 +81,7 @@ try {
       switch (command) {
         case 'source':
           if (action === 'scan') return scanSource(root, config);
-          if (action === 'status') return sourceStatus(root);
+          if (action === 'status') return sourceView(root, config);
           throw new Error('Use source scan|status');
         case 'doctor': return doctor(root, config);
         case 'runner':

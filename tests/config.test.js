@@ -61,3 +61,16 @@ test('v1 project acceptance requires an adapter command and does not extend v2 f
   await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(v2));
   await assert.rejects(loadConfig(root));
 });
+
+test('adapters.codex.ignoreUserConfig is an optional boolean in both config schemas', async t => {
+  const root = await target(t), config = await loadConfig(root);
+  config.adapters.codex = { command: { argv: ['node', '/shared/scripts/codex-adapter.js'] }, ignoreUserConfig: true };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config)); assert.deepEqual(await loadConfig(root), config);
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...config, adapters: { ...config.adapters, codex: { ...config.adapters.codex, ignoreUserConfig: 'yes' } } }));
+  await assert.rejects(loadConfig(root));
+  // The independent reviewer always isolates itself; the option is not accepted there.
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...config, adapters: { ...config.adapters, independentReview: { command: null, ignoreUserConfig: true } } }));
+  await assert.rejects(loadConfig(root));
+  const v2 = { schemaVersion: 2, prototypeDir: 'prototype', targets: [{ id: 'web', platform: 'web', driver: { kind: 'playwright-web', urlTemplate: 'app/{page}.html' } }], adapters: { codex: { command: null, ignoreUserConfig: false } } };
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(v2)); assert.deepEqual(await loadConfig(root), v2);
+});
