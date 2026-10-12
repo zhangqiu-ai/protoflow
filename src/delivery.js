@@ -1,9 +1,9 @@
 import { createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerStatePath, isMultiTarget } from './streams.js';
 import { projectPath, readJson, writeJson, id, hash } from './util.js';
-import { requestIndependentReview, assertIndependentReview } from './delivery-review.js';
+import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict } from './delivery-review.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
-import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination } from './delivery-scope.js';
+import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient } from './delivery-scope.js';
 import { verificationRevocation } from './queue.js';
 
 // The automated approver is recorded as such; it never stands in for a named human.
@@ -169,9 +169,13 @@ async function approve(root, config, worktree, entry, independent) {
   return { reviewId: decided.id, baselineId: baseline.id, independentReviewId: independent.id, reviewer: decided.reviewer };
 }
 
+function ghFailure(label, result) {
+  const detail = (result.stderr || result.error || '').trim();
+  return markTransient(new Error(`${label} failed: ${detail}`), detail);
+}
 async function ghJson(worktree, repository, args) {
   const result = await gh(worktree, repository, args);
-  if (result.status !== 'PASS') throw new Error(`gh ${args[0]} ${args[1]} failed: ${(result.stderr || result.error || '').trim()}`);
+  if (result.status !== 'PASS') throw ghFailure(`gh ${args[0]} ${args[1]}`, result);
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
 }
 
@@ -231,18 +235,32 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   const source = await loadProgress(root, config, target);
   const state = await deliveryStatus(root, config, target);
   await reconcileReopenedDeliveries(root, config, target, source, state);
-  let revalidation = false;
+  // An explicit retry selects the current attempt; `revalidation` lets its fresh PASS replace an existing approval.
+  let revalidation = false, previousReview = null;
   if (retryIndependentReview) {
     const { deliveryId, reviewId } = retryIndependentReview;
     const previous = state.deliveries.find(item => item.id === deliveryId);
     if (Object.keys(retryIndependentReview).sort().join(',') !== 'deliveryId,reviewId' || !previous || settled(previous) || previous.independentReviewId !== reviewId) return { status: 'BLOCKED', reason: 'Review retry must explicitly select the current unfinished delivery and review attempt' };
     const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${reviewId}.json`), null);
-    if (record?.status === 'PASS') {
+    if (!record || record.id !== reviewId || !['PASS', 'BLOCKED'].includes(record.status)) return { status: 'BLOCKED', reason: 'Review retry requires a recorded PASS or BLOCKED attempt' };
+    let verdict;
+    try { verdict = await recordedVerdict(root, record); }
+    catch (error) { return { status: 'BLOCKED', reason: `Review retry cannot read the recorded verdict: ${error.message}` }; }
+    // The reviewer's judgment is final for this delivery: reject and repair instead of asking another session.
+    if (isRejectingVerdict(verdict)) return { status: 'BLOCKED', reason: `Independent review ${reviewId} returned ${verdict.status}${verdict.findings?.length ? ` with ${verdict.findings.length} finding(s)` : ''}; a reviewer verdict is never retried. Record a rejection and repair the version` };
+    const published = Boolean(previous.approval || previous.steps?.pushedAt || previous.pr);
+    if (record.status === 'PASS') {
+      if (!verdict) return { status: 'BLOCKED', reason: 'Recorded PASS has no provider verdict' };
       try { await assertIndependentReview(root, config, reviewId); }
       catch (error) { revalidation = error.code === 'INDEPENDENT_REVIEW_BLOCKED' && error.reasonCode === 'ENGINE_ATTESTATION_MISSING'; }
       if (!revalidation) return { status: 'BLOCKED', reason: 'Only an unattested persisted PASS can be explicitly revalidated; live or changed evidence cannot be retried' };
-      if (previous.approval && !config.policy?.autoApprove) return { status: 'BLOCKED', reason: 'Revalidating an automated approval requires the current autoApprove policy' };
-    } else if (record?.status !== 'BLOCKED' || previous.status !== 'BLOCKED' || previous.approval || previous.steps?.pushedAt || previous.pr) return { status: 'BLOCKED', reason: 'Failed review retry requires the current blocked attempt before approval or publication' };
+    } else if (published) {
+      // After approval or publication only an infrastructure failure outside the verdict can be retried.
+      if (record.retryable !== true || record.reasonCode !== 'TRANSIENT_INFRASTRUCTURE') return { status: 'BLOCKED', reason: 'After approval or publication only a review attempt BLOCKED by a transient network failure can be retried' };
+      revalidation = true;
+    }
+    if (previous.approval && !config.policy?.autoApprove) return { status: 'BLOCKED', reason: 'Revalidating an automated approval requires the current autoApprove policy' };
+    previousReview = record;
   }
   const pending = source.entries.filter(entry => entry.status === 'PASS' && !entry.deliveryId);
 
@@ -294,7 +312,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       delivery.status = 'COMMITTED'; delivery.steps.committedAt = new Date().toISOString();
     } catch (error) {
       // Nothing is linked to the versions, so the next sync repeats this delivery from the same content.
-      return { status: 'BLOCKED', step: 'commit', reason: error.message };
+      return { status: 'BLOCKED', step: 'commit', reason: error.message, retryable: error.transient === true };
     }
     for (const entry of pending) entry.deliveryId = delivery.id;
     state.deliveries.push(delivery);
@@ -311,12 +329,12 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       if (!delivery.independentReviewId || retryIndependentReview?.deliveryId === delivery.id) {
         const previousId = delivery.independentReviewId;
         const independent = await requestIndependentReview(root, config, gateOptions);
-        delivery.independentReviewAttempts ??= previousId ? [{ id: previousId, status: revalidatingDelivery ? 'PASS' : 'BLOCKED' }] : [];
+        delivery.independentReviewAttempts ??= previousId ? [{ id: previousId, status: previousReview?.id === previousId ? previousReview.status : 'BLOCKED' }] : [];
         delivery.independentReviewAttempts.push({ id: independent.id, status: independent.status, createdAt: independent.createdAt, supersedes: previousId ?? null });
         delivery.independentReviewId = independent.id;
         delivery.independentSessionId = independent.sessionId ?? null;
         await saveDelivery(root, config, target, state);
-        if (independent.status !== 'PASS') { const error = new Error(independent.reason); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; throw error; }
+        if (independent.status !== 'PASS') { const error = new Error(independent.reason); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; error.transient = independent.retryable === true; throw error; }
       }
       const independent = await assertIndependentReview(root, config, delivery.independentReviewId, { ...gateOptions, published: 'either' });
       if (delivery.approval && delivery.approval.independentReviewId !== independent.id && !revalidatingDelivery) { const error = new Error('Existing automated approval lacks this independent review; inspect it manually'); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; throw error; }
@@ -345,7 +363,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         if (!delivery.pr) {
           await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
           const created = await gh(worktree, repository, ['pr', 'create', ...(options.draft ? ['--draft'] : []), '--base', options.baseBranch, '--head', branch, '--title', `ProtoFlow delivery: prototype ${delivery.shas.at(-1).slice(0, 7)}`, '--body', 'Automated application delivery from ProtoFlow. Each delivery is summarized in a comment below.']);
-          if (created.status !== 'PASS') throw new Error(`gh pr create failed: ${created.stderr.trim()}`);
+          if (created.status !== 'PASS') throw ghFailure('gh pr create', created);
           // Look the new PR up among open PRs: the branch may also have older, merged PRs.
           delivery.pr = (await ghJson(worktree, repository, ['pr', 'list', '--head', branch, '--base', options.baseBranch, '--state', 'open', '--json', 'number,url']))?.[0] ?? null;
           if (!delivery.pr) throw new Error(`gh pr create did not leave an open PR for ${branch}`);
@@ -356,7 +374,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         const entries = (await loadProgress(root, config, target)).entries.filter(entry => delivery.versions.includes(entry.manifestId));
         await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
         const comment = await gh(worktree, repository, ['pr', 'comment', String(delivery.pr.number), '--body', summary(delivery, entries, config, target)]);
-        if (comment.status !== 'PASS') throw new Error(`gh pr comment failed: ${comment.stderr.trim()}`);
+        if (comment.status !== 'PASS') throw ghFailure('gh pr comment', comment);
         delivery.steps.commentedAt = new Date().toISOString();
       }
       if (options.merge === 'auto') {
@@ -370,13 +388,13 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
           await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
           if (view.isDraft) {
             const ready = await gh(worktree, repository, ['pr', 'ready', String(delivery.pr.number)]);
-            if (ready.status !== 'PASS') throw new Error(`gh pr ready failed: ${ready.stderr.trim()}`);
+            if (ready.status !== 'PASS') throw ghFailure('gh pr ready', ready);
             delivery.steps.readyAt = new Date().toISOString(); await saveDelivery(root, config, target, state);
             await assertPullRequestScope(worktree, independent, delivery);
             await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
           }
           const merged = await gh(worktree, repository, ['pr', 'merge', String(delivery.pr.number), '--merge', '--match-head-commit', delivery.commit]);
-          if (merged.status !== 'PASS') throw new Error(`gh pr merge failed: ${merged.stderr.trim()}`);
+          if (merged.status !== 'PASS') throw ghFailure('gh pr merge', merged);
         }
         const after = await ghJson(worktree, repository, ['pr', 'view', String(delivery.pr.number), '--json', 'state,mergeCommit,mergedAt,headRefOid']);
         if (after.state !== 'MERGED') throw new Error(`PR #${delivery.pr.number} is ${after.state}, not merged`);
@@ -391,13 +409,15 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
         delivery.status = 'PR_OPEN_MANUAL';
       }
-      delivery.error = null;
+      delivery.error = null; delete delivery.retryable;
     } catch (error) {
       delivery.status = error.code === 'INDEPENDENT_REVIEW_BLOCKED' ? 'BLOCKED' : 'FAIL'; delivery.error = error.message;
+      // Network/5xx failures are recorded apart from review verdicts and binding drift.
+      delivery.retryable = error.transient === true;
     }
     delivery.updatedAt = new Date().toISOString();
     await saveDelivery(root, config, target, state);
-    results.push({ id: delivery.id, status: delivery.status, versions: delivery.shas, commit: delivery.commit, pr: delivery.pr?.url ?? null, mergeCommit: delivery.mergeCommit ?? null, error: delivery.error ?? null, ...(delivery.alignment ? { alignment: delivery.alignment } : {}) });
+    results.push({ id: delivery.id, status: delivery.status, versions: delivery.shas, commit: delivery.commit, pr: delivery.pr?.url ?? null, mergeCommit: delivery.mergeCommit ?? null, error: delivery.error ?? null, ...(delivery.error ? { retryable: delivery.retryable === true, independentReviewId: delivery.independentReviewId ?? null } : {}), ...(delivery.alignment ? { alignment: delivery.alignment } : {}) });
     // Later deliveries stack on this branch; keep order by stopping at the first failure.
     if (['FAIL', 'BLOCKED'].includes(delivery.status)) break;
   }

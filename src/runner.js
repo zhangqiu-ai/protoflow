@@ -114,7 +114,9 @@ async function exportEvidence(root, worktree, report) {
     const target = await projectPath(root, relative);
     await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(source, target);
   }
-  await writeJson(await projectPath(root, `.protoflow/verifications/${report.id}.json`), { ...report, runnerWorktree: worktree });
+  // Export the exact record: the independent review binds this main-root copy and its reviewer reads the worktree copy.
+  // The worktree is recorded in runner state, never inside the VER.
+  await writeJson(await projectPath(root, `.protoflow/verifications/${report.id}.json`), report);
 }
 
 /** Copy decided rejections (and their model evidence) between the project and the runner worktree so both queues agree. */

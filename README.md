@@ -138,7 +138,7 @@ protoflow install --personal --project /path/to/app
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
 | `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
 | `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復 |
-| `delivery sync` / `delivery status` | commit 後先取得獨立 AI review PASS，再允許自動批准、推送、PR 與合併；多目標時每個 target 在 `<branch>/<id>` 各自通過 review；缺配置或證據漂移時 BLOCKED |
+| `delivery sync` / `delivery status` | commit 後先取得獨立 AI review PASS，再允許自動批准、推送、PR 與合併；多目標時每個 target 在 `<branch>/<id>` 各自通過 review；缺配置或證據漂移時 BLOCKED。網路／5xx 暫時故障標為 `retryable`，以 `delivery sync --retry-review --delivery <DLV> --review <AIR>` 明確重跑新 review（reviewer FAIL 不重試） |
 | `doctor` | 接入環境診斷 |
 | `session start` / `session list` | 設計會話及修改前快照 |
 | `watch [--once]` | 檔案輪詢、idle debounce、checkpoint |

@@ -13,7 +13,7 @@ import { applicationFingerprint, createReview, decideReview } from '../src/workf
 import { snapshot } from '../src/sessions.js';
 import { freezeVersion } from '../src/versions.js';
 import { assertIndependentReview, requestIndependentReview } from '../src/delivery-review.js';
-import { deliveryGit } from '../src/delivery-scope.js';
+import { deliveryGit, transientFailure } from '../src/delivery-scope.js';
 import { fileURLToPath } from 'node:url';
 import { FAKE_GH } from './helpers/fake-gh.js';
 
@@ -80,7 +80,7 @@ async function fakeEnvironment(t, base, root, remote) {
   const transport = path.join(base, 'git-transport.json'), transportLog = path.join(base, 'git-calls.json');
   await writeJson(transport, { realGit, urls: { [fixtureUrl]: remote }, log: transportLog });
   await git(root, 'remote', 'set-url', 'origin', fixtureUrl);
-  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER'].map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE'].map(key => [key, process.env[key]]));
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   process.env.FAKE_GH_DB = db;
   process.env.FAKE_DELIVERY_GIT = transport;
@@ -820,17 +820,127 @@ test('FAKE provider: a newer remote base outside HEAD ancestry cannot be reviewe
 });
 
 test('FAKE provider: explicit failed-review retry creates a fresh attempt without overwriting raw evidence', async t => {
-  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  // The provider exited without a verdict; a reviewer FAIL is never retried (see the next test).
+  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'exit';
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
-  const first = (await deliveryStatus(f.root)).deliveries[0], oldFile = path.join(f.root, `.protoflow/delivery/independent-reviews/${first.independentReviewId}.json`), bytes = await fs.readFile(oldFile), record = JSON.parse(bytes), traceBytes = await fs.readFile(path.join(f.root, record.runFile));
+  const first = (await deliveryStatus(f.root)).deliveries[0], oldFile = path.join(f.root, `.protoflow/delivery/independent-reviews/${first.independentReviewId}.json`), bytes = await fs.readFile(oldFile), record = JSON.parse(bytes), traceBytes = await fs.readFile(path.join(f.root, record.processFile));
+  assert.equal(record.runFile, undefined); assert.equal(record.retryable, undefined);
   process.env.FAKE_REVIEW_MODE = 'pass';
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); assert.equal((await deliveryStatus(f.root)).deliveries[0].independentReviewId, first.independentReviewId);
   assert.equal((await syncDeliveries(f.root, f.config, { retryIndependentReview: { deliveryId: first.id, reviewId: 'AIR-stale-attempt' } })).status, 'BLOCKED'); await assertNoPublication(f);
   const result = await syncDeliveries(f.root, f.config, { retryIndependentReview: { deliveryId: first.id, reviewId: first.independentReviewId } }); assert.equal(result.status, 'PASS', JSON.stringify(result));
   const second = (await deliveryStatus(f.root)).deliveries[0]; assert.equal(second.commit, first.commit); assert.notEqual(second.independentReviewId, first.independentReviewId);
   assert.deepEqual(second.independentReviewAttempts.map(attempt => attempt.status), ['BLOCKED', 'PASS']); assert.equal(second.independentReviewAttempts[1].supersedes, first.independentReviewId);
-  assert.deepEqual(await fs.readFile(oldFile), bytes); assert.deepEqual(await fs.readFile(path.join(f.root, record.runFile)), traceBytes);
+  assert.deepEqual(await fs.readFile(oldFile), bytes); assert.deepEqual(await fs.readFile(path.join(f.root, record.processFile)), traceBytes);
   assert.equal((await syncDeliveries(f.root, f.config, { retryIndependentReview: { deliveryId: second.id, reviewId: second.independentReviewId } })).status, 'BLOCKED');
+});
+
+test('transient classification covers proxy, network and HTTP 5xx failures but not review or permission errors', () => {
+  for (const text of ["fatal: unable to access 'https://github.com/o/r.git/': CONNECT tunnel failed, response 503", 'CONNECT tunnel failed, response 0', 'Post "https://api.github.com/graphql": Service Unavailable', 'HTTP 502: Bad Gateway (https://api.github.com/repos/o/r)', 'error: RPC failed; HTTP 504 curl 22 The requested URL returned error: 504', 'fatal: unable to access: Could not resolve host: github.com', 'read tcp: connection reset by peer'])
+    assert.equal(transientFailure(text), true, text);
+  for (const text of ['Independent review FAIL; bound verificationHash differs', 'HTTP 404: Not Found (https://api.github.com/repos/o/r)', 'HTTP 422: Validation Failed', 'remote: Permission to o/r.git denied', 'Current delivery base SHA is unavailable', '', undefined])
+    assert.equal(transientFailure(text), false, String(text));
+});
+
+/** Run delivery steps in a fresh engine process: a restart loses every live provider attestation. */
+const restartProgram = steps => `
+  import fs from 'node:fs/promises';
+  import { syncDeliveries, deliveryStatus } from ${JSON.stringify(new URL('../src/delivery.js', import.meta.url).href)};
+  const [root, configText, trigger] = process.argv.slice(1), config = JSON.parse(configText), results = [];
+  const current = async () => (await deliveryStatus(root)).deliveries[0];
+  const retry = async () => { const delivery = await current(); results.push(await syncDeliveries(root, config, { retryIndependentReview: { deliveryId: delivery.id, reviewId: delivery.independentReviewId } })); };
+  ${steps}
+  console.log(JSON.stringify({ results, state: await deliveryStatus(root) }));`;
+const reviewRecord = (f, id) => readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${id}.json`));
+
+test('FAKE transport: a published delivery stranded by transient GitHub/proxy failures is revalidated and resumed explicitly', async t => {
+  // Dual acceptance, electron 06cc5de: approval and push succeeded, then GitHub answered 503 to pr create.
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  Object.assign(process.env, { FAKE_GH_FAIL: 'create', FAKE_GH_FAIL_MESSAGE: 'Post "https://api.github.com/graphql": Service Unavailable' });
+  const failed = await syncDeliveries(f.root, f.config);
+  assert.equal(failed.status, 'FAIL'); assert.equal(failed.deliveries[0].retryable, true, JSON.stringify(failed));
+  const first = (await deliveryStatus(f.root)).deliveries[0];
+  assert.ok(first.approval && first.steps.pushedAt && !first.pr);
+  delete process.env.FAKE_GH_FAIL; delete process.env.FAKE_GH_FAIL_MESSAGE;
+  // After a restart: the revalidation's provider runs, then the canonical repository lookup answers 503 once.
+  // The next retry meets a proxy failure of ls-remote before the provider runs.
+  const trigger = path.join(f.base, 'outage-trigger');
+  const restarted = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram(`
+    results.push(await syncDeliveries(root, config));
+    process.env.FAKE_REVIEW_TRIGGER = trigger; process.env.FAKE_GH_UNAVAILABLE_AFTER = trigger; await retry();
+    delete process.env.FAKE_REVIEW_TRIGGER; delete process.env.FAKE_GH_UNAVAILABLE_AFTER;
+    await fs.writeFile(trigger, 'armed'); process.env.FAKE_DELIVERY_GIT_UNAVAILABLE = trigger; await retry();`), f.root, JSON.stringify(f.config), trigger])).stdout);
+  const [unattested, postProvider, preProvider] = restarted.results;
+  assert.equal(unattested.status, 'BLOCKED'); assert.match(unattested.deliveries[0].error, /live engine attestation/);
+  assert.equal(postProvider.status, 'BLOCKED'); assert.equal(postProvider.deliveries[0].retryable, true, JSON.stringify(postProvider));
+  assert.equal(preProvider.status, 'BLOCKED', JSON.stringify(restarted)); assert.equal(preProvider.deliveries[0].retryable, true);
+  const stranded = restarted.state.deliveries[0], [, afterProvider, beforeProvider] = stranded.independentReviewAttempts;
+  const ranRecord = await reviewRecord(f, afterProvider.id), proxyRecord = await reviewRecord(f, beforeProvider.id);
+  assert.match(ranRecord.reason, /Canonical GitHub repository lookup failed: .*Service Unavailable/); assert.ok(ranRecord.sessionId, 'the provider ran before the outage');
+  assert.match(proxyRecord.reason, /CONNECT tunnel failed, response 503/); assert.equal(proxyRecord.processFile, undefined);
+  for (const record of [ranRecord, proxyRecord]) { assert.equal(record.status, 'BLOCKED'); assert.equal(record.retryable, true); assert.equal(record.reasonCode, 'TRANSIENT_INFRASTRUCTURE'); }
+  assert.deepEqual(stranded.approval, first.approval); assert.equal(stranded.independentReviewId, beforeProvider.id);
+  const recordBytes = await Promise.all([afterProvider.id, beforeProvider.id].map(id => fs.readFile(path.join(f.root, `.protoflow/delivery/independent-reviews/${id}.json`))));
+  // The documented CLI retry, again in a new process: fresh provider PASS, full re-assert, new approval, then publication.
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  const cli = fileURLToPath(new URL('../bin/protoflow.js', import.meta.url));
+  const resumed = JSON.parse((await exec(process.execPath, [cli, 'delivery', 'sync', '--retry-review', '--delivery', stranded.id, '--review', stranded.independentReviewId, '--project', f.root])).stdout);
+  assert.equal(resumed.status, 'PASS', JSON.stringify(resumed));
+  const done = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(done.status, 'MERGED'); assert.equal(done.commit, first.commit); assert.equal(done.retryable, undefined);
+  assert.deepEqual(done.independentReviewAttempts.map(attempt => attempt.status), ['PASS', 'BLOCKED', 'BLOCKED', 'PASS']);
+  assert.equal(done.independentReviewAttempts[3].supersedes, beforeProvider.id);
+  assert.equal(done.approval.independentReviewId, done.independentReviewId); assert.notEqual(done.independentReviewId, first.independentReviewId);
+  assert.deepEqual(done.approvalHistory, [first.approval]);
+  const prs = (await f.gh()).prs; assert.equal(prs.length, 1); assert.equal(prs[0].state, 'MERGED'); assert.equal(prs[0].comments.length, 1);
+  assert.deepEqual(await Promise.all([afterProvider.id, beforeProvider.id].map(id => fs.readFile(path.join(f.root, `.protoflow/delivery/independent-reviews/${id}.json`)))), recordBytes);
+});
+
+test('FAKE provider: a reviewer FAIL verdict is never retried, before or after approval, even if its record is edited to look transient', async t => {
+  const unpublished = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(unpublished.root, unpublished.config)).status, 'BLOCKED');
+  const blocked = (await deliveryStatus(unpublished.root)).deliveries[0];
+  process.env.FAKE_REVIEW_MODE = 'pass';
+  const refused = await syncDeliveries(unpublished.root, unpublished.config, { retryIndependentReview: { deliveryId: blocked.id, reviewId: blocked.independentReviewId } });
+  assert.equal(refused.status, 'BLOCKED'); assert.match(refused.reason, /returned FAIL with 1 finding\(s\); a reviewer verdict is never retried/);
+  assert.equal((await deliveryStatus(unpublished.root)).deliveries[0].independentReviewAttempts.length, 1); await assertNoPublication(unpublished);
+
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'create';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const first = (await deliveryStatus(f.root)).deliveries[0];
+  // A restarted engine revalidates; the fresh reviewer now returns FAIL.
+  const failed = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram(`process.env.FAKE_REVIEW_MODE = 'fail'; await retry();`), f.root, JSON.stringify(f.config), ''])).stdout);
+  assert.equal(failed.results[0].status, 'BLOCKED'); assert.equal(failed.results[0].deliveries[0].retryable, false);
+  const failedId = failed.state.deliveries[0].independentReviewId, file = path.join(f.root, `.protoflow/delivery/independent-reviews/${failedId}.json`), record = await readJson(file);
+  assert.equal(record.retryable, undefined); assert.match(record.reason, /Independent review FAIL/);
+  for (const edit of [false, true]) {
+    if (edit) await writeJson(file, { ...record, retryable: true, reasonCode: 'TRANSIENT_INFRASTRUCTURE' });
+    const again = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram(`await retry();`), f.root, JSON.stringify(f.config), ''])).stdout);
+    assert.equal(again.results[0].status, 'BLOCKED'); assert.match(again.results[0].reason, /a reviewer verdict is never retried/);
+    assert.equal(again.state.deliveries[0].independentReviewId, failedId); assert.equal(again.state.deliveries[0].independentReviewAttempts.length, 2);
+  }
+  assert.deepEqual((await deliveryStatus(f.root)).deliveries[0].approval, first.approval); assert.deepEqual((await f.gh()).prs, []);
+});
+
+test('FAKE provider: the bound VER hash is recomputable from the reviewer checkout, also for a legacy main-root copy with runnerWorktree', async t => {
+  // Dual acceptance VER-1791730921977-18acc548: ProtoFlow 0.2.0 exported the main-root VER with runnerWorktree.
+  const f = await committedFixture(t), file = path.join(f.root, '.protoflow/verifications/VER-1.json');
+  await writeJson(file, { ...await readJson(file), runnerWorktree: f.worktree });
+  const review = await requestIndependentReview(f.root, f.config, f.reviewOptions);
+  assert.equal(review.status, 'PASS', review.reason);
+  const [version] = (await assertIndependentReview(f.root, f.config, review.id)).binding.versions;
+  assert.equal(version.verificationHash, hash(await readJson(file)));
+  assert.equal(version.verificationFile, '.protoflow/verifications/VER-1.json');
+  assert.equal(version.verificationFileHash, hash(await readJson(path.join(f.worktree, version.verificationFile))));
+  assert.notEqual(version.verificationHash, version.verificationFileHash);
+  const { input } = await readJson(path.join(f.worktree, '.protoflow/fixture-review/received.json'));
+  assert.match(input, /verificationHash = hash\(parsed main-root \.protoflow\/verifications\/<verificationId>\.json\)/);
+  assert.match(input, /verificationFileHash = hash\(parsed verificationFile\)/);
+  // A worktree copy that differs in evidence, not only in runnerWorktree, never reaches the provider.
+  const local = path.join(f.worktree, version.verificationFile);
+  await writeJson(local, { ...await readJson(local), createdAt: 'changed worktree copy' });
+  const drifted = await requestIndependentReview(f.root, f.config, f.reviewOptions);
+  assert.equal(drifted.status, 'BLOCKED'); assert.match(drifted.reason, /VER evidence binding changed/); assert.equal(drifted.retryable, undefined);
 });
 
 for (const mode of ['success', 'tampered review', 'substituted primary']) test(`FAKE provider: managed post-merge alignment ${mode}`, async t => {

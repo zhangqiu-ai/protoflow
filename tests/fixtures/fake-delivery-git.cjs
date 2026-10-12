@@ -9,6 +9,9 @@ calls.push({ args: [...args], gitEnvironment: Object.keys(process.env).filter(ke
 fs.writeFileSync(fixture.log, JSON.stringify(calls));
 let command = 0;
 while (args[command] === '-c' || args[command] === '--no-replace-objects') command += args[command] === '-c' ? 2 : 1;
+// One proxy outage of the next ls-remote, armed by a trigger file; mirrors git's real error text.
+const outage = process.env.FAKE_DELIVERY_GIT_UNAVAILABLE;
+if (outage && args[command] === 'ls-remote' && fs.existsSync(outage)) { fs.unlinkSync(outage); console.error("fatal: unable to access 'https://github.com/protoflow-fixture/application.git/': CONNECT tunnel failed, response 503"); process.exit(128); }
 if (['ls-remote', 'fetch', 'push'].includes(args[command])) {
   let position = command + 1;
   while (args[position]?.startsWith('-')) position++;

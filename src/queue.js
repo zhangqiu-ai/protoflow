@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readJson, projectPath, hash } from './util.js';
+import { loadProgress, deliveryStatePath, isMultiTarget } from './streams.js';
 
 async function records(root, kind) {
   const directory = await projectPath(root, `.protoflow/${kind}`);
@@ -60,6 +61,14 @@ async function queueRecords(root, config) {
   return { manifests, verifications, defaultTarget, revoked: revocations(manifests, verifications, await records(root, 'reviews'), defaultTarget) };
 }
 
+/** Manifest IDs a target's delivery has finished: merged, or handed to a person as an open PR (merge manual/none). */
+async function deliveredVersions(root, config, target) {
+  const stream = isMultiTarget(config) ? target : null;
+  const state = await readJson(await projectPath(root, deliveryStatePath(config, stream)), { deliveries: [] });
+  const finished = new Set(state.deliveries.filter(delivery => ['MERGED', 'PR_OPEN_MANUAL'].includes(delivery.status)).map(delivery => delivery.id));
+  return new Set((await loadProgress(root, config, stream)).entries.filter(entry => entry.status === 'PASS' && finished.has(entry.deliveryId)).map(entry => entry.manifestId));
+}
+
 const stepsFor = (current, target) => {
   if (!current) return [];
   const flag = target ? ` --target ${target}` : '';
@@ -107,9 +116,12 @@ export async function versionQueue(root, config, { target } = {}) {
   }
   const required = config.release?.requireTargets;
   if (required?.length) {
+    // With runner.delivery a target's version counts only once its delivery finished, not at verification PASS.
+    const delivered = config.runner?.delivery ? Object.fromEntries(await Promise.all(required.map(async id => [id, await deliveredVersions(root, config, id)]))) : null;
+    const done = (item, id) => item.targets[id] && (!delivered || delivered[id].has(item.id));
     // FIFO per target means accepted versions form a prefix; the releasable version is the shortest prefix end.
-    const releasable = [...versions].reverse().find(version => required.every(id => versions.slice(0, versions.indexOf(version) + 1).every(item => item.targets[id])));
-    result.release = { requireTargets: required, version: releasable?.id ?? null, summary: releasable?.summary ?? null };
+    const releasable = [...versions].reverse().find(version => required.every(id => versions.slice(0, versions.indexOf(version) + 1).every(item => done(item, id))));
+    result.release = { requireTargets: required, basis: delivered ? 'delivery' : 'verification', version: releasable?.id ?? null, summary: releasable?.summary ?? null };
   }
   return result;
 }

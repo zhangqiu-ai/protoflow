@@ -11,6 +11,7 @@ import { hash, writeJson } from '../src/util.js';
 
 const target = (id, root) => ({ id, platform: 'web', root, driver: { kind: 'playwright-web', urlTemplate: `${root}/{page}.html` } });
 const multi = { schemaVersion: 2, prototypeDir: 'prototype', targets: [target('web', 'web'), target('ios', 'ios')], release: { requireTargets: ['web', 'ios'] }, runner: { delivery: { branch: 'protoflow/delivery', baseBranch: 'main' } } };
+const verificationOnly = { ...multi, runner: {} };
 const single = { schemaVersion: 2, prototypeDir: 'prototype', targets: [target('web', 'web')], runner: { delivery: { branch: 'protoflow/delivery', baseBranch: 'main' } } };
 
 async function project(t, manifests) {
@@ -28,12 +29,12 @@ test('each target has its own cursor; release follows the slowest required targe
   const root = await project(t, ['v1', 'v2', 'v3']);
   await accept(root, 'v1', 'web'); await accept(root, 'v2', 'web');
   await accept(root, 'v1', 'ios');
-  const queue = await versionQueue(root, multi);
+  const queue = await versionQueue(root, verificationOnly);
   assert.deepEqual(queue.versions.map(version => version.acceptance), ['accepted', 'partial', 'pending']);
   assert.deepEqual(queue.targets.web, { status: 'PENDING', current: 'v3', waiting: [], lastAccepted: 'v2' });
   assert.deepEqual(queue.targets.ios, { status: 'PENDING', current: 'v2', waiting: ['v3'], lastAccepted: 'v1' });
   assert.equal(queue.current.id, 'v2', 'top level: first version not yet accepted by every target');
-  assert.deepEqual(queue.release, { requireTargets: ['web', 'ios'], version: 'v1', summary: 'v1' });
+  assert.deepEqual(queue.release, { requireTargets: ['web', 'ios'], basis: 'verification', version: 'v1', summary: 'v1' });
   assert.equal((await versionQueue(root, multi, { target: 'web' })).current.id, 'v3');
   // Order is enforced per target.
   await assertCurrentVersion(root, multi, 'v2', { target: 'ios' });
@@ -77,4 +78,29 @@ test('a target’s application hash ignores the other targets’ roots but not s
   assert.notEqual((await applicationFingerprint(root, multi, 'ios')).hash, before.ios);
   await fs.writeFile(path.join(root, 'shared.json'), 'changed');
   assert.notEqual((await applicationFingerprint(root, multi, 'web')).hash, before.web);
+});
+
+test('with runner.delivery, release waits until every required target finished delivering the version', async t => {
+  // Dual acceptance: release.version reported 06cc5de although the electron delivery of it never opened a PR.
+  const root = await project(t, ['v1', 'v2']);
+  for (const id of ['v1', 'v2']) for (const targetId of ['web', 'ios']) await accept(root, id, targetId);
+  const shas = { v1: 'a'.repeat(40), v2: 'b'.repeat(40) };
+  await saveSourceState(root, { schemaVersion: 1, status: 'READY', entries: ['v1', 'v2'].map((id, index) => ({ sha: shas[id], manifestId: id, prototypeHash: `after-${id}`, ordinal: index + 1, status: 'PENDING', attempts: [] })) });
+  const deliver = async (targetId, statuses) => {
+    const progress = await loadProgress(root, multi, targetId);
+    for (const entry of progress.entries) Object.assign(entry, { status: 'PASS', verificationId: `VER-${entry.manifestId}-${targetId}`, deliveryId: statuses[entry.manifestId] ? `DLV-${targetId}-${entry.manifestId}` : null });
+    await saveProgress(root, multi, targetId, progress);
+    await writeJson(path.join(root, `.protoflow/delivery/${targetId}.json`), { schemaVersion: 1, deliveries: Object.entries(statuses).map(([id, status]) => ({ id: `DLV-${targetId}-${id}`, versions: [id], status })) });
+  };
+  await deliver('web', { v1: 'MERGED', v2: 'MERGED' });
+  await deliver('ios', { v1: 'BLOCKED' });
+  assert.deepEqual((await versionQueue(root, verificationOnly)).release, { requireTargets: ['web', 'ios'], basis: 'verification', version: 'v2', summary: 'v2' });
+  assert.deepEqual((await versionQueue(root, multi)).release, { requireTargets: ['web', 'ios'], basis: 'delivery', version: null, summary: null });
+  await deliver('ios', { v1: 'MERGED', v2: 'FAIL' });
+  assert.equal((await versionQueue(root, multi)).release.version, 'v1');
+  // A PR handed to a person (merge manual) finishes the engine's delivery.
+  await deliver('ios', { v1: 'MERGED', v2: 'PR_OPEN_MANUAL' });
+  assert.equal((await versionQueue(root, multi)).release.version, 'v2');
+  // Verification acceptance itself is unchanged: both versions stay accepted by both targets.
+  assert.deepEqual((await versionQueue(root, multi)).versions.map(version => version.acceptance), ['accepted', 'accepted']);
 });
