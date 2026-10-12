@@ -62,6 +62,18 @@
 
 這是合併到既有配置的片段，不是完整 config。橋接執行 `codex exec --json --sandbox workspace-write -`，從 stdin 傳入 prompt。可於 adapter argv 指定 `--model MODEL` 與 `--ephemeral`；仍固定 workspace-write，不接受繞過 sandbox 的參數。程序結果、stdout JSONL 與 stderr 保存至 execution evidence；exit zero 不代替產品驗證。官方：[Codex 非互動模式](https://developers.openai.com/codex/noninteractive)。
 
+### 執行者隔離（`ignoreUserConfig`）
+
+預設情況下執行者會載入開發者的 `$CODEX_HOME/config.toml`（通常是 `~/.codex/config.toml`）。若其中啟用 memories，執行 session 可能讀取個人記憶並把內容寫入 EXEC JSONL；交付時獨立 reviewer 會讀這份 trace，等於把與本專案無關的個人資料交給另一個 session 並留在專案證據中。啟用隔離：
+
+```json
+{"adapters":{"codex":{"command":{"argv":["node","/absolute/shared/protoflow/scripts/codex-adapter.js"],"timeoutMs":600000},"ignoreUserConfig":true}}}
+```
+
+引擎在 stdin JSON 加上 `executor: {"ignoreUserConfig": true}`；內建橋接收到後改為執行 `codex exec --json --sandbox workspace-write --ignore-user-config -c features.memories=false -c approval_policy="never" -`，`executor` 不放入給模型的 Context Package。手動配置 argv 時也可直接在 adapter argv 加 `--ignore-user-config`。自訂 executor adapter 須自行實作此欄位，引擎無法替它保證隔離。獨立 review adapter 一律以 `--ignore-user-config` 執行，不需要也不接受此欄位。
+
+取捨：`--ignore-user-config` 只略過 `config.toml`，登入仍使用 `CODEX_HOME` 的 `auth.json`；但 config 裡的 `model`、推理強度、自訂 `model_providers`／profile、MCP servers、`sandbox_workspace_write`（例如網路存取）與 approval 設定都不再生效。依賴這些設定的專案需改以 adapter argv 的 `--model` 指定模型，或讓 `runner.setup` 先完成需要網路的安裝；只能經自訂 provider 登入的環境無法使用隔離。`$CODEX_HOME/AGENTS.md` 等全域指示與 skills 不屬於 `config.toml`，不在此開關的保證範圍內。欄位預設為 `false`，既有配置行為不變；在已有 Runner worktree 的專案變更需走 `runner configure`。
+
 ## 視覺／功能驗證
 
 `verification.build`、`functional` 是 argv 命令。functional 必須接目標專案持久保存的 Playwright regression assets；目標應用的登入 fixture、routes、server 啟動和 API mock 由專案測試負責。引擎測試使用真實 Playwright runner，沒有以手動 browser clicks 取代 E2E。

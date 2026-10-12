@@ -97,6 +97,19 @@ test('executor fails if it alters the frozen version; live prototype edits are r
   assert.equal(concurrent.livePrototypeChanged, true);
   assert.equal((await verify(second.root, second.config, second.manifest.id)).prototypeVersion.manifestId, second.manifest.id);
 });
+test('adapters.codex.ignoreUserConfig reaches the executor as stdin JSON; existing configs send no executor options', async t => {
+  const { root, config, manifest } = await target(t);
+  config.adapters.codex.command = { argv: [process.execPath, '-e', 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.stringify(JSON.parse(s).executor ?? null)))'] };
+  const unordered = { ...config, policy: { ...config.policy, sequentialVersions: false } };
+  const plain = await executeContext(root, unordered, (await createContext(root, unordered, manifest.id)).id, { execute: true });
+  assert.equal(plain.status, 'PASS');
+  assert.equal(plain.request.executor, undefined);
+  assert.equal(plain.result.stdout.trim(), 'null');
+  const isolated = { ...unordered, adapters: { ...unordered.adapters, codex: { ...unordered.adapters.codex, ignoreUserConfig: true } } };
+  const result = await executeContext(root, isolated, (await createContext(root, isolated, manifest.id)).id, { execute: true });
+  assert.deepEqual(result.request.executor, { ignoreUserConfig: true });
+  assert.deepEqual(JSON.parse(result.result.stdout), { ignoreUserConfig: true });
+});
 test('repair does not retry NOT_RUN checks and escalates to pending human review', async t => {
   const { root, config, manifest } = await target(t);
   const result = await repair(root, config, manifest.id, { execute: true });

@@ -21,7 +21,7 @@ export const configSchema = {
     policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
     verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: functionalCommand } },
-    adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: ['codex', 'independentReview'].includes(key) ? { command } : { command, install: command } }])) },
+    adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command, ignoreUserConfig: { type: 'boolean' } } : key === 'independentReview' ? { command } : { command, install: command } }])) },
     visual: { type: 'object', additionalProperties: false, properties: {
       mode: { enum: ['browser', 'native', 'adapter'] },
       prototypeBaseUrl: { type: 'string', pattern: '^https?://' },

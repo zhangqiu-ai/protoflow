@@ -10,7 +10,7 @@ export { freezeVersion, loadVersion } from './versions.js';
 
 export { scanSource, sourceStatus, gitSnapshot } from './source.js';
 export { startRunner, runOnce, retryRunner, configureRunner, runnerStatus, doctor } from './runner.js';
-export { streamTargets, isMultiTarget, loadProgress } from './streams.js';
+export { streamTargets, isMultiTarget, loadProgress, progressSummary, sourceView } from './streams.js';
 export { requestIndependentReview, assertIndependentReview } from './delivery-review.js';
 export { acceptanceClient, runAcceptanceCommand } from './acceptance-client.js';
 export { runAcceptanceAdapter } from './acceptance.js';

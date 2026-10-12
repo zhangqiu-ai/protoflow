@@ -7,18 +7,24 @@ import { createContext, executeContext, verify, loadArtifact, applicationFingerp
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
-import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix } from './streams.js';
+import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries } from './delivery.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 
-/** Source progress and runner state; with several targets, one { progress, runner } per target. */
+/**
+ * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
+ * entries' status combined from those targets (see sourceView).
+ */
 export async function runnerStatus(root, config = null) {
-  const source = await sourceStatus(root);
-  if (!config || !isMultiTarget(config)) return { source, runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
+  if (!config || !isMultiTarget(config)) return { source: await sourceStatus(root), runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
   const targets = {};
-  for (const stream of streamTargets(config)) targets[stream] = { progress: await loadProgress(root, config, stream), runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
+  for (const stream of streamTargets(config)) {
+    const progress = await loadProgress(root, config, stream);
+    targets[stream] = { summary: progressSummary(progress), progress, runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
+  }
+  const source = await sourceView(root, config, Object.fromEntries(Object.entries(targets).map(([stream, item]) => [stream, item.progress])));
   return { source, targets };
 }
 async function saveRunner(root, runner, statePath) { await writeJson(await projectPath(root, statePath), runner); }

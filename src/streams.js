@@ -44,3 +44,36 @@ export async function saveProgress(root, config, target, state) {
   const { schemaVersion = 1, entries, completedSha = null } = state;
   await writeJson(await projectPath(root, progressPath(target)), { schemaVersion, target, entries, completedSha });
 }
+
+const UNFINISHED = ['BLOCKED', 'STOPPED', 'RUNNING'];
+/** One target's position in its stream: the first non-PASS entry is current; no current entry means IDLE. */
+export function progressSummary(progress) {
+  const current = progress.entries.find(entry => entry.status !== 'PASS') ?? null;
+  const counts = {};
+  for (const entry of progress.entries) counts[entry.status] = (counts[entry.status] ?? 0) + 1;
+  return { status: current?.status ?? 'IDLE', completedSha: progress.completedSha ?? null, current: current && { manifestId: current.manifestId, sha: current.sha }, counts };
+}
+/** PASS on every target; else the most urgent unfinished status; PARTIAL when only some targets passed. */
+function combinedStatus(statuses) {
+  if (statuses.every(status => status === 'PASS')) return 'PASS';
+  return UNFINISHED.find(status => statuses.includes(status)) ?? (statuses.includes('PASS') ? 'PARTIAL' : 'PENDING');
+}
+/**
+ * Source state for display. With several targets the shared entries are only scan records (their stored status stays
+ * PENDING), so each entry's status is combined from the targets' progress, the stored value is kept as recordedStatus,
+ * completedSha is the last version every target passed and statusBasis is "targets". Single-target projects (and
+ * schemaVersion 1) get the source state unchanged.
+ */
+export async function sourceView(root, config, progress = null) {
+  const source = await sourceStatus(root);
+  if (!config || !isMultiTarget(config)) return source;
+  progress ??= Object.fromEntries(await Promise.all(streamTargets(config).map(async stream => [stream, await loadProgress(root, config, stream)])));
+  const entries = source.entries.map(entry => {
+    const targets = Object.fromEntries(Object.entries(progress).map(([stream, state]) => [stream, state.entries.find(item => item.sha === entry.sha)?.status ?? 'PENDING']));
+    return { ...entry, status: combinedStatus(Object.values(targets)), recordedStatus: entry.status, targets };
+  });
+  // completedSha: the last version every target has passed, in checkpoint order.
+  const open = entries.findIndex(entry => entry.status !== 'PASS');
+  const completed = open === -1 ? entries.at(-1) : entries[open - 1];
+  return { ...source, statusBasis: 'targets', completedSha: completed?.sha ?? null, entries };
+}
