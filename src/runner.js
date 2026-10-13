@@ -12,6 +12,7 @@ import { assertDelivered, syncDeliveries } from './delivery.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
+import { collectRunnerWorktrees } from './runner-gc.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -424,5 +425,11 @@ export async function doctor(root, config) {
     return `${Object.keys(contract.screens).length} screen(s), ${contract.warnings.length} warning(s)`;
   });
   await check('skill', async () => { await fs.access(await projectPath(root, '.agents/skills/protoflow/SKILL.md')); return 'installed'; });
+  // Informational: unused runner worktrees only cost disk; `runner gc --apply` reclaims the clean ones.
+  await check('runner worktrees', async () => {
+    const { counts, removableBytes } = await collectRunnerWorktrees(root, config);
+    const stale = counts.stale ?? 0, unsafe = counts.unsafe ?? 0;
+    return `${counts.active ?? 0} active, ${stale} unused${stale ? ` (${Math.round(removableBytes / 1048576)} MB, runner gc --apply)` : ''}${unsafe ? `, ${unsafe} unused but kept (see runner gc)` : ''}`;
+  });
   return { status: checks.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', checks, engine: fileURLToPath(new URL('../', import.meta.url)), progress: await runnerStatus(root, config) };
 }

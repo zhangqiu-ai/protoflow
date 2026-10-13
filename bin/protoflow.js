@@ -14,6 +14,7 @@ import { lintAnchors, suggestAnchorsCommand, showContract, migrateCommand } from
 import { scanSource } from '../src/source.js';
 import { sourceView } from '../src/streams.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from '../src/runner.js';
+import { collectRunnerWorktrees } from '../src/runner-gc.js';
 import { versionQueue } from '../src/queue.js';
 import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
@@ -35,6 +36,7 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          Draft v1 mappings -> anchors (patches + v2 config; nothing applied)
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
+  runner gc [--apply]                    List runner worktrees; --apply archives and removes unused clean ones
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
   delivery sync --retry-review --delivery id --review AIR-id [--target id]
                                          Explicit fresh independent review of the selected current attempt:
@@ -65,7 +67,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, apply: { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
     ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -88,6 +90,7 @@ try {
           if (action === 'status') return runnerStatus(root, config);
           if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null });
           if (action === 'configure') return configureRunner(root, config);
+          if (action === 'gc') return collectRunnerWorktrees(root, config, { apply: values.apply });
           if (action === 'start') {
             const controller = new AbortController();
             const stop = () => controller.abort();
@@ -95,7 +98,7 @@ try {
             try { return await startRunner(root, config, { once: values.once, signal: controller.signal, onEvent: event => console.log(JSON.stringify(event)) }); }
             finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
           }
-          throw new Error('Use runner start|status|retry|configure');
+          throw new Error('Use runner start|status|retry|configure|gc');
         case 'delivery':
           if (action === 'sync') {
             if (!values['retry-review']) {
@@ -161,7 +164,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint';
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply;
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));
