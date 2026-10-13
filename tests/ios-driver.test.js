@@ -58,6 +58,9 @@ test('native controls: no text of their own, labels deduplicated inside containe
   assert.equal(elementText({ type: 'textField', value: 'Draft', placeholder: 'New task' }), 'Draft');
   assert.equal(elementText({ type: 'textField', value: 'New task', placeholder: 'New task' }), 'New task');
   assert.equal(elementText({ type: 'textField', placeholder: 'New task' }), 'New task');
+  // Flutter on iOS: the hint is the field's label, the empty value stays empty.
+  assert.equal(elementText({ type: 'textField', label: 'New task', value: '' }), 'New task');
+  assert.equal(elementText({ type: 'textField', label: 'New task', value: 'Draft' }), 'Draft');
   assert.equal(subtreeText({ type: 'other', children: [{ type: 'textField', value: 'secret', frame: { x: 0, y: 0, width: 10, height: 10 } }] }), '');
   // Rows by vertical centre (mixed heights share a row), then left to right.
   const order = readingOrder([

@@ -1,19 +1,36 @@
-# 原生 target：iOS 與 React Native
+# 原生 target：iOS、Android、React Native 與 Flutter
 
-ProtoFlow 以外部驅動器協定（`schemas/driver-request.schema.json` → `schemas/driver-response.schema.json`）接入原生平台。引擎內建 iOS 參考驅動器 `scripts/ios-driver.js`：在 iOS 模擬器上以 XCUITest 依 bundle identifier 驅動任何應用，因此同時支援 SwiftUI、UIKit 與 React Native（iOS）。可執行範例見 [examples/mobile](../examples/mobile/)。
+ProtoFlow 以外部驅動器協定（`schemas/driver-request.schema.json` → `schemas/driver-response.schema.json`）接入原生平台，並內建兩個參考驅動器：
+
+| 驅動器 | 平台 | 方式 | 適用框架 |
+|---|---|---|---|
+| `scripts/ios-driver.js` | iOS 模擬器 | XCUITest，依 bundle identifier 驅動 | SwiftUI、UIKit、React Native、Flutter |
+| `scripts/android-driver.js` | Android 模擬器（AVD） | UiAutomator instrumentation，依 package 驅動 | Compose、View、React Native、Flutter |
+
+兩者輸出相同的原始格式（無障礙樹＋整個螢幕截圖），由引擎的 `src/drivers/native-tree.js` 以同一套規則解讀（iOS 直接使用 XCUITest 類型，Android 先經 `src/drivers/android-tree.js` 正規化）。同一份程式碼跑在多個平台（React Native、Flutter）時以 [target 變體](#target-變體一份程式碼多個平台) 表達。可執行範例見 [examples/mobile](../examples/mobile/)。
 
 ## 需求
 
-- macOS、Xcode（含 iOS Simulator runtime）。驅動器不需要 Java、Maestro 或 idb。
-- 一台專用模擬器，例如：
+**iOS**：macOS、Xcode（含 iOS Simulator runtime），不需要 Java、Maestro 或 idb。一台專用模擬器：
 
-  ```sh
-  xcrun simctl create "ProtoFlow iPhone 17" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0
-  ```
+```sh
+xcrun simctl create "ProtoFlow iPhone 17" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0
+```
 
-- 目標應用能建置成模擬器用的 `.app`（target 的 `build` 命令負責）。
+**Android**：JDK 17（`JAVA_HOME`）、Android SDK（`ANDROID_HOME`，含 platform-tools、emulator、platforms、build-tools 與系統映像）、一個專用 AVD。建議整數密度與硬體鍵盤，讓截圖尺寸精確、`fill` 不叫出軟體鍵盤：
 
-沒有 Xcode、找不到模擬器、模擬器無法開機、安裝逾時或驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、無法到達畫面或步驟失敗則是 `FAIL`。
+```sh
+avdmanager create avd -n ProtoFlow_Pixel -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_7
+# ~/.android/avd/ProtoFlow_Pixel.avd/config.ini
+hw.lcd.density=480
+hw.keyboard=yes
+```
+
+AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-window`），模擬器在擷取後繼續執行，與 iOS 模擬器相同視為裝置服務。
+
+**Flutter**：Flutter SDK 在 `PATH` 上（3.19 以上，`Semantics(identifier:)`）。
+
+沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。
 
 ## 配置
 
@@ -33,41 +50,89 @@ ProtoFlow 以外部驅動器協定（`schemas/driver-request.schema.json` → `s
   },
   "build": { "argv": ["xcodebuild", "build", "-project", "ios/App.xcodeproj", "-scheme", "App", "-configuration", "Debug",
     "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "ios/build/DerivedData", "CODE_SIGNING_ALLOWED=NO", "-quiet"] },
+  "functional": { "argv": ["xcodebuild", "test", "-project", "ios/App.xcodeproj", "-scheme", "App",
+    "-destination", "platform=iOS Simulator,name=ProtoFlow iPhone 17", "-derivedDataPath", "ios/build/DerivedData", "CODE_SIGNING_ALLOWED=NO", "-quiet"] },
   "viewport": { "width": 402, "height": 778, "scale": 3 }
 }
 ```
 
-| 參數 | 說明 |
+```json
+{
+  "id": "android",
+  "platform": "android",
+  "root": "android",
+  "driver": {
+    "kind": "external",
+    "command": {
+      "argv": ["node", "/absolute/protoflow/scripts/android-driver.js",
+        "--package", "com.example.app", "--avd", "ProtoFlow_Pixel",
+        "--apk", "android/app/build/outputs/apk/debug/app-debug.apk"],
+      "timeoutMs": 900000
+    }
+  },
+  "build": { "argv": ["android/gradlew", "-p", "android", "--no-daemon", "-q", "assembleDebug"] },
+  "functional": { "argv": ["android/gradlew", "-p", "android", "--no-daemon", "-q", "testDebugUnitTest"] },
+  "viewport": { "width": 360, "height": 730, "scale": 3 }
+}
+```
+
+| iOS 參數 | 說明 |
 |---|---|
 | `--bundle-id` | 目標應用的 bundle identifier（必填） |
 | `--device` | 模擬器名稱或 UDID（必填）；只使用指定的裝置，不會自動建立或選用其他裝置 |
 | `--app` | 每次擷取前安裝的 `.app`，相對專案根目錄；省略時使用模擬器上已安裝的版本 |
-| `--frame` | `safe-area`（預設）只比較安全區域內的內容；`device` 比較整個螢幕，含狀態列 |
+
+| Android 參數 | 說明 |
+|---|---|
+| `--package` | 目標應用的 package（必填） |
+| `--avd` | AVD 名稱（必填）；未開機時由驅動器開機 |
+| `--apk` | 每次擷取前安裝的 APK，相對專案根目錄 |
+| `--activity` | 啟動的 Activity 類別；省略時用 launcher activity |
+
+| 共用參數 | 說明 |
+|---|---|
+| `--frame` | `safe-area`（預設）只比較內容區域；`device` 比較整個螢幕，含系統列 |
 | `--timeout-ms` | 單一步驟的等待時間，預設 10000 |
 | `--launch-timeout-ms` | 應用啟動到畫面錨點出現的等待時間，預設 60000（React Native 冷啟動需載入 JS bundle） |
-| `--cache` | runner 與安全區域快取，預設 `.protoflow/cache/ios-driver` |
+| `--cache` | runner 與內容區域快取，預設 `.protoflow/cache/<ios\|android>-driver` |
 
-驗證 PASS 需要 build、functional 與視覺三者都 PASS。`functional` 是應用自己的測試，不能由驅動器代替：SwiftUI／UIKit 用專案內的 XCUITest（`xcodebuild test -destination 'platform=iOS Simulator,name=…'`），React Native 用 Jest（`npm --prefix <root> test -- --ci`）。未配置時整體為 `NOT_RUN`。
+驗證 PASS 需要 build、functional 與視覺三者都 PASS。`functional` 是應用自己的測試，不能由驅動器代替：SwiftUI／UIKit 用 XCUITest，Compose 用 Robolectric 上的 Compose UI test（JVM，不需模擬器），React Native 用 Jest，Flutter 用 `flutter test`。未配置時整體為 `NOT_RUN`。
 
-`platform` 為 `ios` 或 `react-native` 時採原生預設：T4 視覺為 advisory（感知相似度），回歸範圍 `affected+smoke`；T1–T3 required。
+Gradle 需要 `JAVA_HOME`：ProtoFlow 以不經 shell 的 argv 執行命令，請在啟動 ProtoFlow 的環境中匯出 `JAVA_HOME` 與 `ANDROID_HOME`。
 
-### viewport 與安全區域
+ProtoFlow 監督每個命令的程序群組：命令結束後同一群組仍有程序存活時，會終止整個群組並把該步驟記為 FAIL。Gradle 與 Kotlin 的編譯 daemon 正是這類程序，因此 Android 專案（含 React Native、Flutter 的 `android/`）的 `gradle.properties` 需要：
 
-驅動器先用自帶的 host 應用量出裝置的安全區域（每台裝置量一次並快取），截圖裁到安全區域，畫面錨點的邊界就是這個區域。target 的 `viewport` 必須等於該裝置的安全區域尺寸，原型也在同一尺寸下渲染；尺寸不符時驗證會明確 FAIL，並列出實際尺寸。iPhone 17（iOS 27）為 `402×778@3`。
+```properties
+org.gradle.daemon=false
+kotlin.compiler.execution.strategy=in-process
+```
 
-因此原型設計的是**內容區域**：不需要畫狀態列或 home indicator；頁面根元素（建議 `<body data-pf="…" data-pf-role="screen">`）填滿 viewport。
+直接呼叫 `gradlew` 時再加 `--no-daemon`。`flutter build apk` 會透過 Gradle 建置，同樣依 `gradle.properties` 生效。
+
+Flutter 的 Android 建置在 Apple Silicon 上會以 Rosetta 執行 x86_64 的 `font-subset`（圖示字型子集化），曾在 Gradle 管線中無限期等待；沒有使用圖示字型、或不在意 APK 大小的驗收建置建議加 `--no-tree-shake-icons`（範例即如此，乾淨副本建置約 30 秒）。Robolectric 在 SDK 36 需要 Java 21；以 JDK 17 執行時，在 `src/test/resources/robolectric.properties` 設 `sdk=35`。
+
+`platform` 為 `ios`、`android`、`react-native` 或 `flutter` 時採原生預設：T4 視覺為 advisory（感知相似度），回歸範圍 `affected+smoke`；T1–T3 required。
+
+### viewport 與內容區域
+
+驅動器先量出裝置的內容區域：iOS 用自帶 host 應用的安全區域，Android 用 probe activity 的系統列與 cutout inset。每台裝置在每個 runner 版本量一次並快取（驅動器原始碼改變時快取一併失效）。截圖裁到內容區域，畫面錨點的邊界就是這個區域；內容區域取整到整數點／dp，使 `viewport × scale` 與截圖像素完全相等（Android 的 136 px 狀態列在 3× 是 45.33 dp）。
+
+target 的 `viewport` 必須等於該裝置的內容區域，原型也在同一尺寸下渲染；尺寸不符時驗證會明確 FAIL 並列出實際尺寸。iPhone 17（iOS 27）為 `402×778@3`，480 dpi 的 1080×2400 AVD（Android 16 手勢導覽）為 `360×730@3`。
+
+因此原型設計的是**內容區域**：不畫狀態列、導覽列或 home indicator；頁面根元素（建議 `<body data-pf="…" data-pf-role="screen">`）填滿 viewport。
 
 ## 應用端約定
 
 ### 啟動參數
 
-驅動器以 launch arguments 啟動應用：
+| 平台 | 驅動器傳入 | 應用讀取 |
+|---|---|---|
+| iOS | launch arguments `-PROTOFLOW_SCREEN <screen> -PROTOFLOW_STATE <state> -PROTOFLOW_FIXTURE <json>` | `UserDefaults.standard.string(forKey: "PROTOFLOW_SCREEN")` |
+| Android | 字串 intent extras `PROTOFLOW_SCREEN`、`PROTOFLOW_STATE`、`PROTOFLOW_FIXTURE` | `intent.getStringExtra("PROTOFLOW_SCREEN")` |
+| React Native | 同上 | iOS：`Settings.get('PROTOFLOW_SCREEN')`；Android：`MainActivity` 的 `getLaunchOptions()` 把 extras 轉成根元件的 initial props |
+| Flutter | 同上 | 一個 `MethodChannel('dev.protoflow/launch')`，iOS 在 `AppDelegate`、Android 在 `MainActivity` 回傳上述值 |
 
-```
--PROTOFLOW_SCREEN <screen> -PROTOFLOW_STATE <state> -PROTOFLOW_FIXTURE <fixture JSON>
-```
-
-這些值進入 `NSArgumentDomain`，應用以 `UserDefaults.standard.string(forKey: "PROTOFLOW_SCREEN")`（React Native：`Settings.get('PROTOFLOW_SCREEN')`）讀取，**直接打開該畫面**並套用 fixture。這等同 Web target 的 `urlTemplate`。帶有 `PROTOFLOW_SCREEN` 時建議停用動畫（`UIView.setAnimationsEnabled(false)`）。
+應用以這些值**直接打開該畫面**並套用 fixture，等同 Web target 的 `urlTemplate`。帶有 `PROTOFLOW_SCREEN` 時建議停用動畫。四種寫法都在 `examples/mobile` 中。
 
 ### 錨點標記
 
@@ -75,41 +140,86 @@ ProtoFlow 以外部驅動器協定（`schemas/driver-request.schema.json` → `s
 |---|---|
 | SwiftUI | `.accessibilityIdentifier("tasks.add")`；畫面與 region 容器另加 `.accessibilityElement(children: .contain)`，否則識別碼會被套到每個子元素 |
 | UIKit | `view.accessibilityIdentifier = "tasks.add"` |
+| Compose | `Modifier.testTag("tasks.add")`；畫面根節點加 `Modifier.semantics { testTagsAsResourceId = true }` |
+| Android View | `android:id` 不能含 `.`、`-`：以可逆轉換 `.` → `__`、`-` → `_`（`@+id/tasks__add`）；錨點語法不含 `_`，驅動器還原時不會混淆 |
 | React Native | `testID="tasks.add"`；可點擊元件加 `accessibilityRole="button"`，讓它被視為 action |
+| Flutter | `Semantics(identifier: "tasks.add")`；畫面與 region 用 `Semantics(container: true, explicitChildNodes: true, identifier: …)`；讀取無障礙樹需要語意樹，啟動時呼叫 `SemanticsBinding.instance.ensureSemantics()` |
 
 隱藏的錨點（原型中 `hidden`）在原生端可以完全不渲染，視同隱藏。
 
 React Native 注意事項：
 
-- Fabric 會把無障礙樹壓平：帶 `testID` 的 `View` 在 XCUITest 中是沒有子元素的葉節點，文字與按鈕是同層的兄弟元素。驅動器以幾何包含（中心點落在容器範圍內）組出容器文字，與 SwiftUI 的階層結果一致。
+- Fabric 會把 iOS 的無障礙樹壓平：帶 `testID` 的 `View` 在 XCUITest 中是沒有子元素的葉節點，文字與按鈕是同層的兄弟元素。驅動器以幾何包含（中心點落在容器範圍內）組出容器文字，與 SwiftUI 的階層結果一致。
 - flex 欄位預設把子元素撐滿寬度；原型中只佔文字寬度的段落（例如錯誤訊息），`Text` 需加 `alignSelf: 'flex-start'`，否則 T3 寬度不符。
 - iOS 27 強制 UIScene 生命週期；RN 0.87 模板的 `AppDelegate` 直接建立 `UIWindow`，啟動即中斷。需加入 `UIApplicationSceneManifest` 與 `SceneDelegate`（見 `examples/mobile/react-native/ios`）。
-- 以 Release 配置建置，JS bundle 打包進 `.app`；驗收不依賴 Metro。冷啟動載入 bundle 較慢，畫面出現的等待時間由 `--launch-timeout-ms` 控制。
+- 以 Release 配置建置，JS bundle 打包進 `.app`／APK；驗收不依賴 Metro。
+
+Compose 與 Flutter 注意事項：
+
+- 可點擊的 `Box`／`Row` 在 Android 無障礙樹中是 `View`，文字在子節點：只含文字的可點擊容器視為按鈕，標籤取子節點文字。
+- `BasicTextField` 的 placeholder（`decorationBox`）是輸入框的子文字節點，Flutter 在 iOS 把 hint 放在輸入框的 label；兩者在輸入框空白時都視為 placeholder，不計入外層容器文字。
+- Compose 對可點擊元件強制 48 dp 觸控高度；T1 的兄弟順序以閱讀順序（中心點同列再由左至右）判斷，較高的觸控區不會被誤判為在上方。
 
 ### 鍵盤
 
-`fill` 會叫出軟體鍵盤。狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL，因為鍵盤會遮住畫面，原型中也不存在。
+`fill` 會叫出軟體鍵盤（Android AVD 設硬體鍵盤時不會）。狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL，因為鍵盤會遮住畫面，原型中也不存在。
 
 ## 驅動器如何回報元素
 
-| 協定欄位 | iOS 來源 |
-|---|---|
-| `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 |
-| `visible` | frame 與內容區域相交且尺寸大於 0 |
-| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder；容器依閱讀順序串接子元素的 label（同 `innerText`，不含輸入值）；開關等控制項本身沒有文字 |
-| `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型：按鈕、連結為可互動；輸入框、開關、滑桿等為可編輯；`switch` 對應 `checkbox`，`textField` 對應 `text` |
-| `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 |
+| 協定欄位 | iOS 來源 | Android 來源 |
+|---|---|---|
+| `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density |
+| `visible` | frame 與內容區域相交且尺寸大於 0 | `isVisibleToUser` 且與內容區域相交 |
+| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
+| `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型 |
+| `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
 
-步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時清空並逐字重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 向上滑動直到可點擊、`back` 點導覽列返回、`wait-for` 等待出現。
+步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
 
-原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）與 `screen.png`（比較用的裁切圖）。
+原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）、`screen.png`（比較用的裁切圖），失敗時另有 `failure.png`。
+
+## target 變體：一份程式碼、多個平台
+
+React Native 與 Flutter 的同一份程式碼同時是 iOS 與 Android 應用。若拆成兩個 target，兩條交付分支會修改同一批檔案而衝突，因此以 `variants` 表達：
+
+```json
+{
+  "id": "flutter",
+  "platform": "flutter",
+  "root": "flutter",
+  "functional": { "argv": ["flutter/tool/flutterw", "test"] },
+  "deviations": [{ "anchor": "settings.notify-toggle", "allow": ["layout"] }],
+  "variants": [
+    { "id": "ios", "driver": { "kind": "external", "command": { "argv": ["node", "…/ios-driver.js", "--bundle-id", "…", "--device", "ProtoFlow iPhone 17", "--app", "flutter/build/ios/iphonesimulator/Runner.app"] } },
+      "build": { "argv": ["flutter/tool/flutterw", "build", "ios", "--simulator", "--debug"] }, "viewport": { "width": 402, "height": 778, "scale": 3 } },
+    { "id": "android", "driver": { "kind": "external", "command": { "argv": ["node", "…/android-driver.js", "--package", "…", "--avd", "ProtoFlow_Pixel", "--apk", "flutter/build/app/outputs/flutter-apk/app-release.apk"] } },
+      "build": { "argv": ["flutter/tool/flutterw", "build", "apk", "--release"] }, "viewport": { "width": 360, "height": 730, "scale": 3 } }
+  ]
+}
+```
+
+- target 仍是 FIFO、worktree、Codex 執行與交付的單位：一條交付分支，一次合併。
+- `driver` 與 `variants` 擇一。變體必須有 `id` 與 `driver`，可覆寫 `build`、`viewport`、`tiers`、`regression`、`visual`、`layout`、`tokens`、`deviations`、`locator`、`timeoutMs`；`functional`、`root`、`platform` 屬於 target。
+- build：先執行 target 的 `build`（若有），再依序執行每個變體的 `build`，記錄於 `build.variants`。
+- 驗收：依序擷取每個變體，證據在 `<target>/<variant>/<scene>`，報告在 `<target>/<variant>/report.html`；verification 的 `visual.variants` 列出各變體狀態，場景帶 `variant` 欄位。所有 `required`（預設）變體都 PASS 時 target 才 PASS；`"required": false` 的變體只記錄（例如仍在建置中的平台），失敗的 build 也不阻擋。至少要有一個必要變體。
+- 給執行代理的 context 說明這份程式碼在哪些變體上驗收，要求修改在每個必要變體都成立。
+
+## 平台慣例差異（deviations）
+
+原生控制項的尺寸與外觀跟著平台走，例如 Material 3 開關寬 52 dp，原型（iOS 樣式）為 61。逐錨點宣告已審核的差異：
+
+```json
+"deviations": [{ "anchor": "settings.notify-toggle", "allow": ["layout"] }]
+```
+
+`allow` 中的 `tokens`、`layout`、`visual` 讓該錨點在對應層級（T2、T3、T4）不參與比較；畫面錨點與 T1 結構永遠比較。其他值只記錄。套用的差異寫入場景證據的 `deviations`，供審查確認。
 
 ## 生成檔與自動交付
 
 原生專案的 build 會產生大量檔案。application hash（context、verify、review 與交付共用）排除兩類：
 
 - 任何深度的 `RUNTIME_DIRS`：DerivedData、Pods、`.gradle`、xcuserdata、node_modules 等，不論是否有 Git。
-- Git checkout 中被忽略的**未追蹤**檔，例如 React Native 的 `ios/build/generated/`（codegen）、`vendor/`、`.bundle/`、`ios/.xcode.env.local`，以及 Expo Continuous Native Generation 產生並忽略的整個 `ios/`／`android/`。
+- Git checkout 中被忽略的**未追蹤**檔，例如 React Native 的 `ios/build/generated/`（codegen）、`vendor/`、`.bundle/`、`ios/.xcode.env.local`，Gradle 的 `build/`，Flutter 的 `build/` 與 `.dart_tool/`，以及 Expo Continuous Native Generation 產生並忽略的整個 `ios/`／`android/`。
 
 因此 build 或 functional 重新產生這些檔案不會讓驗收記為 `changedDuringVerification`，交付 commit 不含它們，獨立 review gate 也不會因「application bytes 與 commit tree 不符」而 BLOCKED。已追蹤的原生檔案（例如手寫的 `ios/` 專案、`Podfile.lock`，或用 `git add -f` 加入的檔）照常綁定。
 
@@ -117,12 +227,14 @@ React Native 注意事項：
 
 ## 效能與限制
 
-- 每個場景是一次 `xcodebuild test-without-building`，約 15–40 秒；runner 只在驅動器原始碼或 Xcode 版本改變時重新建置。
-- React Native 目前只驗收 iOS；Android（含 React Native Android）需要 Android 參考驅動器，尚未提供。
+- iOS 每個場景是一次 `xcodebuild test-without-building`，約 15–40 秒；Android 每個場景是一次 instrumentation，約 5–10 秒。runner 只在驅動器原始碼或 Xcode／JDK 版本改變時重新建置。
 - T2 只比較取樣的主色，不比較字級與字重；字型與排版差異由 T3 相對版面與 T4 感知相似度觀察。
-- 驅動器只在本機或專案自備的 macOS CI 上執行，不提供裝置農場或實機。
+- 驅動器只在本機或專案自備的 CI 上執行，不提供裝置農場或實機；CI 不執行模擬器驗收（`tests/e2e/ios.spec.js`、`tests/e2e/android.spec.js` 為設定環境變數才執行的真實驗收）。
+- Expo 尚未提供範例；做法見 [提案 0002 D7](proposals/0002-android-flutter.md)。
 
-## 驗收紀錄（2026-10-12）
+## 驗收紀錄
+
+### 2026-10-12：iOS
 
 `examples/mobile` 在 iPhone 17 模擬器（iOS 27.0、Xcode 27.0）以真實 XCUITest 驗證同一個原型版本：
 
@@ -131,7 +243,19 @@ React Native 注意事項：
 | `ios`（SwiftUI） | PASS | PASS（XCUITest 3/3） | PASS | PASS | PASS | 整體相似度 0.978–0.993 |
 | `react-native`（RN 0.87.1，Release） | PASS | PASS（Jest 3/3） | PASS | PASS | PASS | 整體相似度 0.983–0.992 |
 
-5 個場景（tasks：initial、empty-error、added；settings：initial、saved）在兩個 target 都通過必要層級，`release.requireTargets` 的版本因此被接受。T4 未達每個區域 0.92 的門檻，主因是 Chromium 與 iOS 的字型渲染差異；它是 advisory，不阻擋驗收。
+5 個場景（tasks：initial、empty-error、added；settings：initial、saved）在兩個 target 都通過必要層級。T4 未達每個區域 0.92 的門檻，主因是 Chromium 與 iOS 的字型渲染差異；它是 advisory，不阻擋驗收。
 
 過程中發現並修正：iOS 27 開關尺寸為 61×28（原型需跟著平台更新）；RN 0.87 模板需改用 UIScene；RN `Text` 需 `alignSelf: 'flex-start'` 才與只佔文字寬度的段落一致。系統高負載時（`simctl` 一次操作數分鐘）曾出現安裝或啟動逾時，均記為 `NOT_RUN`，重跑後 PASS。
 
+### 2026-10-13：Android、Flutter 與 target 變體
+
+同一個原型版本在 iPhone 17 模擬器（iOS 27.0）與 AVD `ProtoFlow_Pixel`（Android 16／API 36、1080×2400、480 dpi）上，四個 target 全部接受，`release.version` 前進到該版本：
+
+| target | 變體 | build | functional | T1–T3 | T4 整體相似度（advisory） |
+|---|---|---|---|---|---|
+| `ios`（SwiftUI） | — | PASS | XCUITest 3/3 | PASS | 0.978–0.993 |
+| `android`（Compose） | — | PASS | Robolectric 3/3 | PASS（開關 `layout` deviation） | 0.975–0.984 |
+| `react-native`（0.87.1） | `ios`、`android` | PASS／PASS | Jest 3/3 | PASS／PASS | 0.983–0.992／0.973–0.983 |
+| `flutter`（3.47.7） | `ios`、`android` | PASS／PASS | `flutter test` 3/3 | PASS／PASS | 0.975–0.984／0.978–0.983 |
+
+Android 每個場景約 5–10 秒；整個 Compose target（build、functional、5 個場景）約 40 秒，React Native 兩個變體約 2 分鐘，Flutter 兩個變體約 1 分 45 秒。過程中發現並修正的事項見 [提案 0002 §13](proposals/0002-android-flutter.md)。

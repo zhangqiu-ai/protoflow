@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 草案，待審定 §12 的決策 |
+| 狀態 | 已接受（§12 決策 1–3：安裝環境、UiAutomator runner、target variants）；P0、P3.0–P3.4、P5.1–P5.2 已實作，見 §13；Expo（P3.5）待辦 |
 | 日期 | 2026-10-13 |
 | 前置 | [提案 0001](0001-anchor-contracts.md)（錨點、外部驅動器協定、P3／P5）、v0.3.x iOS 驅動器（[原生 target](../native-targets.md)） |
 | 影響範圍 | 新增 Android 參考驅動器、原生樹共用模組、target variants（一份程式碼多個執行平台）、Expo（CNG）建置約定、應用雜湊排除 git 忽略檔案、`examples/mobile` |
@@ -245,3 +245,21 @@ src/drivers/android-tree.js         UiAutomator 節點 → 正規化節點
 3. D5：採用 target variants（建議），還是先接受「RN／Flutter 每個平台各一個 target、各自交付」的限制？
 4. 發佈切分：Android＋variants 為 v0.4.0、Flutter 為 v0.5.0，或合併為一版？Expo 隨 v0.4.0（iOS 變體可更早，見 P3.5）？
 5. Expo 建置方式：prebuild + 原生建置（建議，無雲端與帳號依賴），或允許專案改用 `eas build --local`？
+
+## 13. 實作紀錄（2026-10-13）
+
+| 階段 | 結果 |
+|---|---|
+| P0 雜湊修復 | 應用雜湊與審查綁定排除 git 忽略的未追蹤檔；`examples/mobile` 雜湊檔案由 81 降為 36（等於 git 追蹤的檔案）；Gradle／Flutter 的 `build/` 不再造成 `changedDuringVerification` |
+| P3.0 環境 | JDK 17（Homebrew `openjdk@17`）、Android SDK（platform-tools、emulator、platforms 36／37、build-tools 36.0.0、`system-images;android-36;google_apis;arm64-v8a`）、AVD `ProtoFlow_Pixel`（1080×2400、480 dpi、硬體鍵盤）、Flutter 3.47.7 |
+| P3.1 共用原生樹 | `src/drivers/native-tree.js`；`ios-tree.js` 只保留轉出；新增 `visible` 支援、不可見節點不計入容器文字、內容區域取整到整數點 |
+| P3.2 Android 驅動器 | `drivers/android`（AGP 9.4.1、Gradle 9.8.1，Java 撰寫）、`scripts/android-driver.js`、`src/drivers/android-tree.js`；與 iOS 相同的 NOT_RUN／FAIL 分類、讀回輸入、失敗證據；runner 與 inset 快取以 runner 原始碼為鍵 |
+| P3.3 Compose 範例 | `examples/mobile/android`；Robolectric（SDK 35，JDK 17）功能測試 3/3；模擬器上 5 個場景 T1–T3 PASS |
+| P5.1 target variants | schema、`targetVariants`、逐變體 build 與擷取、彙總與證據目錄、doctor、context 說明；同時實作 0001 已定義但未生效的 `deviations` |
+| P5.2 Flutter | `examples/mobile/flutter`（`ios`、`android` 兩變體）；`flutter test` 3/3；兩變體 5 個場景 T1–T3 PASS |
+| P3.4 React Native Android | `react-native` target 改為 `ios`、`android` 兩變體；`MainActivity.getLaunchOptions()` 傳入啟動參數（真實驗收見 `docs/native-targets.md`） |
+
+實作中修正的引擎規則：T1 兄弟順序改為閱讀順序（Compose 48 dp 觸控區）；可點擊且只含文字的容器視為按鈕；輸入框子文字或 label 作為 placeholder；Android 擷取前等 UI 閒置、清除 UiAutomation 快取並等無障礙樹穩定。
+
+與草案的差異：Compose 功能測試用 Robolectric 而非 instrumentation（不依賴模擬器）；Android 驅動器以 Java 撰寫（少一個 Kotlin 外掛）；`deviations` 只接受 `tokens`、`layout`、`visual` 三個層名作為生效值。
+

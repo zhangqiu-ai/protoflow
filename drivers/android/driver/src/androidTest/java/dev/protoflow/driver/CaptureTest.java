@@ -123,7 +123,7 @@ public class CaptureTest {
         device.waitForIdle();
         SystemClock.sleep(300);
         result.put("keyboardVisible", keyboardVisible(automation));
-        result.put("tree", serialize(automation.getRootInActiveWindow()));
+        result.put("tree", stableTree(automation));
         if (!screenshot(automation, new File(out, "device.png"))) return result.put("status", "FAIL").put("reason", "screenshot failed");
         return result.put("status", "PASS").put("screenshot", "device.png");
     }
@@ -176,6 +176,25 @@ public class CaptureTest {
             if (isPassword(field) || text.equals(field.getText())) return null;
         }
         return "field shows \"" + field.getText() + "\" instead of \"" + text + "\" after typing";
+    }
+
+    /**
+     * The accessibility tree lags the screen: Compose publishes semantics changes after a short debounce and
+     * UiAutomation caches nodes. Drop the cache and read until two consecutive snapshots agree (at most 3 s).
+     */
+    private JSONObject stableTree(UiAutomation automation) throws Exception {
+        String previous = null;
+        JSONObject tree = null;
+        long deadline = SystemClock.uptimeMillis() + 3000;
+        do {
+            if (previous != null) SystemClock.sleep(250);
+            if (android.os.Build.VERSION.SDK_INT >= 34) automation.clearCache();
+            tree = serialize(automation.getRootInActiveWindow());
+            String current = tree.toString();
+            if (current.equals(previous)) return tree;
+            previous = current;
+        } while (SystemClock.uptimeMillis() < deadline);
+        return tree;
     }
 
     /** UiObject2 does not expose the password flag: read it from the editable node with the same bounds. */

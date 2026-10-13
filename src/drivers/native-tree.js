@@ -27,10 +27,13 @@ export function readingOrder(nodes) {
   });
 }
 
-/** Text a text-entry field shows: its value, or the placeholder while empty (web: value || placeholder). */
+/**
+ * Text a text-entry field shows: its value, or the placeholder while empty (web: value || placeholder). Without a
+ * platform placeholder the label stands in: Flutter on iOS exposes the hint as the field's accessibility label.
+ */
 function fieldText(node) {
   const value = node.value ?? '';
-  return value && value !== node.placeholder ? value : node.placeholder ?? '';
+  return value && value !== node.placeholder ? value : node.placeholder || node.label || '';
 }
 
 /**

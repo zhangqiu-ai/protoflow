@@ -118,7 +118,8 @@ async function runner(cache) {
   await rm(directory, { recursive: true, force: true });
   await cp(runnerSource, directory, { recursive: true, filter: source => !/[\\/](build|\.gradle)([\\/]|$)/.test(path.relative(runnerSource, source)) });
   await writeFile(path.join(directory, 'local.properties'), `sdk.dir=${androidHome}\n`);
-  const build = await run([path.join(directory, 'gradlew'), '-p', directory, '--no-daemon', '-q', 'assembleDebug', 'assembleDebugAndroidTest'], { timeoutMs: 1800000 });
+  // `sh gradlew`: a packed engine may not keep the wrapper's executable bit.
+  const build = await run(['sh', path.join(directory, 'gradlew'), '-p', directory, '--no-daemon', '-q', 'assembleDebug', 'assembleDebugAndroidTest'], { timeoutMs: 1800000 });
   if (build.code !== 0 || !await exists(apks.test)) return { error: `the UiAutomator driver runner could not be built: ${tail(build.stderr || build.stdout)}` };
   return { apks, directory };
 }

@@ -12,5 +12,11 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    // ProtoFlow launch convention: -PROTOFLOW_SCREEN <screen> (launch argument, read through UserDefaults).
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ProtoFlowLaunch") {
+      FlutterMethodChannel(name: "dev.protoflow/launch", binaryMessenger: registrar.messenger()).setMethodCallHandler { call, result in
+        result(call.method == "screen" ? UserDefaults.standard.string(forKey: "PROTOFLOW_SCREEN") : FlutterMethodNotImplemented)
+      }
+    }
   }
 }

@@ -115,47 +115,20 @@
         "width": 360,
         "height": 730,
         "scale": 3
-      }
+      },
+      "deviations": [
+        {
+          "anchor": "settings.notify-toggle",
+          "allow": [
+            "layout"
+          ]
+        }
+      ]
     },
     {
       "id": "react-native",
       "platform": "react-native",
       "root": "react-native",
-      "driver": {
-        "kind": "external",
-        "command": {
-          "argv": [
-            "node",
-            "../../scripts/ios-driver.js",
-            "--bundle-id",
-            "dev.protoflow.examples.tasksrn",
-            "--device",
-            "ProtoFlow iPhone 17",
-            "--app",
-            "react-native/ios/build/DerivedData/Build/Products/Release-iphonesimulator/ProtoFlowTasksRN.app"
-          ],
-          "timeoutMs": 900000
-        }
-      },
-      "build": {
-        "argv": [
-          "xcodebuild",
-          "build",
-          "-workspace",
-          "react-native/ios/ProtoFlowTasksRN.xcworkspace",
-          "-scheme",
-          "ProtoFlowTasksRN",
-          "-configuration",
-          "Release",
-          "-destination",
-          "generic/platform=iOS Simulator",
-          "-derivedDataPath",
-          "react-native/ios/build/DerivedData",
-          "CODE_SIGNING_ALLOWED=NO",
-          "-quiet"
-        ],
-        "timeoutMs": 3600000
-      },
       "functional": {
         "argv": [
           "npm",
@@ -167,11 +140,184 @@
         ],
         "timeoutMs": 600000
       },
-      "viewport": {
-        "width": 402,
-        "height": 778,
-        "scale": 3
-      }
+      "variants": [
+        {
+          "id": "ios",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/ios-driver.js",
+                "--bundle-id",
+                "dev.protoflow.examples.tasksrn",
+                "--device",
+                "ProtoFlow iPhone 17",
+                "--app",
+                "react-native/ios/build/DerivedData/Build/Products/Release-iphonesimulator/ProtoFlowTasksRN.app"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "xcodebuild",
+              "build",
+              "-workspace",
+              "react-native/ios/ProtoFlowTasksRN.xcworkspace",
+              "-scheme",
+              "ProtoFlowTasksRN",
+              "-configuration",
+              "Release",
+              "-destination",
+              "generic/platform=iOS Simulator",
+              "-derivedDataPath",
+              "react-native/ios/build/DerivedData",
+              "CODE_SIGNING_ALLOWED=NO",
+              "-quiet"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 402,
+            "height": 778,
+            "scale": 3
+          }
+        },
+        {
+          "id": "android",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/android-driver.js",
+                "--package",
+                "dev.protoflow.examples.tasksrn",
+                "--avd",
+                "ProtoFlow_Pixel",
+                "--apk",
+                "react-native/android/app/build/outputs/apk/release/app-release.apk"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "react-native/android/gradlew",
+              "-p",
+              "react-native/android",
+              "--no-daemon",
+              "-q",
+              "assembleRelease"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 360,
+            "height": 730,
+            "scale": 3
+          },
+          "deviations": [
+            {
+              "anchor": "settings.notify-toggle",
+              "allow": [
+                "layout"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "flutter",
+      "platform": "flutter",
+      "root": "flutter",
+      "functional": {
+        "argv": [
+          "flutter/tool/flutterw",
+          "test"
+        ],
+        "timeoutMs": 1800000
+      },
+      "deviations": [
+        {
+          "anchor": "settings.notify-toggle",
+          "allow": [
+            "layout"
+          ]
+        }
+      ],
+      "variants": [
+        {
+          "id": "ios",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/ios-driver.js",
+                "--bundle-id",
+                "dev.protoflow.examples.protoflowTasks",
+                "--device",
+                "ProtoFlow iPhone 17",
+                "--app",
+                "flutter/build/ios/iphonesimulator/Runner.app"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "flutter/tool/flutterw",
+              "build",
+              "ios",
+              "--simulator",
+              "--debug"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 402,
+            "height": 778,
+            "scale": 3
+          }
+        },
+        {
+          "id": "android",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/android-driver.js",
+                "--package",
+                "dev.protoflow.examples.protoflow_tasks",
+                "--avd",
+                "ProtoFlow_Pixel",
+                "--apk",
+                "flutter/build/app/outputs/flutter-apk/app-release.apk"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "flutter/tool/flutterw",
+              "build",
+              "apk",
+              "--release",
+              "--no-tree-shake-icons"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 360,
+            "height": 730,
+            "scale": 3
+          }
+        }
+      ]
     }
   ],
   "policy": {
@@ -188,7 +334,8 @@
     "requireTargets": [
       "ios",
       "android",
-      "react-native"
+      "react-native",
+      "flutter"
     ]
   }
 }
