@@ -139,6 +139,7 @@ protoflow install --personal --project /path/to/app
 | `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
 | `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
 | `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復；多目標時 `runner status` 以各 target 進度合成 source entries 狀態（`statusBasis: "targets"`）並附每個 target 的 `summary` |
+| `runner gc [--apply]` | 列出本專案的 runner worktree（active／stale／unsafe）；`--apply` 先封存其 `.protoflow` 證據，再移除未被使用且乾淨的 worktree，分支只在提交已存在於其他 ref 時刪除 |
 | `delivery sync` / `delivery status` | commit 後先取得獨立 AI review PASS，再允許自動批准、推送、PR 與合併；多目標時每個 target 在 `<branch>/<id>` 各自通過 review；缺配置或證據漂移時 BLOCKED。網路／5xx 暫時故障標為 `retryable`，以 `delivery sync --retry-review --delivery <DLV> --review <AIR>` 明確重跑新 review（reviewer FAIL 不重試） |
 | `doctor` | 接入環境診斷 |
 | `session start` / `session list` | 設計會話及修改前快照 |

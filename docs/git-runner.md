@@ -63,6 +63,19 @@ protoflow runner start --project /path/to/app --once
 
 正常停止會終止當前 subprocess group、保存 STOPPED；下一次 start 不擅自重試。setup、Codex、build／functional 與 visual Chromium 在 spawn 前先保存 STARTING／pid:null 意圖，再保存 PID／PGID 與完成時間；正常返回且能證明 spawned:false（例如 ENOENT 或 spawn 前取消）的意圖可記錄已完成，仍可重新配置／重試；PID 尚未落地時崩潰，未知 PID 會保守阻止自動恢復，需人工檢查可能留下的程序。Visual 透過 Playwright BrowserServer 保存 browser PID／PGID，停止時關閉或終止整組並確認結束；launch 已嘗試但未取得 PID 的錯誤也保留未知啟動意圖，不能自動略過。POSIX 恢復檢查整個 subprocess group；leader 已死而 child 仍活也會阻止 retry／setup。命令正常退出但同組程序未退出時會終止該組並記錄 FAIL，不能 PASS 前進；尚未確認全組結束就不寫完成時間。 若 processGroupActive 仍為 true，立即阻塞，不能啟動後續 functional／visual、repair 或新 Codex；每次新 attempt 前也重新檢查舊的未完成程序，保留其 phase／PID／失敗證據。Windows 無法確認整個程序樹，MVP 保守拒絕受監督命令的自動執行／恢復；命令不得自行 detached／轉移子程序 group，這些形式不在 MVP 的自動恢復保證內。異常退出的 RUNNING 同樣需 `runner retry`，避免重複執行者；死 PID 的本機鎖可恢復，活躍或缺少 owner 的鎖拒絕略過。若 PASS verification 已落地但 completedSha 尚未更新，retry 後會核對 application/frozen/artifact hashes 再復原完成記錄。
 
+### 回收 runner worktree
+
+Runner 為每條來源路由（多目標時每個 target）保留一個 `.protoflow/runner/worktree-*`。來源、target 或驗收路線改變後，舊 worktree 不會被自動刪除。`protoflow runner gc` 列出本專案登記在 `git worktree list` 中、位於 `.protoflow/runner/worktree-*` 的 worktree 及大小，分為：
+
+| 分類 | 條件 | `--apply` |
+|---|---|---|
+| `active` | 目前配置的某個 stream 的 runner state 指向它 | 保留 |
+| `unsafe` | 未被使用，但有未提交改動、被 `git worktree lock` 鎖定、引用它的舊 state 仍是 RUNNING／INITIALIZING，或 setup 程序組仍存活 | 保留並列出原因 |
+| `stale` | 未被使用且乾淨 | 先將其 `.protoflow`（不含 `node_modules`）封存到 `.protoflow/runner/archive/<名稱>-<時間>.tar.gz`，再 `git worktree remove`（不加 `--force`） |
+| `missing` | 目錄已不存在 | `git worktree prune` |
+
+本地 runner 分支只在其提交已被其他 branch、tag 或 remote-tracking ref 包含時刪除；否則保留並註明「its commits exist only on this branch」，worktree 移除不會遺失提交。不帶 `--apply` 時只讀，不取得鎖；`doctor` 的 `runner worktrees` 檢查顯示可回收的數量與大小。主 checkout 與 `.protoflow/runner` 以外的 worktree 一律不處理。
+
 ## 多目標（schemaVersion 2）
 
 `targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態。多目標時共享的 `.protoflow/source/state.json` 只是掃描紀錄：其 entries 的 `status` 停在掃描時的 `PENDING`、`completedSha` 不更新，真正進度在各 target 的 progress。因此 `runner status`（以及 `doctor` 的 `progress`、`source status`）不直接顯示該欄位：`source.statusBasis` 為 `"targets"`，每筆 entry 的 `status` 由各 target 合成（全部 PASS 為 `PASS`；任一 target `BLOCKED`／`STOPPED`／`RUNNING` 依此優先序顯示；只有部分 target PASS 為 `PARTIAL`；否則 `PENDING`），`targets` 列出各 target 的狀態，`recordedStatus` 保留檔案中的原值；`source.completedSha` 是所有 target 都已 PASS 的最新版本。`targets.<id>.summary` 摘要該 target 的 `status`（第一個未 PASS 版本的狀態，全部 PASS 時為 `IDLE`）、`completedSha`、`current` 與各狀態計數，`progress`／`runner` 仍是完整紀錄。這些只是讀取時的呈現，不改寫狀態檔；PASS 表示 verification 已接受，交付是否完成以 `delivery status` 為準。單一 target 與 schemaVersion 1 的輸出不變；`release.requireTargets` 的 `release.version` 是所有必要 target 都已完成的最新版本（依 checkpoint 順序取各 target 的共同前綴）。未啟用 `runner.delivery` 時「完成」指 verification 已接受（`release.basis: "verification"`）；啟用 `runner.delivery` 時（`release.basis: "delivery"`），該 target 的版本還必須已由交付完成：紀錄為 `MERGED`，或 `merge: "manual"` 下已交給人處理的 `PR_OPEN_MANUAL`。交付 BLOCKED／FAIL、尚未建立 PR 或已 `REVOKED` 的版本不計入 release；各版本的 `acceptance` 欄位仍只反映 verification。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
