@@ -112,10 +112,8 @@ final class CaptureTests: XCTestCase {
             (control.exists ? control : target).tap()
         case "fill", "clear":
             target.tap()
-            if let current = target.value as? String, !current.isEmpty, current != target.placeholderValue {
-                target.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
-            }
-            if step.action == "fill" { target.typeText(step.value ?? "") }
+            clear(target)
+            if step.action == "fill" { return type(step.value ?? "", into: target) }
         case "select":
             let wheel = target.pickerWheels.firstMatch
             if wheel.exists { wheel.adjust(toPickerWheelValue: step.value ?? "") } else {
@@ -172,6 +170,33 @@ final class CaptureTests: XCTestCase {
         case .webView: return "webView"
         default: return "other"
         }
+    }
+
+    private func fieldValue(_ field: XCUIElement) -> String {
+        let value = field.value as? String ?? ""
+        return value == field.placeholderValue ? "" : value
+    }
+
+    private func clear(_ field: XCUIElement) {
+        let current = fieldValue(field)
+        if !current.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count)) }
+    }
+
+    /// Typing can drop keystrokes on a busy simulator (notably into React Native controlled inputs): read the field
+    /// back and retype, character by character, before reporting a failure. Secure fields cannot be read back.
+    private func type(_ text: String, into field: XCUIElement) -> String? {
+        field.typeText(text)
+        if field.elementType == .secureTextField { return nil }
+        for _ in 0..<3 {
+            if fieldValue(field) == text { return nil }
+            clear(field)
+            for character in text {
+                field.typeText(String(character))
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        let shown = fieldValue(field)
+        return shown == text ? nil : "field shows \"\(shown)\" instead of \"\(text)\" after typing"
     }
 
     private func serialize(_ node: XCUIElementSnapshot) -> [String: Any] {

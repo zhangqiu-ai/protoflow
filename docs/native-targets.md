@@ -100,7 +100,7 @@ React Native 注意事項：
 | `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型：按鈕、連結為可互動；輸入框、開關、滑桿等為可編輯；`switch` 對應 `checkbox`，`textField` 對應 `text` |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 |
 
-步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 向上滑動直到可點擊、`back` 點導覽列返回、`wait-for` 等待出現。
+步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時清空並逐字重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 向上滑動直到可點擊、`back` 點導覽列返回、`wait-for` 等待出現。
 
 原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）與 `screen.png`（比較用的裁切圖）。
 
