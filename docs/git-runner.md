@@ -86,7 +86,7 @@ stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結�
 
 ## 證據與順序
 
-`.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。Runner 匯出到主 checkout 的 VER 與 worktree 的副本是同一筆紀錄，不再附加任何 Runner metadata（0.2.0 及以前會加上頂層 `runnerWorktree`；worktree 路徑只記在 Runner 狀態）。獨立 review 綁定主 checkout 的 VER，reviewer 讀 worktree 副本，因此兩者的 hash 必須一致。
+`.protoflow/source/state.json` 保存 scannedSha、completedSha、ordinal、每版狀態與 attempts；`.protoflow/runner/state.json` 保存 worktree、初始 application SHA／hash、branch、設定 hash。原型 checkpoint 使用既有 `.protoflow/manifests/` 與 `.protoflow/versions/`。執行的完整 JSONL／stderr 位於 worktree `.protoflow/contexts/EXEC-*.json`；主 checkout 與 worktree 均保留 verification、按 verification ID 分開的 PNG／diff／HTML 報告，綁定 manifestHash、prototypeHash、application hash 與來源 SHA。application hash 排除 prototype、`RUNTIME_DIRS` 與 checkout 中 Git 忽略的未追蹤檔；已追蹤檔即使符合忽略規則仍計入。非 Git 專案只排除 prototype 與 `RUNTIME_DIRS`。被忽略的生成檔可能影響本機 build，但不會被交付，由 build 命令負責重建。Runner 匯出到主 checkout 的 VER 與 worktree 的副本是同一筆紀錄，不再附加任何 Runner metadata（0.2.0 及以前會加上頂層 `runnerWorktree`；worktree 路徑只記在 Runner 狀態）。獨立 review 綁定主 checkout 的 VER，reviewer 讀 worktree 副本，因此兩者的 hash 必須一致。
 
 Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造成亂序。Runner status 的 PASS 是自動產品驗證；未啟用 `policy.autoApprove` 時，Review／Baseline 仍需使用者明確批准，不由 Skill 或 Runner 代簽。PASS 之後若有人工或獨立模型審查拒收（`rejected`／`changes_requested`），Runner 下一輪會把該 target 的同一版本重開為 PENDING 並重新執行；舊 PASS 與交付記在 `reopenings`（見提案 §16.8）。
 
@@ -104,7 +104,7 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 }
 ```
 
-1. 在隔離 worktree commit 應用改動，排除 `.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`。訊息列出 source、manifest 和 verification，獨立 review 尚未執行時不宣稱批准。
+1. 在隔離 worktree commit 應用改動，排除 `RUNTIME_DIRS`（`.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`、DerivedData、Pods、`.gradle`、xcuserdata）；Git 忽略的未追蹤檔（React Native codegen、Expo CNG 的 `ios/`／`android/` 等）不會被 stage，也不在 application hash 中，見 [Git 忽略的檔案](independent-review.md#git-忽略的檔案)。訊息列出 source、manifest 和 verification，獨立 review 尚未執行時不宣稱批准。
 2. 使用新 Codex read-only session review 已 commit 的完整應用；session 必須不同於原 executor JSONL 中的所有 session 與已知作者 thread。嚴格 structured verdict PASS 且無 findings 才能通過，綁定 HEAD/tree、完整內容、source/manifest/new VER/hash 和當前 remote base SHA。缺配置、缺原始 execution provenance、FAIL／NOT_RUN 或漂移一律 BLOCKED。
 3. `policy.autoApprove: true` 時才建立 `reviewerKind: automated` 的本地 Review／Baseline，明確引用独立 session 與 trace/hash；不冒充真人 ADR 或 GitHub review。接著普通推送至專用 `delivery.branch`，不推 main/base、不強推、不跟隨 tag。推送前、恢復時和合併前都重核對證據與 remote refs；只容許合法推送令 branch tip 精確成為被 review 的 commit。
 4. 重用或建立 PR 並留言證據。`merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併；不使用 `gh pr review --approve` 或 `--admin`，保留 branch protection。`"manual"`（兼容 `"none"`）留給人合併；draft PR 的後續 auto 版本必須通過自身 gate 才 ready 和 merge。已記錄 MERGED 的版本不重複處理。

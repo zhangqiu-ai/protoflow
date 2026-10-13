@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm, mkdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { initProject } from '../src/install.js';
 import { loadConfig } from '../src/config.js';
@@ -68,6 +69,19 @@ test('missing checks stay NOT_RUN and can never approve or create baseline', asy
   await assert.rejects(createBaseline(root, config, review.id), /approved/);
   const rejected = await decideReview(root, config, review.id, { status: 'changes_requested', reviewer: 'Test human fixture', findings: [{ component: 'card', severity: 'high', description: 'Configure verification' }] });
   assert.equal(rejected.status, 'changes_requested');
+});
+test('verification regenerating Git-ignored codegen is not a change during verification; committable output is', async t => {
+  const { root, config, manifest } = await target(t);
+  for (const args of [['init', '-q'], ['config', 'user.email', 'fixture@protoflow.test'], ['config', 'user.name', 'Fixture']]) execFileSync('git', args, { cwd: root });
+  await writeFile(path.join(root, '.gitignore'), '.protoflow/\nbuild/\n');
+  const regenerate = file => ({ argv: [process.execPath, '-e', `const fs = require('fs'); fs.mkdirSync(require('path').dirname(${JSON.stringify(file)}), { recursive: true }); fs.writeFileSync(${JSON.stringify(file)}, String(Math.random()))`] });
+  const ignored = await verify(root, { ...config, verification: { build: regenerate('build/generated/Codegen.h'), functional: regenerate('build/generated/Codegen.h') } }, manifest.id);
+  assert.equal(ignored.build.status, 'PASS'); assert.equal(ignored.functional.status, 'PASS');
+  assert.equal(ignored.changedDuringVerification, false);
+  assert.ok(!Object.keys(ignored.project.files).some(file => file.startsWith('build/')));
+  const committable = await verify(root, { ...config, verification: { functional: regenerate('generated/Codegen.h') } }, manifest.id);
+  assert.equal(committable.changedDuringVerification, true);
+  assert.equal(committable.status, 'FAIL');
 });
 test('planning adapter validates actual produced artifact paths, not just exit zero', async t => {
   const { root, config, manifest } = await target(t);

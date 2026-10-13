@@ -3,17 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { checkpoint, startSession } from '../src/sessions.js';
-import { createContext, executeContext, createReview, decideReview, createBaseline, loadArtifact } from '../src/workflow.js';
-import { fingerprint, projectPath, hash, writeJson, runCommand } from '../src/util.js';
+import { createContext, executeContext, createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from '../src/workflow.js';
+import { fingerprint, gitIgnoredPaths, projectPath, hash, writeJson, runCommand } from '../src/util.js';
 
 const config = {
   schemaVersion: 1, prototypeDir: 'prototype', policy: { requireHumanReview: true },
   mappings: [{ id: 'button', prototypeFiles: ['prototype/index.html'], prototype: '#button', application: '#button', component: 'src/button.js' }],
 };
 
-// Application evidence excludes the prototype, which is versioned separately.
-const appFingerprint = root => fingerprint(root, { exclude: [config.prototypeDir] });
+const git = (cwd, ...args) => promisify(execFile)('git', args, { cwd }).then(result => result.stdout.trim());
+// Application evidence excludes the prototype, which is versioned separately, and anything Git ignores.
+const appFingerprint = root => fingerprint(root, { exclude: [config.prototypeDir], gitIgnore: true });
 
 async function fixture(t, { level } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-audit-'));
@@ -130,6 +133,78 @@ test('fingerprint ignores native build output and dependency installs at any dep
   assert.equal((await fingerprint(root)).hash, before.hash);
   await fs.writeFile(path.join(root, 'ios/build/Info.plist'), 'source-like');
   assert.notEqual((await fingerprint(root)).hash, before.hash);
+});
+
+/** A Git checkout of the audit fixture whose own .gitignore ignores native codegen output and logs. */
+async function gitFixture(t) {
+  const f = await fixture(t);
+  await git(f.root, 'init', '-q');
+  await git(f.root, 'config', 'user.email', 'fixture@protoflow.test'); await git(f.root, 'config', 'user.name', 'Fixture');
+  await fs.writeFile(path.join(f.root, '.gitignore'), '.protoflow/\nios/build/\n*.log\n');
+  await fs.mkdir(path.join(f.root, 'ios/build'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'ios/build/tracked.plist'), 'tracked despite the ignore pattern');
+  await git(f.root, 'add', '.'); await git(f.root, 'add', '-f', 'ios/build/tracked.plist');
+  await git(f.root, 'commit', '-q', '-m', 'fixture');
+  await fs.mkdir(path.join(f.root, 'ios/build/generated/ios'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'ios/build/generated/ios/Codegen.h'), '// generated');
+  await fs.writeFile(path.join(f.root, 'src/debug.log'), 'log');
+  await fs.writeFile(path.join(f.root, 'src/untracked.js'), 'export const fresh = true;');
+  return f;
+}
+
+test('gitIgnore fingerprint leaves out Git-ignored files but keeps tracked files matching an ignore pattern and untracked files', async t => {
+  const { root } = await gitFixture(t);
+  assert.deepEqual((await gitIgnoredPaths(root)).sort(), ['.protoflow/', 'ios/build/generated/', 'src/debug.log']);
+  const plain = await fingerprint(root), aware = await fingerprint(root, { gitIgnore: true });
+  for (const file of ['ios/build/generated/ios/Codegen.h', 'src/debug.log']) {
+    assert.ok(Object.hasOwn(plain.files, file), file);
+    assert.ok(!Object.hasOwn(aware.files, file), file);
+  }
+  for (const file of ['ios/build/tracked.plist', 'src/untracked.js', 'src/button.js', '.gitignore']) assert.ok(Object.hasOwn(aware.files, file), file);
+  // Regenerated or new ignored output leaves the hash alone; tracked and untracked content still move it.
+  await fs.writeFile(path.join(root, 'ios/build/generated/ios/Codegen.h'), '// regenerated');
+  await fs.writeFile(path.join(root, 'ios/build/generated/ios/Other.h'), '// new');
+  assert.equal((await fingerprint(root, { gitIgnore: true })).hash, aware.hash);
+  await fs.writeFile(path.join(root, 'ios/build/tracked.plist'), 'changed');
+  assert.notEqual((await fingerprint(root, { gitIgnore: true })).hash, aware.hash);
+  await fs.writeFile(path.join(root, 'ios/build/tracked.plist'), 'tracked despite the ignore pattern');
+  await fs.writeFile(path.join(root, 'src/untracked.js'), 'changed');
+  assert.notEqual((await fingerprint(root, { gitIgnore: true })).hash, aware.hash);
+  // Ignore rules are content: un-ignoring the codegen directory brings it back into the hash.
+  await fs.writeFile(path.join(root, 'src/untracked.js'), 'export const fresh = true;');
+  await fs.writeFile(path.join(root, '.gitignore'), '.protoflow/\n*.log\n');
+  assert.ok(Object.hasOwn((await fingerprint(root, { gitIgnore: true })).files, 'ios/build/generated/ios/Codegen.h'));
+});
+
+test('application fingerprint and context staleness ignore Git-ignored codegen but not committable changes', async t => {
+  const { root, manifest } = await gitFixture(t);
+  const context = await createContext(root, config, manifest.id);
+  assert.ok(!Object.hasOwn(context.project.files, 'ios/build/generated/ios/Codegen.h'));
+  await fs.writeFile(path.join(root, 'ios/build/generated/ios/Codegen.h'), '// regenerated by the build');
+  assert.equal((await applicationFingerprint(root, config)).hash, context.project.hash);
+  const executorConfig = { ...config, adapters: { codex: { command: { argv: [process.execPath, '-e', ''] } } } };
+  const executed = await executeContext(root, executorConfig, context.id, { execute: true });
+  assert.equal(executed.status, 'PASS');
+  const stale = await createContext(root, config, manifest.id);
+  await fs.writeFile(path.join(root, 'ios/build/tracked.plist'), 'changed');
+  await assert.rejects(executeContext(root, executorConfig, stale.id, { execute: true }), /Context is stale/);
+});
+
+test('gitIgnore keeps RUNTIME_DIRS-only behaviour outside Git and for a root its parent repository ignores', async t => {
+  const { root } = await fixture(t);
+  await fs.writeFile(path.join(root, '.gitignore'), 'build/\n');
+  await fs.mkdir(path.join(root, 'build')); await fs.writeFile(path.join(root, 'build/out.js'), 'generated');
+  assert.equal(await gitIgnoredPaths(root), null);
+  const aware = await fingerprint(root, { gitIgnore: true });
+  assert.equal(aware.hash, (await fingerprint(root)).hash);
+  assert.ok(Object.hasOwn(aware.files, 'build/out.js'));
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-ignored-root-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  await git(parent, 'init', '-q');
+  await fs.writeFile(path.join(parent, '.gitignore'), 'project/\n');
+  await fs.cp(root, path.join(parent, 'project'), { recursive: true });
+  assert.equal(await gitIgnoredPaths(path.join(parent, 'project')), null);
+  assert.equal((await fingerprint(path.join(parent, 'project'), { gitIgnore: true })).hash, (await fingerprint(path.join(parent, 'project'))).hash);
 });
 
 test('project paths reject unresolved or escaping symlinks before writes', async t => {

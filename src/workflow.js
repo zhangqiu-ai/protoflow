@@ -24,10 +24,12 @@ async function persist(root, kind, data) {
 // The prototype is its own version stream; the application hash excludes it so design work can continue.
 // With several targets, each target's application hash also excludes the other targets' roots, so one platform's
 // work does not invalidate another platform's context, verification or review.
+// Files Git ignores (React Native codegen, Expo CNG ios/ and android/) are never committed, so they are not
+// application content either: context, verification, review and delivery all bind what Git can commit.
 export function applicationFingerprint(root, config, target) {
   const others = config.schemaVersion === 2 && config.targets.length > 1
     ? config.targets.filter(item => item.id !== selectTarget(config, target).id).map(item => item.root) : [];
-  return fingerprint(root, { exclude: [config.prototypeDir, ...others] });
+  return fingerprint(root, { exclude: [config.prototypeDir, ...others], gitIgnore: true });
 }
 /** Load a manifest with its frozen prototype version; the live prototype may already be newer. */
 async function manifestVersion(root, config, manifestId) {

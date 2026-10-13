@@ -148,7 +148,7 @@ async function reviewed(t) {
   await fs.mkdir(path.dirname(await projectPath(root, relative)), { recursive: true });
   await fs.writeFile(await projectPath(root, relative), 'Synthetic fixture for review protocol tests; not a screenshot.');
   const verification = { schemaVersion: 1, id: 'VER-SYNTHETIC-PASS', createdAt: new Date(Date.now() - 1000).toISOString(), fixture: 'synthetic-review-lifecycle',
-    manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, project: await fingerprint(root, { exclude: ['prototype'] }), git: { head: null }, status: 'PASS',
+    manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, project: await fingerprint(root, { exclude: ['prototype'], gitIgnore: true }), git: { head: null }, status: 'PASS',
     build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', scenes: [{ id: 'synthetic', mappings: [{ id: 'button', status: 'PASS' }] }], artifacts: [] },
     artifactHashes: { [relative]: hash('Synthetic fixture for review protocol tests; not a screenshot.') } };
   await writeJson(await projectPath(root, `.protoflow/verifications/${verification.id}.json`), verification);
