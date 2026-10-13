@@ -24,6 +24,15 @@ export function targetSettings(target) {
     tokens: { deltaE: 3, fontSize: 1, radius: 1, ...target.tokens }
   };
 }
+/**
+ * Capture configurations of a target: the target itself, or one per variant when one codebase runs on several
+ * platforms (docs/proposals/0002 D5). Variant fields override the target's; `variant` and `required` are added.
+ */
+export function targetVariants(target) {
+  if (!target.variants?.length) return [{ ...target, variant: null, required: true }];
+  const { variants, ...base } = target;
+  return variants.map(({ id, required, ...fields }) => ({ ...base, ...fields, id: target.id, variant: id, required: required !== false }));
+}
 /** The target a command acts on: the named one, the only one, or an error asking for --target. */
 export function selectTarget(config, id) {
   if (!config.targets?.length) throw new Error('schemaVersion 2 requires at least one target');
@@ -90,7 +99,7 @@ function fillTemplate(template, { screen, page, state }, prototypeDir) {
 export function driverRequest(target, settings, scene, screen, state, outputDir) {
   const anchors = [...new Set([...screen.anchors.map(anchor => anchor.id), ...state.expect.visible, ...state.expect.hidden])];
   return {
-    schemaVersion: 1, kind: 'capture', target: { id: target.id, platform: target.platform, root: target.root ?? '.' },
+    schemaVersion: 1, kind: 'capture', target: { id: target.id, platform: target.platform, root: target.root ?? '.', ...(target.variant && { variant: target.variant }) },
     screen: scene.screen, state: scene.state, page: screen.page,
     fixture: { name: state.fixture, data: state.fixture ? screen.fixtures[state.fixture] : {} },
     steps: state.steps, anchors, viewport: settings.viewport, outputDir
@@ -128,7 +137,7 @@ function renderReport(target, scenes) {
     const images = ['prototype', 'application', 'diff'].filter(image).map(name => `<figure><figcaption>${name}</figcaption><img alt="${name}" src="${escapeHtml(path.relative(path.dirname(scene.reportDir), image(name)))}"></figure>`).join('');
     return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}</h2><table><tr><th>structure</th><th>tokens</th><th>layout</th><th>visual</th></tr><tr>${tiers}</tr></table><ul>${reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><div class="images">${images}</div></section>`;
   }).join('');
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow anchor review</title><style>body{font:15px system-ui;margin:24px;background:#fafafa;color:#111}section{border:1px solid #ddd;background:#fff;padding:16px;margin:20px 0}td,th{border:1px solid #ddd;padding:4px 10px}.PASS{color:#06713b}.FAIL{color:#b00020;font-weight:700}.NOT_RUN{color:#8a6d00}.images{display:flex;gap:12px;flex-wrap:wrap}figure{margin:0;max-width:32%}img{max-width:100%;border:1px solid #eee}</style><h1>ProtoFlow anchor review — target ${escapeHtml(target.id)} (${escapeHtml(target.platform)})</h1><p>T1 structure, T2 tokens, T3 layout, T4 visual. Required tiers decide acceptance; advisory tiers are informational.</p>${rows}</html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow anchor review</title><style>body{font:15px system-ui;margin:24px;background:#fafafa;color:#111}section{border:1px solid #ddd;background:#fff;padding:16px;margin:20px 0}td,th{border:1px solid #ddd;padding:4px 10px}.PASS{color:#06713b}.FAIL{color:#b00020;font-weight:700}.NOT_RUN{color:#8a6d00}.images{display:flex;gap:12px;flex-wrap:wrap}figure{margin:0;max-width:32%}img{max-width:100%;border:1px solid #eee}</style><h1>ProtoFlow anchor review — target ${escapeHtml(target.id)}${target.variant ? ` / ${escapeHtml(target.variant)}` : ''} (${escapeHtml(target.platform)})</h1><p>T1 structure, T2 tokens, T3 layout, T4 visual. Required tiers decide acceptance; advisory tiers are informational.</p>${rows}</html>`;
 }
 
 function summarize(scenes, policy) {
@@ -142,11 +151,40 @@ function summarize(scenes, policy) {
 
 /**
  * Verify one target against a frozen prototype version. Returns a visual-phase result compatible with verification
- * records: { status, mode: 'anchors', target, tiers, scenes, artifacts, prototypeSource: 'version' }.
+ * records: { status, mode: 'anchors', target, tiers, scenes, artifacts, prototypeSource: 'version' }. A target with
+ * variants is verified on each variant; it passes when every required variant passes, and the result adds `variants`.
  */
-export async function verifyTarget(root, config, manifest, version, { target: targetId, outDir, signal, onBeforeSpawn, onStart, onFinish } = {}) {
-  const target = selectTarget(config, targetId);
+export async function verifyTarget(root, config, manifest, version, { target: targetId, ...options } = {}) {
+  const variants = targetVariants(selectTarget(config, targetId));
+  if (!variants[0].variant) return verifyVariant(root, config, manifest, version, variants[0], options);
+  const results = [];
+  for (const variant of variants) {
+    if (options.signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
+    results.push({ variant, result: await verifyVariant(root, config, manifest, version, variant, options) });
+  }
+  const combine = statuses => statuses.includes('FAIL') ? 'FAIL' : statuses.length && statuses.every(status => status === 'PASS') ? 'PASS' : 'NOT_RUN';
+  const required = results.filter(item => item.variant.required);
+  const tiers = Object.fromEntries(TIERS.map(tier => [tier, {
+    policy: required.some(item => item.result.tiers?.[tier]?.policy === 'required') ? 'required' : required[0]?.result.tiers?.[tier]?.policy ?? 'required',
+    status: combine(required.map(item => item.result.tiers?.[tier]?.status ?? 'NOT_RUN'))
+  }]));
+  const failing = results.filter(item => item.result.status !== 'PASS').map(item => `${item.variant.variant}${item.variant.required ? '' : ' (optional)'}: ${item.result.reason ?? item.result.status}`);
+  const first = results[0].result;
+  return {
+    status: combine(required.map(item => item.result.status)), mode: 'anchors', target: first.target, platform: first.platform, regression: first.regression, tiers,
+    scenes: results.flatMap(item => (item.result.scenes ?? []).map(scene => ({ ...scene, variant: item.variant.variant }))),
+    artifacts: results.flatMap(item => item.result.artifacts ?? []), prototypeSource: 'version', contract: first.contract,
+    variants: Object.fromEntries(results.map(item => [item.variant.variant, { required: item.variant.required, status: item.result.status, tiers: item.result.tiers, ...(item.result.reason && { reason: item.result.reason }) }])),
+    ...(failing.length && { reason: failing.join('; ') })
+  };
+}
+
+/** Verify one capture configuration (a target, or one variant of it). */
+async function verifyVariant(root, config, manifest, version, target, { outDir, signal, onBeforeSpawn, onStart, onFinish } = {}) {
   const settings = targetSettings(target);
+  // Evidence of a variant lives under <target>/<variant>; a plain target keeps <target>.
+  const segments = [target.id, ...(target.variant ? [target.variant] : [])];
+  const reportFile = target.variant ? path.join(outDir, ...segments, 'report.html') : path.join(outDir, 'report.html');
   const contract = await versionContract(root, config, version);
   if (contract.errors.length) return { status: 'FAIL', mode: 'anchors', target: target.id, reason: `Prototype contract is invalid: ${contract.errors.join('; ')}`, scenes: [], artifacts: [], prototypeSource: 'version' };
   const scenes = scenesFor(contract, manifest.scope, settings.regression);
@@ -166,10 +204,10 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
       const screen = contract.screens[scene.screen];
       const state = screen.states[scene.state];
       const id = `${scene.screen}.${scene.state}`;
-      const sceneDir = path.join(outDir, target.id, id);
+      const sceneDir = path.join(outDir, ...segments, id);
       await mkdir(sceneDir, { recursive: true });
-      const entry = { id, screen: scene.screen, state: scene.state, affected: scene.affected, status: 'FAIL', tiers: {}, artifacts: [], reportDir: path.join(outDir, 'report.html') };
-      const request = driverRequest(target, settings, scene, screen, state, `${outRelative}/${target.id}/${id}/driver`);
+      const entry = { id, screen: scene.screen, state: scene.state, affected: scene.affected, status: 'FAIL', tiers: {}, artifacts: [], reportDir: reportFile };
+      const request = driverRequest(target, settings, scene, screen, state, `${outRelative}/${segments.join('/')}/${id}/driver`);
       const { anchors } = request;
       let prototype;
       const prototypeUrl = pathToFileURL(await projectPath(root, `${version.directory}/${screen.page}`)).href;
@@ -219,12 +257,18 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
           for (const tier of TIERS) entry.tiers[tier] = { status: 'FAIL', reasons: sizeIssues };
           artifacts.push(...entry.artifacts); results.push(entry); continue;
         }
+        // Reviewed platform conventions (target.deviations): an anchor allowed to differ in a tier is left out of that
+        // tier's comparison; the screen anchor always stays. Structure (T1) is never waived.
+        const waived = tier => new Set((target.deviations ?? []).filter(item => item.allow.includes(tier)).map(item => item.anchor));
+        const without = tier => { const skip = waived(tier); return skip.size ? { ...screen, anchors: screen.anchors.filter(anchor => anchor.role === 'screen' || !skip.has(anchor.id)) } : screen; };
         const tiers = {
           structure: compareStructure(screen, state, prototype, app.capture),
-          tokens: compareTokens(screen, prototype, app.capture, { tokens, ...settings.tokens }),
-          layout: compareLayout(scene.screen, screen, prototype, app.capture, { ...settings.layout, viewport: settings.viewport }),
-          visual: compareVisual(screen, prototype, app.capture, settings.visual)
+          tokens: compareTokens(without('tokens'), prototype, app.capture, { tokens, ...settings.tokens }),
+          layout: compareLayout(scene.screen, without('layout'), prototype, app.capture, { ...settings.layout, viewport: settings.viewport }),
+          visual: compareVisual(without('visual'), prototype, app.capture, settings.visual)
         };
+        const applied = (target.deviations ?? []).filter(item => screen.anchors.some(anchor => anchor.id === item.anchor));
+        if (applied.length) entry.deviations = applied;
         if (tiers.visual.images?.diff) await write('diff', tiers.visual.images.diff);
         for (const tier of TIERS) {
           const { images, ...rest } = tiers[tier];
@@ -238,7 +282,8 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
       artifacts.push(...entry.artifacts);
       results.push(entry);
     }
-    const report = path.join(outDir, 'report.html');
+    const report = reportFile;
+    await mkdir(path.dirname(report), { recursive: true });
     await writeFile(report, renderReport(target, results));
     artifacts.push(report);
     const statuses = results.map(scene => scene.status);

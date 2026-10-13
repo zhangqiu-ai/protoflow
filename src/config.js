@@ -35,6 +35,21 @@ export const configSchema = {
 const tier = { enum: ['required', 'advisory', 'off'] };
 configSchema.properties.adapters.properties.acceptance = { type: 'object', additionalProperties: false, required: ['command'], properties: { command: command.anyOf[1], options: { type: 'object' } } };
 const shared = configSchema.properties;
+const driver = { type: 'object', required: ['kind'], additionalProperties: false, properties: {
+  kind: { enum: ['playwright-web', 'playwright-electron', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build,
+  // playwright-electron: entry relative to the target root, route template ('#/{screen}' or a page path), optional binary.
+  main: { type: 'string', minLength: 1 }, route: { type: 'string', minLength: 1 }, executablePath: { type: 'string', minLength: 1 },
+  args: { type: 'array', items: { type: 'string' } }, env: { type: 'object', additionalProperties: { type: 'string' } }
+} };
+const locator = { type: 'object', additionalProperties: false, properties: { attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, strategy: { type: 'string', minLength: 1 } } };
+const targetTiers = { type: 'object', additionalProperties: false, properties: { structure: tier, tokens: tier, layout: tier, visual: tier } };
+const regression = { enum: ['all', 'affected', 'affected+smoke'] };
+const viewport = { type: 'object', additionalProperties: false, required: ['width', 'height'], properties: { width: { type: 'integer', minimum: 1, maximum: 8192 }, height: { type: 'integer', minimum: 1, maximum: 8192 }, scale: { type: 'number', minimum: 0.5, maximum: 4 } } };
+const visual = { type: 'object', additionalProperties: false, properties: { mode: { enum: ['pixel', 'perceptual'] }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, pixelThreshold: { type: 'number', minimum: 0, maximum: 1 }, minSimilarity: { type: 'number', minimum: 0, maximum: 1 } } };
+const layout = { type: 'object', additionalProperties: false, properties: { position: { type: 'number', minimum: 0, maximum: 1 }, size: { type: 'number', minimum: 0, maximum: 1 }, absolute: { anyOf: [{ type: 'null' }, { type: 'number', minimum: 0 }] } } };
+const tokens = { type: 'object', additionalProperties: false, properties: { deltaE: { type: 'number', minimum: 0 }, fontSize: { type: 'number', minimum: 0 }, radius: { type: 'number', minimum: 0 } } };
+const deviations = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['anchor', 'allow'], properties: { anchor: { type: 'string', minLength: 1 }, allow: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } } } } };
+const timeoutMs = { type: 'integer', minimum: 100, maximum: 600000 };
 /** schemaVersion 2: semantic anchors and per-platform targets replace component mappings (docs/proposals/0001). */
 export const configSchemaV2 = {
   type: 'object', required: ['schemaVersion', 'prototypeDir', 'targets'], additionalProperties: false,
@@ -47,26 +62,19 @@ export const configSchemaV2 = {
     } },
     // Each target advances through the same prototype versions independently (proposal 0001 §15.1).
     release: { type: 'object', additionalProperties: false, properties: { requireTargets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' } } } },
-    targets: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'platform', 'driver'], additionalProperties: false, properties: {
+    targets: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'platform'], additionalProperties: false, properties: {
       id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' },
       platform: { enum: ['web', 'electron', 'ios', 'android', 'flutter', 'react-native'] },
       root: { type: 'string', minLength: 1 },
-      driver: { type: 'object', required: ['kind'], additionalProperties: false, properties: {
-        kind: { enum: ['playwright-web', 'playwright-electron', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build,
-        // playwright-electron: entry relative to the target root, route template ('#/{screen}' or a page path), optional binary.
-        main: { type: 'string', minLength: 1 }, route: { type: 'string', minLength: 1 }, executablePath: { type: 'string', minLength: 1 },
-        args: { type: 'array', items: { type: 'string' } }, env: { type: 'object', additionalProperties: { type: 'string' } }
-      } },
+      driver,
+      // One codebase, several runtimes (React Native, Flutter): the target stays the unit of FIFO and delivery and every
+      // required variant must PASS (docs/proposals/0002 D5). Variant fields override the target's.
+      variants: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'driver'], additionalProperties: false, properties: {
+        id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' }, required: { type: 'boolean' }, driver, build: command,
+        locator, tiers: targetTiers, regression, viewport, visual, layout, tokens, deviations, timeoutMs
+      } } },
       build: command, functional: command,
-      locator: { type: 'object', additionalProperties: false, properties: { attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, strategy: { type: 'string', minLength: 1 } } },
-      tiers: { type: 'object', additionalProperties: false, properties: { structure: tier, tokens: tier, layout: tier, visual: tier } },
-      regression: { enum: ['all', 'affected', 'affected+smoke'] },
-      viewport: { type: 'object', additionalProperties: false, required: ['width', 'height'], properties: { width: { type: 'integer', minimum: 1, maximum: 8192 }, height: { type: 'integer', minimum: 1, maximum: 8192 }, scale: { type: 'number', minimum: 0.5, maximum: 4 } } },
-      visual: { type: 'object', additionalProperties: false, properties: { mode: { enum: ['pixel', 'perceptual'] }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }, pixelThreshold: { type: 'number', minimum: 0, maximum: 1 }, minSimilarity: { type: 'number', minimum: 0, maximum: 1 } } },
-      layout: { type: 'object', additionalProperties: false, properties: { position: { type: 'number', minimum: 0, maximum: 1 }, size: { type: 'number', minimum: 0, maximum: 1 }, absolute: { anyOf: [{ type: 'null' }, { type: 'number', minimum: 0 }] } } },
-      tokens: { type: 'object', additionalProperties: false, properties: { deltaE: { type: 'number', minimum: 0 }, fontSize: { type: 'number', minimum: 0 }, radius: { type: 'number', minimum: 0 } } },
-      deviations: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['anchor', 'allow'], properties: { anchor: { type: 'string', minLength: 1 }, allow: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } } } } },
-      timeoutMs: { type: 'integer', minimum: 100, maximum: 600000 }
+      locator, tiers: targetTiers, regression, viewport, visual, layout, tokens, deviations, timeoutMs
     } } }
   }
 };
@@ -91,12 +99,19 @@ async function loadConfigV2(root, config) {
   for (const id of config.release?.requireTargets ?? []) if (!config.targets.some(target => target.id === id)) throw new Error(`release.requireTargets names unknown target: ${id}`);
   for (const target of config.targets) {
     if (target.root && target.root !== '.') await projectPath(root, target.root);
-    if (target.driver.kind === 'playwright-web' && !target.driver.urlTemplate) throw new Error(`Target ${target.id}: playwright-web requires driver.urlTemplate`);
-    if (target.driver.kind === 'external' && !target.driver.command) throw new Error(`Target ${target.id}: external driver requires driver.command`);
-    if (target.driver.kind === 'playwright-electron') {
-      if (!target.driver.main || !target.driver.route) throw new Error(`Target ${target.id}: playwright-electron requires driver.main and driver.route`);
-      await projectPath(root, path.posix.join(target.root ?? '.', target.driver.main));
-      if (target.driver.executablePath) await projectPath(root, target.driver.executablePath);
+    if (!target.driver === !target.variants) throw new Error(`Target ${target.id}: configure either driver or variants`);
+    if (target.variants) {
+      if (new Set(target.variants.map(variant => variant.id)).size !== target.variants.length) throw new Error(`Target ${target.id}: duplicate variant id`);
+      if (!target.variants.some(variant => variant.required !== false)) throw new Error(`Target ${target.id}: at least one variant must be required`);
+    }
+    for (const { driver, label } of target.variants?.map(variant => ({ driver: variant.driver, label: `${target.id}/${variant.id}` })) ?? [{ driver: target.driver, label: target.id }]) {
+      if (driver.kind === 'playwright-web' && !driver.urlTemplate) throw new Error(`Target ${label}: playwright-web requires driver.urlTemplate`);
+      if (driver.kind === 'external' && !driver.command) throw new Error(`Target ${label}: external driver requires driver.command`);
+      if (driver.kind === 'playwright-electron') {
+        if (!driver.main || !driver.route) throw new Error(`Target ${label}: playwright-electron requires driver.main and driver.route`);
+        await projectPath(root, path.posix.join(target.root ?? '.', driver.main));
+        if (driver.executablePath) await projectPath(root, driver.executablePath);
+      }
     }
   }
   return config;

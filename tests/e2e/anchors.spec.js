@@ -222,6 +222,37 @@ test('an unavailable device makes native verification NOT_RUN, never PASS', asyn
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('a target with variants passes only when every required variant passes', async () => {
+  test.setTimeout(240000);
+  // One codebase, two runtimes: "ios" works, "android" has no device. Evidence is kept per variant.
+  const driver = file => ({ kind: 'external', command: { argv: [process.execPath, file], timeoutMs: 60000 } });
+  const variants = required => [{ id: 'ios', driver: driver('native-driver.mjs') }, { id: 'android', required, driver: driver('missing-device-driver.mjs') }];
+  const root = await project({ target: { id: 'mobile', platform: 'react-native', visual: undefined, driver: undefined, variants: variants(true) } });
+  try {
+    await writeFile(path.join(root, 'native-driver.mjs'), FAKE_NATIVE_DRIVER);
+    await writeFile(path.join(root, 'missing-device-driver.mjs'), FAKE_NATIVE_DRIVER.replace("process.env.FAKE_DRIVER_DEVICE === 'missing'", 'true'));
+    const manifest = await command(root, ['checkpoint']);
+    const partial = await command(root, ['verify', '--manifest', manifest.id], 2);
+    expect(partial.status).toBe('NOT_RUN');
+    expect(partial.visual.variants.ios.status).toBe('PASS');
+    expect(partial.visual.variants.android).toMatchObject({ required: true, status: 'NOT_RUN' });
+    expect(partial.visual.reason).toMatch(/^android: /);
+    expect(new Set(partial.visual.scenes.map(scene => scene.variant))).toEqual(new Set(['ios', 'android']));
+    expect(partial.visual.artifacts.some(file => file.includes('/mobile/ios/tasks.initial/'))).toBe(true);
+    expect(partial.visual.artifacts.some(file => file.endsWith('/mobile/ios/report.html'))).toBe(true);
+
+    // An optional variant is recorded but does not decide acceptance.
+    const configFile = path.join(root, 'protoflow.config.json');
+    const config = JSON.parse(await readFile(configFile, 'utf8'));
+    config.targets[0].variants = variants(false);
+    await writeFile(configFile, JSON.stringify(config, null, 2));
+    const accepted = await command(root, ['verify', '--manifest', manifest.id]);
+    expect(accepted.status).toBe('PASS');
+    expect(accepted.visual.variants.android).toMatchObject({ required: false, status: 'NOT_RUN' });
+    expect(accepted.visual.tiers.structure.status).toBe('PASS');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('a v1 mapping project migrates to anchors and passes anchored verification', async () => {
   test.setTimeout(180000);
   const root = await mkdtemp(path.join(tmpdir(), 'protoflow-migrate-e2e-'));

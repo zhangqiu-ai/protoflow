@@ -407,9 +407,13 @@ export async function doctor(root, config) {
   });
   await check('verification', () => {
     if (config.schemaVersion === 2) {
-      for (const target of config.targets) if (!target.build || !target.functional) throw new Error(`Target ${target.id} requires build and functional commands`);
+      for (const target of config.targets) {
+        const builds = target.build || target.variants?.every(variant => variant.build);
+        if (!builds || !target.functional) throw new Error(`Target ${target.id} requires build (on the target or every variant) and functional commands`);
+      }
       if (config.policy?.sequentialVersions === false) throw new Error('Runner requires FIFO');
-      return config.targets.map(target => `target ${target.id} (${target.platform}, ${target.driver.kind})`).join('; ') + ': build + functional + anchored tiers';
+      const drivers = target => target.variants ? target.variants.map(variant => `${variant.id}: ${variant.driver.kind}${variant.required === false ? ', optional' : ''}`).join(', ') : target.driver.kind;
+      return config.targets.map(target => `target ${target.id} (${target.platform}, ${drivers(target)})`).join('; ') + ': build + functional + anchored tiers';
     }
     if (!config.verification?.build || !config.verification?.functional || !config.visual?.scenes?.length) throw new Error('Build, functional (Playwright), and visual scenes are required');
     if (!config.mappings.length) throw new Error('Configure prototype/application mappings');

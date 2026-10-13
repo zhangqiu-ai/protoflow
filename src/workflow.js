@@ -6,7 +6,7 @@ import { verifyVisual } from './visual.js';
 import { runAcceptanceAdapter } from './acceptance.js';
 import { loadVersion } from './versions.js';
 import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
-import { selectTarget, targetSettings, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
+import { selectTarget, targetSettings, targetVariants, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 
 const date = () => new Date().toISOString();
 const validId = value => {
@@ -41,12 +41,28 @@ const ANCHOR_CONVENTIONS = {
   web: attribute => `set ${attribute}="<anchor id>" on the element`,
   electron: attribute => `set ${attribute}="<anchor id>" on the renderer element`,
   ios: () => 'set .accessibilityIdentifier("<anchor id>") (SwiftUI) or accessibilityIdentifier (UIKit)',
-  android: () => 'set Modifier.testTag("<anchor id>") with testTagsAsResourceId enabled at the root (Compose), or the configured View locator',
-  flutter: () => 'wrap with Semantics(identifier: "<anchor id>") or a ValueKey("<anchor id>")',
+  android: () => 'set Modifier.testTag("<anchor id>") with semantics { testTagsAsResourceId = true } at the screen root (Compose), or a View id with "." → "__" and "-" → "_" (tasks.add → tasks__add)',
+  flutter: () => 'wrap with Semantics(identifier: "<anchor id>"), and Semantics(container: true, identifier: …) for screens and regions',
   'react-native': () => 'set testID="<anchor id>"'
 };
 const isV2 = config => config.schemaVersion === 2;
 const checkCommands = (config, target) => isV2(config) ? selectTarget(config, target) : config.verification ?? {};
+/**
+ * The build phase: the target's own build, then each variant's build (one codebase, several runtimes). A failed
+ * optional variant build is recorded but does not fail the target; its captures will not pass either.
+ */
+async function buildAll(runPhase, variants, targetBuild) {
+  const own = variants.filter(variant => variant.variant && variant.build);
+  if (!own.length) return runPhase('build', targetBuild);
+  const results = {};
+  const base = targetBuild ? await runPhase('build', targetBuild) : null;
+  if (base && base.status !== 'PASS') return { ...base, variants: {} };
+  for (const variant of own) results[variant.variant] = { required: variant.required, ...(await runPhase(`build:${variant.variant}`, variant.build)) };
+  const required = Object.values(results).filter(result => result.required);
+  const status = required.some(result => result.status === 'FAIL') ? 'FAIL' : required.every(result => result.status === 'PASS') ? 'PASS' : 'NOT_RUN';
+  const failed = Object.entries(results).filter(([, result]) => result.status !== 'PASS').map(([name, result]) => `${name}: ${(result.stderr || result.error || result.status).toString().trim().split('\n').slice(-3).join(' ')}`);
+  return { status, exitCode: status === 'PASS' ? 0 : 1, stdout: base?.stdout ?? '', stderr: failed.join('\n'), ...(base && { target: base }), variants: results };
+}
 /** Context section for anchored prototypes: scope, the affected part of the contract, target conventions and code hints. */
 async function anchorContext(root, config, manifest, version, targetId) {
   const target = selectTarget(config, targetId);
@@ -57,11 +73,16 @@ async function anchorContext(root, config, manifest, version, targetId) {
   const screens = Object.fromEntries(affected.filter(id => contract.screens[id]).map(id => [id, contract.screens[id]]));
   const ids = new Set(Object.values(screens).flatMap(screen => screen.anchors.map(anchor => anchor.id)));
   const convention = ANCHOR_CONVENTIONS[target.platform](settings.locator.attribute);
-  const reach = target.driver.kind === 'playwright-web' ? `Each screen must be reachable at ${target.driver.urlTemplate} ({screen} = screen anchor id, {page} = prototype page path without extension).`
-    : target.driver.kind === 'playwright-electron' ? `This is a real Electron application started from ${target.driver.main} in ${target.root ?? '.'}; each screen must be reachable in its window via route ${target.driver.route} ({screen} = screen anchor id).`
+  const variants = targetVariants(target);
+  const reachOf = ({ driver }) => driver.kind === 'playwright-web' ? `Each screen must be reachable at ${driver.urlTemplate} ({screen} = screen anchor id, {page} = prototype page path without extension).`
+    : driver.kind === 'playwright-electron' ? `This is a real Electron application started from ${driver.main} in ${target.root ?? '.'}; each screen must be reachable in its window via route ${driver.route} ({screen} = screen anchor id).`
     : 'Each screen must be reachable by the configured external driver.';
+  // One codebase on several runtimes: every required variant is verified, so the change must work on each of them.
+  const reach = variants[0].variant
+    ? `This code runs as variants ${variants.map(item => `${item.variant}${item.required ? '' : ' (optional)'}`).join(', ')}; the change must work on every required variant. ${reachOf(variants[0])}`
+    : reachOf(variants[0]);
   return {
-    target: { id: target.id, platform: target.platform, root: target.root ?? '.', driver: target.driver.kind, locator: settings.locator, convention },
+    target: { id: target.id, platform: target.platform, root: target.root ?? '.', driver: variants[0].variant ? Object.fromEntries(variants.map(item => [item.variant, item.driver.kind])) : variants[0].driver.kind, locator: settings.locator, convention },
     scope: manifest.scope ?? null, screens,
     removedScreens: manifest.scope?.removed ?? [],
     anchorIndex: index ? Object.fromEntries(Object.entries(index.anchors).filter(([id]) => ids.has(id))) : null,
@@ -199,7 +220,7 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   };
   // Build may produce project assets. Bind evidence after build, before acceptance.
   const commands = checkCommands(config, target);
-  const build = await runPhase('build', commands.build);
+  const build = await buildAll(runPhase, isV2(config) ? targetVariants(selectTarget(config, target)) : [], commands.build);
   const before = await applicationFingerprint(root, config, target);
   const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
   const functional = !isV2(config) && commands.functional?.adapter === 'acceptance'

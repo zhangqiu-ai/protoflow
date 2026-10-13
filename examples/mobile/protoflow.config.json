@@ -70,6 +70,54 @@
       }
     },
     {
+      "id": "android",
+      "platform": "android",
+      "root": "android",
+      "driver": {
+        "kind": "external",
+        "command": {
+          "argv": [
+            "node",
+            "../../scripts/android-driver.js",
+            "--package",
+            "dev.protoflow.examples.tasks",
+            "--avd",
+            "ProtoFlow_Pixel",
+            "--apk",
+            "android/app/build/outputs/apk/debug/app-debug.apk"
+          ],
+          "timeoutMs": 900000
+        }
+      },
+      "build": {
+        "argv": [
+          "android/gradlew",
+          "-p",
+          "android",
+          "--no-daemon",
+          "-q",
+          "assembleDebug"
+        ],
+        "timeoutMs": 1800000
+      },
+      "functional": {
+        "argv": [
+          "android/gradlew",
+          "-p",
+          "android",
+          "--no-daemon",
+          "-q",
+          "testDebugUnitTest"
+        ],
+        "timeoutMs": 1800000
+      },
+      "viewport": {
+        "width": 360,
+        "height": 730,
+        "scale": 3
+      }
+    },
+    {
       "id": "react-native",
       "platform": "react-native",
       "root": "react-native",
@@ -139,6 +187,7 @@
   "release": {
     "requireTargets": [
       "ios",
+      "android",
       "react-native"
     ]
   }
