@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdtemp, cp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, cp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -31,11 +31,12 @@ async function command(root, args, expectedCode = 0) {
 async function project(targets) {
   const root = await mkdtemp(path.join(tmpdir(), 'protoflow-ios-e2e-'));
   const example = path.join(engine, 'examples/mobile');
-  await cp(example, root, { recursive: true, filter: source => !/(\.protoflow|\/build\/|node_modules|Pods)/.test(path.relative(example, source) + '/') });
+  // Build output (DerivedData) is left out, but not ios/build/generated: React Native codegen writes sources there.
+  await cp(example, root, { recursive: true, filter: source => !/(\.protoflow|DerivedData|node_modules|Pods)/.test(path.relative(example, source)) });
   if (targets.includes('react-native')) {
-    // Reuse the installed JS dependencies and pods of the example instead of reinstalling them.
-    await symlink(path.join(example, 'react-native/node_modules'), path.join(root, 'react-native/node_modules'), 'dir');
-    await symlink(path.join(example, 'react-native/ios/Pods'), path.join(root, 'react-native/ios/Pods'), 'dir');
+    // Reuse the example's installed JS dependencies and pods as APFS clones (cp -c): real directories, so CocoaPods
+    // embeds React.framework as in a normal checkout, without reinstalling. Symlinks produce an app missing frameworks.
+    for (const dir of ['react-native/node_modules', 'react-native/ios/Pods']) await exec('cp', ['-cR', path.join(example, dir), path.join(root, dir)]);
   }
   const configFile = path.join(root, 'protoflow.config.json');
   const config = JSON.parse(await readFile(configFile, 'utf8'));
