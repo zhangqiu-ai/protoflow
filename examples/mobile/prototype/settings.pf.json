@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "screen": "settings",
+  "states": {
+    "saved": {
+      "steps": [{ "action": "toggle", "anchor": "settings.notify-toggle" }, { "action": "tap", "anchor": "settings.save" }],
+      "expect": { "visible": ["settings.saved"] }
+    }
+  }
+}

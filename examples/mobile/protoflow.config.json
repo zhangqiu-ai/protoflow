@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "prototypeDir": "prototype",
+  "anchors": {
+    "attribute": "data-pf",
+    "requireScreenAnchor": true,
+    "tokens": "prototype/tokens.json"
+  },
+  "targets": [
+    {
+      "id": "ios",
+      "platform": "ios",
+      "root": "ios",
+      "driver": {
+        "kind": "external",
+        "command": {
+          "argv": [
+            "node",
+            "../../scripts/ios-driver.js",
+            "--bundle-id",
+            "dev.protoflow.examples.tasks",
+            "--device",
+            "ProtoFlow iPhone 17",
+            "--app",
+            "ios/build/DerivedData/Build/Products/Debug-iphonesimulator/ProtoFlowTasks.app"
+          ],
+          "timeoutMs": 900000
+        }
+      },
+      "build": {
+        "argv": [
+          "xcodebuild",
+          "build",
+          "-project",
+          "ios/ProtoFlowTasks.xcodeproj",
+          "-scheme",
+          "ProtoFlowTasks",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "generic/platform=iOS Simulator",
+          "-derivedDataPath",
+          "ios/build/DerivedData",
+          "CODE_SIGNING_ALLOWED=NO",
+          "-quiet"
+        ],
+        "timeoutMs": 1800000
+      },
+      "functional": {
+        "argv": [
+          "xcodebuild",
+          "test",
+          "-project",
+          "ios/ProtoFlowTasks.xcodeproj",
+          "-scheme",
+          "ProtoFlowTasks",
+          "-destination",
+          "platform=iOS Simulator,name=ProtoFlow iPhone 17",
+          "-derivedDataPath",
+          "ios/build/DerivedData",
+          "CODE_SIGNING_ALLOWED=NO",
+          "-quiet"
+        ],
+        "timeoutMs": 1800000
+      },
+      "viewport": {
+        "width": 402,
+        "height": 778,
+        "scale": 3
+      }
+    },
+    {
+      "id": "react-native",
+      "platform": "react-native",
+      "root": "react-native",
+      "driver": {
+        "kind": "external",
+        "command": {
+          "argv": [
+            "node",
+            "../../scripts/ios-driver.js",
+            "--bundle-id",
+            "dev.protoflow.examples.tasksrn",
+            "--device",
+            "ProtoFlow iPhone 17",
+            "--app",
+            "react-native/ios/build/DerivedData/Build/Products/Release-iphonesimulator/ProtoFlowTasksRN.app"
+          ],
+          "timeoutMs": 900000
+        }
+      },
+      "build": {
+        "argv": [
+          "xcodebuild",
+          "build",
+          "-workspace",
+          "react-native/ios/ProtoFlowTasksRN.xcworkspace",
+          "-scheme",
+          "ProtoFlowTasksRN",
+          "-configuration",
+          "Release",
+          "-destination",
+          "generic/platform=iOS Simulator",
+          "-derivedDataPath",
+          "react-native/ios/build/DerivedData",
+          "CODE_SIGNING_ALLOWED=NO",
+          "-quiet"
+        ],
+        "timeoutMs": 3600000
+      },
+      "functional": {
+        "argv": [
+          "npm",
+          "--prefix",
+          "react-native",
+          "test",
+          "--",
+          "--ci"
+        ],
+        "timeoutMs": 600000
+      },
+      "viewport": {
+        "width": 402,
+        "height": 778,
+        "scale": 3
+      }
+    }
+  ],
+  "policy": {
+    "maxRepairAttempts": 2,
+    "requireHumanReview": true,
+    "sequentialVersions": true
+  },
+  "adapters": {
+    "codex": {
+      "command": null
+    }
+  },
+  "release": {
+    "requireTargets": [
+      "ios",
+      "react-native"
+    ]
+  }
+}

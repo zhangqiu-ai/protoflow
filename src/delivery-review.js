@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
-import { hash, id, fingerprint, projectPath, readJson, writeJson, runCommand } from './util.js';
+import { hash, id, fingerprint, projectPath, readJson, writeJson, runCommand, RUNTIME_DIRS } from './util.js';
 import { loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, deliveryBranch, isMultiTarget } from './streams.js';
 import { loadVersion } from './versions.js';
@@ -159,7 +159,7 @@ async function capture(root, config, options, ownedMerge = null) {
     const entry = treeFiles.get(file);
     if (!entry || !['100644', '100755'].includes(entry[0]) || ((await fs.lstat(await projectPath(worktree, file))).mode & 0o111 ? '100755' : '100644') !== entry[0] || hash(await gitBytes(worktree, ['cat-file', 'blob', entry[2]])) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
   }
-  for (const file of treeFiles.keys()) if (!file.split('/').some(part => ['.protoflow', 'node_modules', 'test-results', 'playwright-report'].includes(part)) && !outside.some(prefix => file === prefix || file.startsWith(`${prefix}/`)) && !Object.hasOwn(application.files, file)) throw blocked('Committed application content was removed after commit');
+  for (const file of treeFiles.keys()) if (!file.split('/').some(part => RUNTIME_DIRS.includes(part)) && !outside.some(prefix => file === prefix || file.startsWith(`${prefix}/`)) && !Object.hasOwn(application.files, file)) throw blocked('Committed application content was removed after commit');
   const source = await loadProgress(root, config, target);
   if (!Array.isArray(options.manifestIds) || !options.manifestIds.length || new Set(options.manifestIds).size !== options.manifestIds.length) throw blocked('Independent review requires exact accepted manifest IDs');
   const entries = options.manifestIds.map(manifestId => source.entries.find(entry => entry.manifestId === manifestId));

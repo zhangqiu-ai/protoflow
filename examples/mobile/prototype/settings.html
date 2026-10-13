@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Settings</title><link rel="stylesheet" href="styles.css"></head>
+<body data-pf="settings" data-pf-role="screen">
+  <header data-pf="settings.header" data-pf-role="region">
+    <h1 data-pf="settings.title">Settings</h1>
+    <a data-pf="settings.back" data-pf-role="action" href="tasks.html">Back</a>
+  </header>
+  <label class="row" data-pf="settings.notify">Daily reminder <input id="notify" data-pf="settings.notify-toggle" data-pf-role="input" type="checkbox"></label>
+  <button id="save" class="wide" data-pf="settings.save" data-pf-role="action" type="button">Save</button>
+  <p id="saved" class="saved" data-pf="settings.saved" hidden>Saved.</p>
+<script src="settings.js"></script>
+</body>
+</html>

@@ -100,11 +100,17 @@ export async function withLock(root, action, name = 'active') {
     if ((await readJson(path.join(directory, 'owner.json'), {})).token === token) await rm(directory, { recursive: true });
   }
 }
+/**
+ * Runtime state, dependency installs and native build output: never application content. Excluded from project hashes,
+ * delivery staging and review bindings at any depth (Xcode DerivedData, CocoaPods, Gradle caches and per-user data).
+ */
+export const RUNTIME_DIRS = ['.protoflow', 'node_modules', 'test-results', 'playwright-report', 'DerivedData', 'Pods', '.gradle', 'xcuserdata'];
+
 /** Project content hash; `exclude` lists project-relative directories (e.g. the prototype) owned by another version stream. */
 export async function fingerprint(root, { exclude = [] } = {}) {
   root = await realpath(root);
   const files = {};
-  const ignored = new Set(['.git', '.protoflow', 'node_modules', 'test-results', 'playwright-report']);
+  const ignored = new Set(['.git', ...RUNTIME_DIRS]);
   const excluded = exclude.map(entry => entry.split(path.sep).join('/').replace(/^\.\/|\/+$/g, ''));
   const visiting = new Set();
   async function walk(relative = '') {

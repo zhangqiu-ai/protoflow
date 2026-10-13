@@ -375,8 +375,8 @@ Context Package 對每個 target 提供：
 | P1 Web 錨點化 ✅ | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
 | P2 多目標 ✅、Electron 驅動器（§16.6） | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
 | P3 Android | `external` 驅動器協定實作、Maestro 參考驅動器、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
-| P4 iOS | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
-| P5 Flutter／React Native | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
+| P4 iOS ✅（§16.10） | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
+| P5 Flutter／React Native（React Native iOS ✅，§16.10） | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
 
 每個階段都需維護可重複測試；真實驗收保存來源 SHA、執行紀錄、驗證與截圖，不以 fixture 冒充。
 
@@ -500,8 +500,17 @@ PASS verification 之後的審查結論也可能是不通過。三種決定分�
 
 ### 16.9 尚未完成
 
-- P3–P5：Android／iOS／Flutter／React Native 參考驅動器與範例應用（暫停）。
+- P3 Android（含 React Native Android）與 P5 Flutter 的參考驅動器與範例應用（暫停）。
 - L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供。
+
+### 16.10 iOS 與 React Native（P4、P5 部分）
+
+- **驅動器**：`scripts/ios-driver.js` 實作外部驅動器協定，以 XCUITest（`drivers/ios/`，host app 加 UI testing bundle）依 bundle id 驅動任何 iOS 應用；runner 依原始碼與 Xcode 版本快取建置。原始快照的解讀在 `src/drivers/ios-tree.js`（純函式，單元測試覆蓋）。選 XCUITest 而非 Maestro：只依賴 Xcode，不需 Java。
+- **內容區域**：host app 量測裝置安全區域（每台裝置快取），截圖裁到該區域，畫面錨點的邊界即該區域。target `viewport` 必須等於安全區域尺寸，原型在同尺寸渲染；SwiftUI 與 React Native 的容器只回報子元素聯集，因此畫面錨點不以容器 frame 為準。
+- **文字**：容器文字比照 `innerText` 依閱讀順序串接；SwiftUI 依階層，React Native（Fabric 將無障礙樹壓平，容器為葉節點）依幾何包含。控制項本身無文字，連帶修正 Web 端 checkbox 回報 `on` 的問題。
+- **引擎修正**：原型中隱藏的錨點在應用端可以不存在（T1）；`DerivedData`、`Pods`、`.gradle`、`xcuserdata` 不計入專案雜湊、交付與審查綁定（`RUNTIME_DIRS`）。
+- **啟動約定**：`-PROTOFLOW_SCREEN`／`-PROTOFLOW_STATE`／`-PROTOFLOW_FIXTURE` launch arguments（`UserDefaults`／RN `Settings`）。iOS 27 強制 UIScene 生命週期，RN 0.87 模板需改為 SceneDelegate。
+- **範例與驗收**：`examples/mobile`（手機原型、SwiftUI、React Native 0.87.1 Release 建置）在 iPhone 17 模擬器（iOS 27）以真實 XCUITest 驗證，結果見 `docs/native-targets.md`；`tests/e2e/ios.spec.js` 為設定 `PROTOFLOW_IOS_DEVICE` 才執行的真實模擬器驗收，CI 不執行。
 
 ## 附錄 A：合約片段
 
