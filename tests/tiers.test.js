@@ -52,6 +52,16 @@ test('T1 structure: multiplicity, visibility, text, role, order and expectations
   assert.deepEqual(compareStructure(screen, state, capture({ 'home.title': null }), capture()).reasons, ['home.title: visible in application but absent from the prototype state']);
 });
 
+test('T1 structure: an anchor hidden in the prototype may be absent from a native application', () => {
+  const hidden = { ...capture().elements['home.go'], visible: false };
+  // Native UI does not keep invisible views: hidden in the prototype ≈ not rendered in the application.
+  assert.equal(compareStructure(screen, state, capture({ 'home.go': hidden }), capture({ 'home.go': null })).status, 'PASS');
+  // A visible prototype anchor must still exist exactly once.
+  assert.deepEqual(compareStructure(screen, state, capture(), capture({ 'home.go': null })).reasons, ['home.go: expected 1 element(s), found 0']);
+  // Repeated anchors keep their exact count.
+  assert.deepEqual(compareStructure(screen, state, capture({ 'home.item': { visible: false } }), capture({ 'home.item': null })).reasons, ['home.item: expected 2 element(s), found 0']);
+});
+
 test('colour parsing and CIEDE2000 match reference values', () => {
   assert.deepEqual(parseColor('#0d766e'), { r: 13, g: 118, b: 110, a: 1 });
   assert.deepEqual(parseColor('rgba(13, 118, 110, 0.5)'), { r: 13, g: 118, b: 110, a: 0.5 });

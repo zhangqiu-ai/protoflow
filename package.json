@@ -1,6 +1,6 @@
 {
   "name": "@zhangqiu-ai/protoflow",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Shared prototype-driven engineering engine and Codex Skill",
   "type": "module",
   "engines": {
@@ -21,6 +21,11 @@
     "scripts/codex-adapter.js",
     "scripts/codex-review-adapter.js",
     "scripts/acceptance-command.js",
+    "scripts/ios-driver.js",
+    "drivers/ios/Host",
+    "drivers/ios/UITests",
+    "drivers/ios/ProtoFlowDriver.xcodeproj/project.pbxproj",
+    "drivers/ios/ProtoFlowDriver.xcodeproj/xcshareddata",
     "docs",
     "examples/modular",
     "examples/anchors",

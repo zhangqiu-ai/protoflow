@@ -41,6 +41,9 @@ export function compareStructure(screen, state, prototype, application) {
       if (right.count && right.visible) reasons.push(`${anchor.id}: visible in application but absent from the prototype state`);
       continue;
     }
+    // Hidden in the prototype and not rendered in the application are the same state: native UI frameworks do not
+    // keep invisible views around the way the DOM keeps hidden elements.
+    if (!anchor.repeat && !left.visible && !right.count) continue;
     if (anchor.repeat ? right.count !== left.count : right.count !== 1) {
       reasons.push(`${anchor.id}: expected ${anchor.repeat ? left.count : 1} element(s), found ${right.count}`);
       continue;

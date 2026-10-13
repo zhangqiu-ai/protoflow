@@ -39,6 +39,7 @@ function inspect({ attribute, ids }) {
   const interactiveTags = ['BUTTON', 'SELECT', 'SUMMARY', 'TEXTAREA'];
   // Every input control a user can set counts as editable (text, checkbox, radio, range, file, colour...).
   const nonEditableTypes = ['hidden', 'button', 'submit', 'reset', 'image'];
+  const textEntryTypes = ['text', 'email', 'password', 'search', 'tel', 'url', 'number', 'date', 'time', 'datetime-local', 'month', 'week'];
   const facts = {};
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
@@ -58,7 +59,9 @@ function inspect({ attribute, ids }) {
       enabled: !(node.disabled || node.getAttribute('aria-disabled') === 'true'),
       interactive, editable, inputType: type,
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      text: tag === 'INPUT' || tag === 'TEXTAREA' ? node.value || node.getAttribute('placeholder') || '' : node.innerText,
+      // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
+      // matching native controls whose label lives in a separate text element.
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : node.innerText,
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
   }

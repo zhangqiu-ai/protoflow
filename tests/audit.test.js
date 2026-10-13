@@ -120,6 +120,18 @@ test('fingerprint rejects internal symlinks into ignored state and tracks regula
   assert.notEqual(before.files['src/linked.js'], after.files['src/linked.js']);
 });
 
+test('fingerprint ignores native build output and dependency installs at any depth', async t => {
+  const { root } = await fixture(t);
+  const before = await fingerprint(root);
+  for (const dir of ['ios/build/DerivedData/Build', 'ios/Pods/Headers', 'android/.gradle/8.0', 'ios/App.xcodeproj/xcuserdata']) {
+    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await fs.writeFile(path.join(root, dir, 'output.bin'), 'generated');
+  }
+  assert.equal((await fingerprint(root)).hash, before.hash);
+  await fs.writeFile(path.join(root, 'ios/build/Info.plist'), 'source-like');
+  assert.notEqual((await fingerprint(root)).hash, before.hash);
+});
+
 test('project paths reject unresolved or escaping symlinks before writes', async t => {
   const { root } = await fixture(t);
   await fs.symlink(path.join(root, 'missing-target'), path.join(root, 'broken'));

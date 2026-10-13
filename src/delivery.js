@@ -1,6 +1,6 @@
 import { createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerStatePath, isMultiTarget } from './streams.js';
-import { projectPath, readJson, writeJson, id, hash } from './util.js';
+import { projectPath, readJson, writeJson, id, hash, RUNTIME_DIRS } from './util.js';
 import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict } from './delivery-review.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
 import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient } from './delivery-scope.js';
@@ -9,7 +9,7 @@ import { verificationRevocation } from './queue.js';
 // The automated approver is recorded as such; it never stands in for a named human.
 export const AUTOMATED_REVIEWER = 'ai:codex-independent-review';
 // Runner state, dependencies and test output never belong in an application commit; node_modules may be a symlink.
-const EXCLUDED = ['.protoflow', 'node_modules', 'test-results', 'playwright-report'];
+const EXCLUDED = RUNTIME_DIRS;
 const settled = delivery => ['MERGED', 'PR_OPEN_MANUAL', 'REVOKED'].includes(delivery.status);
 const protectedPath = /(?:^|\/)(?:\.git|\.protoflow|\.agents|\.codex|\.aws|\.ssh|node_modules|test-results|playwright-report|secrets?|credentials|\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx))(?:\/|$)/i;
 function allowPath(value, config) {

@@ -175,7 +175,8 @@ try {
     if (!count) { missing.push(anchor); continue; }
     const first = nodes.first();
     const box = await first.boundingBox();
-    const facts = await first.evaluate(node => ({ text: node.matches('input,textarea') ? node.value || node.placeholder || '' : node.innerText, tag: node.tagName }));
+    // Native rule: text-entry fields report value or placeholder; other controls (checkbox, switch) have no text.
+    const facts = await first.evaluate(node => ({ text: node.matches('textarea,input:not([type]),input[type=text],input[type=email],input[type=password],input[type=search]') ? node.value || node.placeholder || '' : node.matches('input') ? '' : node.innerText, tag: node.tagName }));
     elements.push({ anchor, count, visible: await first.isVisible(), enabled: await first.isEnabled(), interactive: ['BUTTON', 'A', 'INPUT'].includes(facts.tag), editable: facts.tag === 'INPUT',
       bounds: box ?? { x: 0, y: 0, width: 0, height: 0 }, text: facts.text });
   }
