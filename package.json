@@ -1,6 +1,6 @@
 {
   "name": "@zhangqiu-ai/protoflow",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Shared prototype-driven engineering engine and Codex Skill",
   "type": "module",
   "engines": {
@@ -22,6 +22,14 @@
     "scripts/codex-review-adapter.js",
     "scripts/acceptance-command.js",
     "scripts/ios-driver.js",
+    "scripts/android-driver.js",
+    "drivers/android/build.gradle.kts",
+    "drivers/android/settings.gradle.kts",
+    "drivers/android/gradle.properties",
+    "drivers/android/gradlew",
+    "drivers/android/gradle/wrapper",
+    "drivers/android/driver/build.gradle.kts",
+    "drivers/android/driver/src",
     "drivers/ios/Host",
     "drivers/ios/UITests",
     "drivers/ios/ProtoFlowDriver.xcodeproj/project.pbxproj",

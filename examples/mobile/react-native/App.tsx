@@ -1,13 +1,14 @@
 /**
  * ProtoFlow React Native example: the same two screens as ../prototype, anchors as testID.
- * Launch convention: -PROTOFLOW_SCREEN <screen> opens a screen directly (read through Settings / NSUserDefaults).
+ * Launch convention: PROTOFLOW_SCREEN opens a screen directly — an initial prop on Android (intent extra, see
+ * MainActivity), a launch argument on iOS (read through Settings / NSUserDefaults).
  */
 import React, { useState } from 'react';
-import { Keyboard, Pressable, Settings, StatusBar, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Keyboard, Platform, Pressable, Settings, StatusBar, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 const colors = { accent: '#0d766e', ink: '#18323c', canvas: '#f2f5f7', surface: '#ffffff', border: '#d9e2e5', danger: '#ad3f3c', track: '#e9e9eb' };
-const launchScreen: string | undefined = Settings.get('PROTOFLOW_SCREEN');
+const iosLaunchScreen = (): string | undefined => (Platform.OS === 'ios' ? Settings.get('PROTOFLOW_SCREEN') : undefined);
 
 function Header({ prefix, title, action, onPress }: { prefix: string; title: string; action: string; onPress: () => void }) {
   return (
@@ -71,8 +72,8 @@ function SettingsScreen({ open }: { open: (screen: string) => void }) {
   );
 }
 
-export default function App() {
-  const [screen, setScreen] = useState(launchScreen ?? 'tasks');
+export default function App(props: { PROTOFLOW_SCREEN?: string }) {
+  const [screen, setScreen] = useState(props.PROTOFLOW_SCREEN ?? iosLaunchScreen() ?? 'tasks');
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="dark-content" />

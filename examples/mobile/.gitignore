@@ -5,3 +5,7 @@ react-native/ios/Pods/
 react-native/ios/build/
 react-native/vendor/
 react-native/.bundle/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

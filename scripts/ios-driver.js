@@ -96,7 +96,7 @@ async function runner(cache) {
     xctestrun = await find();
     if (build.code !== 0 || !xctestrun) return { error: `the XCUITest driver runner could not be built: ${tail(build.stderr || build.stdout)}` };
   }
-  return { xctestrun: path.join(products, xctestrun) };
+  return { xctestrun: path.join(products, xctestrun), directory: derived };
 }
 
 async function main() {
@@ -129,7 +129,8 @@ async function main() {
   const outputDir = path.resolve(request.outputDir);
   await mkdir(outputDir, { recursive: true });
   await rm(path.join(outputDir, 'raw.json'), { force: true });
-  const safeAreaFile = path.join(cache, `safe-area-${device.udid}.json`);
+  // Measured by this runner build: a changed probe invalidates the cached safe area with the runner.
+  const safeAreaFile = path.join(built.directory, `safe-area-${device.udid}.json`);
   const safeArea = JSON.parse(await readFile(safeAreaFile, 'utf8').catch(() => 'null'));
   const job = {
     bundleId: values['bundle-id'], screen: request.screen, steps: request.steps, outputDir, timeoutMs, launchTimeoutMs,

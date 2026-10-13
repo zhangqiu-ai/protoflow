@@ -278,6 +278,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         if (previous.some(file => !inScope(file, options.paths))) throw new Error('Existing Git index contains changes outside the delivery allowlist; preserve it for inspection');
       }
       // Stage, then unstage exclusions: naming a gitignored path in an add pathspec makes git exit non-zero.
+      // `add -A` leaves Git-ignored files out, matching applicationFingerprint, which binds only committable content.
       await git(worktree, ['add', '-A', '--', ...(options.paths ?? ['.'])]);
       await git(worktree, ['reset', '-q', '--', ...EXCLUDED]);
       const included = (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);

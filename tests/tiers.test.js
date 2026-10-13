@@ -52,6 +52,20 @@ test('T1 structure: multiplicity, visibility, text, role, order and expectations
   assert.deepEqual(compareStructure(screen, state, capture({ 'home.title': null }), capture()).reasons, ['home.title: visible in application but absent from the prototype state']);
 });
 
+test('T1 structure: sibling order is reading order, so a taller touch target beside a title stays to its right', () => {
+  const row = { anchors: [{ id: 'bar', role: 'screen', parent: null }, { id: 'bar.title', role: 'element', parent: 'bar' }, { id: 'bar.action', role: 'action', parent: 'bar' }] };
+  const capture = (title, action) => ({ elements: {
+    bar: { count: 1, visible: true, bounds: box(0, 0, 360, 100), text: '' },
+    'bar.title': { count: 1, visible: true, bounds: title, text: '' },
+    'bar.action': { count: 1, visible: true, interactive: true, bounds: action, text: '' }
+  } });
+  // Android: the 48 dp action starts 7 dp above the 33 dp title on the same row.
+  const web = capture(box(20, 21, 79, 34), box(320, 28, 62, 20));
+  assert.equal(compareStructure(row, state, web, capture(box(20, 22, 75, 33), box(278, 14, 62, 48))).status, 'PASS');
+  // Really above: a different row.
+  assert.match(compareStructure(row, state, web, capture(box(20, 60, 75, 33), box(278, 0, 62, 20))).reasons[0], /child order/);
+});
+
 test('T1 structure: an anchor hidden in the prototype may be absent from a native application', () => {
   const hidden = { ...capture().elements['home.go'], visible: false };
   // Native UI does not keep invisible views: hidden in the prototype ≈ not rendered in the application.

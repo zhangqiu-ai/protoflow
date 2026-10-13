@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { loadConfig, configSchemaV2 } from '../src/config.js';
 import { captureExternal } from '../src/drivers/external.js';
-import { scenesFor, targetSettings } from '../src/targets.js';
+import { scenesFor, targetSettings, targetVariants } from '../src/targets.js';
 import { staticContract } from '../src/anchors.js';
 
 const exec = promisify(execFile);
@@ -162,4 +162,14 @@ test('captures must match the requested viewport even when both sides are equall
   const exact = { viewport: { ...requested }, screenshot: png(1440, 1000) };
   assert.deepEqual(captureSizeIssues(requested, { prototype: exact, application: exact }), []);
   assert.deepEqual(captureSizeIssues({ width: 400, height: 300, scale: 2 }, { application: { viewport: { width: 400, height: 300, scale: 2 }, screenshot: png(800, 600) } }), []);
+});
+
+test('targetVariants: a plain target is its own capture; variants override the target fields', () => {
+  const plain = { id: 'web', platform: 'web', driver: { kind: 'playwright-web', urlTemplate: 'app/{page}.html' } };
+  assert.deepEqual(targetVariants(plain), [{ ...plain, variant: null, required: true }]);
+  const mobile = { id: 'mobile', platform: 'react-native', root: 'app', viewport: { width: 402, height: 778, scale: 3 }, tiers: { visual: 'advisory' },
+    variants: [{ id: 'ios', driver: { kind: 'external', command: { argv: ['ios'] } } }, { id: 'android', required: false, driver: { kind: 'external', command: { argv: ['android'] } }, viewport: { width: 360, height: 755, scale: 3 } }] };
+  const [ios, android] = targetVariants(mobile);
+  assert.deepEqual(ios, { id: 'mobile', platform: 'react-native', root: 'app', viewport: { width: 402, height: 778, scale: 3 }, tiers: { visual: 'advisory' }, driver: { kind: 'external', command: { argv: ['ios'] } }, variant: 'ios', required: true });
+  assert.deepEqual([android.variant, android.required, android.viewport.width, android.root, 'variants' in android], ['android', false, 360, 'app', false]);
 });

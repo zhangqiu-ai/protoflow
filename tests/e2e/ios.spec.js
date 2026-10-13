@@ -40,17 +40,18 @@ async function project(targets) {
   }
   const configFile = path.join(root, 'protoflow.config.json');
   const config = JSON.parse(await readFile(configFile, 'utf8'));
-  config.targets = config.targets.filter(target => targets.includes(target.id)).map(target => {
-    const swap = value => value === '../../scripts/ios-driver.js' ? path.join(engine, 'scripts/ios-driver.js') : value.replace('ProtoFlow iPhone 17', device);
-    const argv = target.driver.command.argv.map(swap);
-    return {
-      ...target,
-      driver: { ...target.driver, command: { ...target.driver.command, argv: [...argv, '--cache', path.join(engine, '.protoflow/cache/ios-driver')] } },
-      functional: target.functional && { ...target.functional, argv: target.functional.argv.map(swap) }
-    };
-  });
+  const swap = value => value === '../../scripts/ios-driver.js' ? path.join(engine, 'scripts/ios-driver.js') : value.replace('ProtoFlow iPhone 17', device);
+  const withCache = driver => ({ ...driver, command: { ...driver.command, argv: [...driver.command.argv.map(swap), '--cache', path.join(engine, '.protoflow/cache/ios-driver')] } });
+  config.targets = config.targets.filter(target => targets.includes(target.id)).map(target => ({
+    ...target,
+    // Only the iOS variant of a multi-platform target: this suite needs a simulator, not an emulator.
+    ...(target.variants ? { variants: target.variants.filter(variant => variant.id === 'ios').map(variant => ({ ...variant, driver: withCache(variant.driver) })) } : { driver: withCache(target.driver) }),
+    functional: target.functional && { ...target.functional, argv: target.functional.argv.map(swap) }
+  }));
   if (config.release) config.release.requireTargets = config.release.requireTargets.filter(id => targets.includes(id));
   await writeFile(configFile, JSON.stringify(config, null, 2));
+  // A real project is a Git checkout: its .gitignore keeps build output (Gradle, Flutter, codegen) out of evidence.
+  for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=e2e', '-c', 'user.email=e2e@example.test', 'commit', '-qm', 'example']]) await exec('git', args, { cwd: root });
   return root;
 }
 const edit = async (root, file, from, to) => {
@@ -93,6 +94,7 @@ test.describe('iOS reference driver', () => {
       const manifest = await command(root, ['checkpoint', '--summary', 'mobile v1']);
       const verification = await command(root, ['verify', '--manifest', manifest.id]);
       expect(verification.visual.platform).toBe('react-native');
+      expect(Object.keys(verification.visual.variants)).toEqual(['ios']);
       for (const tier of ['structure', 'tokens', 'layout']) expect(verification.visual.tiers[tier].status).toBe('PASS');
     } finally { await rm(root, { recursive: true, force: true }); }
   });

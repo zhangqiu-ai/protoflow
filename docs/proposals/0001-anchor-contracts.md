@@ -374,9 +374,9 @@ Context Package 對每個 target 提供：
 | P0 規格 ✅ | 審定錨點語法、sidecar、合約、驅動器協定的 JSON Schema；決定 §15 待決問題 | Schema 與範例檢入；本提案狀態改為「已接受」 |
 | P1 Web 錨點化 ✅ | `contract.js`、合約差異範圍、`playwright-web` 驅動器、T1–T4、v1 相容層、`anchors suggest/lint`、`migrate anchors` | 單元與 Playwright E2E 覆蓋四層；`protoflow-test` 遷移到錨點並以真實 GitHub＋Codex 跑完至少兩個版本（含新增畫面且**不需** `runner configure`） |
 | P2 多目標 ✅、Electron 驅動器（§16.6） | `targets[]`、per-target 佇列／worktree／交付、`playwright-electron` | 同一原型驅動 Web 與 Electron 兩個 target，各自 PASS 並各自交付 |
-| P3 Android | `external` 驅動器協定實作、Maestro 參考驅動器、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
+| P3 Android ✅（[0002](0002-android-flutter.md)） | `external` 驅動器協定實作、參考驅動器（實作為 UiAutomator，見 0002 D1）、T2 取樣與 T4 感知相似度 | Compose 範例應用在模擬器上 T1–T3 required PASS；故障情境（無模擬器、逾時）記 NOT_RUN 且有測試 |
 | P4 iOS ✅（§16.10） | XCUITest 或 Maestro 參考驅動器（macOS 限定） | SwiftUI 範例應用在模擬器上 T1–T3 required PASS |
-| P5 Flutter／React Native（React Native iOS ✅，§16.10） | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
+| P5 Flutter／React Native ✅（§16.10、[0002](0002-android-flutter.md)） | 定位約定與參考驅動器 | 各一個範例應用 T1 PASS |
 
 每個階段都需維護可重複測試；真實驗收保存來源 SHA、執行紀錄、驗證與截圖，不以 fixture 冒充。
 
@@ -500,7 +500,7 @@ PASS verification 之後的審查結論也可能是不通過。三種決定分�
 
 ### 16.9 尚未完成
 
-- P3 Android（含 React Native Android）與 P5 Flutter 的參考驅動器與範例應用（暫停）。
+- Android、Flutter 與 target variants 由 [提案 0002](0002-android-flutter.md) 完成；Expo 範例待辦。
 - L2／L3 的規格與 ADR 仍由 `runner.spec`／`runner.adr` 靜態提供。
 
 ### 16.10 iOS 與 React Native（P4、P5 部分）

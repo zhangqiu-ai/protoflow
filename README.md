@@ -109,7 +109,8 @@ protoflow install --personal --project /path/to/app
 - **原型**：每頁一個畫面錨點（建議 `<body data-pf="checkout" data-pf-role="screen">`），需要追蹤的元素標上 `data-pf="checkout.pay"`；狀態寫在同目錄的 `<page>.pf.json`，步驟只引用錨點。可選 `prototype/tokens.json`（W3C Design Tokens）。
 - **應用**：以該平台原生的測試標記帶上完全相同的 ID——Web／Electron `data-testid`、iOS `accessibilityIdentifier`、Android `testTag`、Flutter `Semantics(identifier:)`、React Native `testID`。
 - **配置**：`targets` 描述應用平台與驅動器（內建 `playwright-web`，原生平台以 `external` 驅動器協定接入，見 `schemas/driver-*.schema.json`）。不需要 `mappings`、`visual.scenes`，新增畫面也不需改配置。
-- **iOS／React Native**：內建 iOS 參考驅動器 `scripts/ios-driver.js`（`external` 驅動器，XCUITest，依 bundle id 驅動 SwiftUI、UIKit 與 React Native 應用），在模擬器上擷取無障礙樹與截圖，裁到安全區域後以 T1–T3 required、T4 advisory 驗收。應用以 `-PROTOFLOW_SCREEN` 啟動參數直接打開畫面。見 [原生 target](docs/native-targets.md) 與 [examples/mobile](examples/mobile/)。
+- **原生平台**：內建兩個參考驅動器（`external` 驅動器）——iOS 的 `scripts/ios-driver.js`（XCUITest，依 bundle id）與 Android 的 `scripts/android-driver.js`（UiAutomator，依 package），驅動 SwiftUI、UIKit、Compose、View、React Native 與 Flutter 應用；擷取無障礙樹與截圖、裁到內容區域後以 T1–T3 required、T4 advisory 驗收。應用以 `PROTOFLOW_SCREEN` 啟動參數（iOS launch argument、Android intent extra）直接打開畫面。見 [原生 target](docs/native-targets.md) 與 [examples/mobile](examples/mobile/)。
+- **target 變體**：同一份程式碼跑在多個平台（React Native、Flutter）時，一個 target 以 `variants` 列出 `ios`、`android` 等執行變體；每個必要變體都 PASS 才接受，交付仍只有一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
 - **範圍**：checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響畫面與錨點；錨點無效的版本不會產生。
 - **分層驗收**：T1 結構語意、T2 token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM）。各 target 設定 `required`／`advisory`／`off`；Web 預設全部 required 並全量回歸，原生預設 T4 advisory、`affected+smoke` 回歸。
 - **工具**：`protoflow anchors lint|suggest`、`protoflow contract show --manifest <id>`、`protoflow migrate anchors`（v1 → v2 草稿：原型 patch、應用 patch、v2 配置）。

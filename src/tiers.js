@@ -24,8 +24,11 @@ function siblingOrder(capture, ids, byIndex) {
   return [...ids].sort((a, b) => {
     const left = element(capture, a), right = element(capture, b);
     if (byIndex) return left.index - right.index;
-    const dy = left.bounds.y - right.bounds.y;
-    return Math.abs(dy) > 1 ? dy : left.bounds.x - right.bounds.x;
+    // Reading order: centres within half the smaller height share a row (a 48 dp touch target next to a title is
+    // still to its right), then left to right.
+    const l = left.bounds, r = right.bounds;
+    const dy = (l.y + l.height / 2) - (r.y + r.height / 2);
+    return Math.abs(dy) > Math.max(1, Math.min(l.height, r.height) / 2) ? dy : l.x - r.x;
   });
 }
 

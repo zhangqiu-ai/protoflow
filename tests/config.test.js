@@ -74,3 +74,28 @@ test('adapters.codex.ignoreUserConfig is an optional boolean in both config sche
   const v2 = { schemaVersion: 2, prototypeDir: 'prototype', targets: [{ id: 'web', platform: 'web', driver: { kind: 'playwright-web', urlTemplate: 'app/{page}.html' } }], adapters: { codex: { command: null, ignoreUserConfig: false } } };
   await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(v2)); assert.deepEqual(await loadConfig(root), v2);
 });
+
+test('a target configures either one driver or variants of one codebase', async t => {
+  const root = await target(t);
+  const external = argv => ({ kind: 'external', command: { argv } });
+  const mobile = { id: 'mobile', platform: 'react-native', build: { argv: ['npm', 'run', 'bundle'] }, functional: { argv: ['npm', 'test'] }, viewport: { width: 402, height: 778, scale: 3 },
+    variants: [
+      { id: 'ios', driver: external(['node', 'ios-driver.js']), build: { argv: ['xcodebuild', 'build'] } },
+      { id: 'android', required: false, driver: external(['node', 'android-driver.js']), viewport: { width: 360, height: 755, scale: 3 } }
+    ] };
+  const write = targets => writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ schemaVersion: 2, prototypeDir: 'prototype', targets }));
+  await write([mobile]);
+  assert.deepEqual((await loadConfig(root)).targets[0], mobile);
+  await write([{ ...mobile, driver: external(['node', 'x.js']) }]);
+  await assert.rejects(loadConfig(root), /configure either driver or variants/);
+  await write([{ ...mobile, variants: undefined }]);
+  await assert.rejects(loadConfig(root), /configure either driver or variants/);
+  await write([{ ...mobile, variants: [mobile.variants[0], { ...mobile.variants[1], id: 'ios' }] }]);
+  await assert.rejects(loadConfig(root), /duplicate variant id/);
+  await write([{ ...mobile, variants: mobile.variants.map(variant => ({ ...variant, required: false })) }]);
+  await assert.rejects(loadConfig(root), /at least one variant must be required/);
+  await write([{ ...mobile, variants: [{ id: 'ios', driver: { kind: 'external' } }] }]);
+  await assert.rejects(loadConfig(root), /Target mobile\/ios: external driver requires driver.command/);
+  await write([{ ...mobile, variants: [{ id: 'ios', driver: external(['node', 'x.js']), functional: { argv: ['x'] } }] }]);
+  await assert.rejects(loadConfig(root), /Invalid ProtoFlow config/);
+});

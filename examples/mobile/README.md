@@ -1,34 +1,43 @@
-# 原生範例：iOS（SwiftUI）與 React Native
+# 原生範例：iOS、Android、React Native 與 Flutter
 
-同一份手機原型（`prototype/`，兩個畫面 tasks、settings）驅動兩個原生應用：
+同一份手機原型（`prototype/`，兩個畫面 tasks、settings）驅動四份應用程式碼、六個執行平台：
 
 ```text
 prototype/        手機尺寸的 HTML 原型，data-pf 錨點與 *.pf.json 狀態
-ios/              SwiftUI 應用，accessibilityIdentifier 帶相同錨點 ID
-react-native/     React Native 應用，testID 帶相同錨點 ID（iOS 驗收）
-protoflow.config.json   target ios（與 react-native），外部驅動器 scripts/ios-driver.js
+ios/              SwiftUI 應用（target ios），accessibilityIdentifier；XCUITest 功能測試
+android/          Compose 應用（target android），testTag + testTagsAsResourceId；Robolectric 功能測試
+react-native/     React Native 0.87.1（target react-native，變體 ios、android），testID；Jest 功能測試
+flutter/          Flutter 3.47（target flutter，變體 ios、android），Semantics(identifier:)；flutter test
+protoflow.config.json   四個 target，release.requireTargets 要求全部接受
 ```
 
-應用遵守 [原生 target 約定](../../docs/native-targets.md)：讀取 `-PROTOFLOW_SCREEN` 啟動參數直接打開畫面；畫面與 region 容器以 `.accessibilityElement(children: .contain)`（SwiftUI）包住子元素。
+應用遵守 [原生 target 約定](../../docs/native-targets.md)：以 `PROTOFLOW_SCREEN` 啟動參數（iOS launch argument、Android intent extra）直接打開畫面；畫面與 region 容器把錨點放在容器上。React Native 與 Flutter 是一份程式碼兩個平台，以 [target 變體](../../docs/native-targets.md#target-變體一份程式碼多個平台) 表達，交付只有一次。
 
-在共享引擎根目錄執行（需要 macOS、Xcode 與名為 `ProtoFlow iPhone 17` 的模擬器）：
+## 環境
+
+- iOS：macOS、Xcode，模擬器 `ProtoFlow iPhone 17`：
+
+  ```sh
+  xcrun simctl create "ProtoFlow iPhone 17" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0
+  ```
+
+- Android：JDK 17、Android SDK，AVD `ProtoFlow_Pixel`（480 dpi、硬體鍵盤，見原生 target 文件）；執行前匯出 `JAVA_HOME`、`ANDROID_HOME`。
+- React Native：`cd react-native && npm install`，`cd ios && LANG=en_US.UTF-8 pod install`。
+- Flutter：`flutter` 在 `PATH`；`flutter/tool/flutterw` 讓命令在 Flutter 專案內執行。
+
+## 執行
+
+在共享引擎根目錄：
 
 ```sh
-xcrun simctl create "ProtoFlow iPhone 17" com.apple.CoreSimulator.SimDeviceType.iPhone-17 com.apple.CoreSimulator.SimRuntime.iOS-27-0
 node bin/protoflow.js checkpoint --project examples/mobile --summary "Mobile v1"
 node bin/protoflow.js verify --project examples/mobile --manifest MANIFEST_ID --target ios
-```
-
-React Native target 需要先安裝依賴（CocoaPods 需要 UTF-8 語系）：
-
-```sh
-cd examples/mobile/react-native && npm install
-cd ios && LANG=en_US.UTF-8 pod install
+node bin/protoflow.js verify --project examples/mobile --manifest MANIFEST_ID --target android
 node bin/protoflow.js verify --project examples/mobile --manifest MANIFEST_ID --target react-native
+node bin/protoflow.js verify --project examples/mobile --manifest MANIFEST_ID --target flutter
+node bin/protoflow.js queue --project examples/mobile
 ```
 
-React Native 以 Release 配置建置，JS bundle 打包進 `.app`，驗證時不需要 Metro。`release.requireTargets` 要求兩個 target 都接受後版本才發佈。
+`verify` 先以 target（與每個變體）的 `build` 建置，執行 `functional`，再逐一場景由驅動器安裝、啟動、重放步驟並擷取。報告位於 `.protoflow/artifacts/VER_ID/<target>[/<variant>]/report.html`。React Native 以 Release 建置（JS bundle 打包進 app／APK），不需要 Metro。
 
-兩個 target 都有自己的功能測試：SwiftUI 為 `ios/ProtoFlowTasksUITests`（XCUITest，`functional` 以 `xcodebuild test` 在同一台模擬器執行），React Native 為 `react-native/__tests__`（Jest）。
-
-`verify` 先以 target 的 `build` 建置 `.app`，再逐一場景由驅動器安裝、啟動、重放步驟並擷取。報告位於 `.protoflow/artifacts/VER_ID/report.html`。
+Android 與 Flutter 的開關使用 Material 3 尺寸（52 dp），與原型的 iOS 樣式（61 pt）不同，以 `deviations` 宣告為已審核的平台差異。
