@@ -23,7 +23,7 @@ const realGit = (await exec('which', ['git'])).stdout.trim();
 const fixtureUrl = 'https://github.com/protoflow-fixture/application.git';
 const fixtureRepository = 'github.com/protoflow-fixture/application';
 
-async function fixture(t, { merge = 'auto', versions = 1 } = {}) {
+async function fixture(t, { merge = 'auto', versions = 1, generated = false } = {}) {
   const base = await fs.mkdtemp(path.join('/tmp', 'protoflow-delivery-review-fake-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const remote = path.join(base, 'remote.git');
@@ -52,6 +52,12 @@ async function fixture(t, { merge = 'auto', versions = 1 } = {}) {
   await fs.symlink(path.join(base, 'shared-node-modules'), path.join(worktree, 'node_modules'));
   await fs.mkdir(path.join(worktree, 'test-results'));
   await fs.writeFile(path.join(worktree, 'test-results/out.txt'), 'x');
+  if (generated) {
+    // React Native codegen / Expo CNG shape: generated native sources under a directory the app's own .gitignore ignores.
+    await fs.writeFile(path.join(worktree, 'app/.gitignore'), 'build/\n');
+    await fs.mkdir(path.join(worktree, 'app/ios/build/generated/ios'), { recursive: true });
+    await fs.writeFile(path.join(worktree, 'app/ios/build/generated/ios/RCTAppDependencyProvider.h'), '// FAKE codegen output\n');
+  }
 
   const shas = Array.from({ length: versions }, (_, index) => `${String(index + 1).repeat(8)}${'a'.repeat(32)}`);
   await saveSourceState(root, { schemaVersion: 1, status: 'READY', entries: shas.map((sha, index) => ({ sha, manifestId: `git-${sha}`, ordinal: index + 1, status: 'PASS', verificationId: `VER-${index + 1}`, attempts: [{ executionId: `EXEC-fixture-${index + 1}`, executionStatus: 'PASS', status: 'PASS' }] })) });
@@ -131,6 +137,42 @@ test('delivery commits only application files, pushes, opens a PR with evidence 
   const again = await syncDeliveries(root, config);
   assert.equal(again.status, 'IDLE');
   assert.equal((await gh()).prs[0].comments.length, 1);
+});
+
+test('git-ignored generated native sources are outside the bound application, so the gated delivery merges', async t => {
+  const { root, worktree, config } = await fixture(t, { generated: true });
+  const generated = 'app/ios/build/generated/ios/RCTAppDependencyProvider.h';
+  const report = await readJson(path.join(root, '.protoflow/verifications/VER-1.json'));
+  assert.ok(!Object.hasOwn(report.project.files, generated));
+  assert.ok(Object.hasOwn(report.project.files, 'app/.gitignore'));
+  const result = await syncDeliveries(root, config);
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const [delivery] = result.deliveries;
+  assert.equal(delivery.status, 'MERGED');
+  assert.deepEqual((await git(worktree, 'show', '--name-only', '--format=', delivery.commit)).split('\n'), ['app/.gitignore', 'app/index.html']);
+  await fs.access(path.join(worktree, generated));
+});
+
+test('FAKE provider: regenerating git-ignored output keeps a review valid; tracked or untracked content drift still blocks', async t => {
+  for (const mode of ['regenerated', 'tracked', 'untracked']) {
+    await t.test(mode, async t => {
+      const f = await fixture(t, { generated: true });
+      await git(f.worktree, 'add', 'app'); await git(f.worktree, 'commit', '-q', '-m', 'FAKE generated binding fixture');
+      const commit = await git(f.worktree, 'rev-parse', 'HEAD');
+      assert.equal(await git(f.worktree, 'ls-files', 'app/ios'), '');
+      const options = { worktree: f.worktree, commit, manifestIds: (await sourceStatus(f.root)).entries.map(entry => entry.manifestId) };
+      const review = await requestIndependentReview(f.root, f.config, options);
+      assert.equal(review.status, 'PASS', review.reason);
+      if (mode === 'regenerated') {
+        await fs.writeFile(path.join(f.worktree, 'app/ios/build/generated/ios/RCTAppDependencyProvider.h'), '// FAKE regenerated codegen output\n');
+        await fs.writeFile(path.join(f.worktree, 'app/ios/build/generated/ios/RCTThirdPartyComponentsProvider.h'), '// FAKE new codegen output\n');
+        await assertIndependentReview(f.root, f.config, review.id);
+      } else {
+        await fs.writeFile(path.join(f.worktree, mode === 'tracked' ? 'app/index.html' : 'app/extra.js'), 'drift\n');
+        await assert.rejects(assertIndependentReview(f.root, f.config, review.id), error => error.code === 'INDEPENDENT_REVIEW_BLOCKED');
+      }
+    });
+  }
 });
 
 test('versions accepted since the last delivery share one commit naming each prototype commit', async t => {
@@ -605,8 +647,8 @@ test('FAKE provider: gate binds full content, source/new VER/base and a distinct
   assert.equal(review.status, 'PASS', review.reason);
   const checked = await assertIndependentReview(f.root, f.config, review.id);
   assert.equal(checked.binding.commit, f.commit); assert.equal(checked.binding.tree, await git(f.worktree, 'rev-parse', 'HEAD^{tree}'));
-  assert.equal(checked.binding.contentHash, (await fingerprint(f.worktree)).hash);
-  assert.equal(checked.binding.applicationHash, (await fingerprint(f.worktree, { exclude: ['prototype'] })).hash);
+  assert.equal(checked.binding.contentHash, (await fingerprint(f.worktree, { gitIgnore: true })).hash);
+  assert.equal(checked.binding.applicationHash, (await fingerprint(f.worktree, { exclude: ['prototype'], gitIgnore: true })).hash);
   assert.equal(checked.binding.versions[0].verificationId, 'VER-1'); assert.equal(checked.binding.executors[0].sessionId, 'executor-fixture-1');
   assert.notEqual(checked.sessionId, checked.binding.executors[0].sessionId); assert.equal(checked.binding.remote.baseSha, await git(f.remote, 'rev-parse', 'main'));
   assert.equal(checked.binding.remote.url, fixtureUrl); assert.deepEqual(checked.binding.remote.repository, { host: 'github.com', id: 101, nameWithOwner: 'protoflow-fixture/application', url: 'https://github.com/protoflow-fixture/application' });
@@ -801,7 +843,7 @@ test('FAKE provider: allowlisted v1 draft stays manual and v2 readies/merges the
   const first = await syncDeliveries(f.root, f.config); assert.equal(first.status, 'PASS', JSON.stringify(first)); assert.equal(first.deliveries[0].status, 'PR_OPEN_MANUAL');
   assert.equal((await f.gh()).prs[0].isDraft, true); assert.ok(!(await f.gh()).calls.some(call => call[1] === 'ready' || call[1] === 'merge'));
   await fs.appendFile(path.join(f.worktree, 'app/index.html'), '<section>fake v2</section>');
-  const project = await fingerprint(f.worktree, { exclude: ['prototype'] });
+  const project = await fingerprint(f.worktree, { exclude: ['prototype'], gitIgnore: true });
   for (const root of [f.root, f.worktree]) { const file = path.join(root, '.protoflow/verifications/VER-2.json'), report = await readJson(file); report.project = project; report.git.head = await git(f.worktree, 'rev-parse', 'HEAD'); await writeJson(file, report); }
   const current = await sourceStatus(f.root); current.entries[1].status = 'PASS'; await saveSourceState(f.root, current); f.config.runner.delivery.merge = 'auto';
   const second = await syncDeliveries(f.root, f.config); assert.equal(second.status, 'PASS', JSON.stringify(second)); assert.equal(second.deliveries[0].status, 'MERGED');

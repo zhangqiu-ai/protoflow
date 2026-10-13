@@ -45,7 +45,7 @@ async function threeVersions(root) {
 // Synthetic unit fixture for queue logic only; real browser acceptance is covered by the Playwright E2E suite.
 async function accept(root, manifest) {
   const record = { schemaVersion: 1, id: `VER-SYNTHETIC-${manifest.id}`, createdAt: new Date().toISOString(), fixture: 'synthetic-queue-unit',
-    manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, project: await fingerprint(root, { exclude: ['prototype'] }), status: 'PASS',
+    manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, project: await fingerprint(root, { exclude: ['prototype'], gitIgnore: true }), status: 'PASS',
     build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, artifactHashes: {} };
   await writeJson(await projectPath(root, `.protoflow/verifications/${record.id}.json`), record);
   return record;

@@ -498,7 +498,7 @@ test('synthetic PASS crash recovery saves runner IDLE and permits configuration 
   const entry = state.entries[0];
   const manifest = JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/manifests', `${entry.manifestId}.json`), 'utf8'));
   const report = { id: 'VER-crash-recovery', createdAt: new Date().toISOString(), manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
-    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir] }), artifactHashes: {}, status: 'PASS' };
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir], gitIgnore: true }), artifactHashes: {}, status: 'PASS' };
   await fs.mkdir(path.join(runner.worktree, '.protoflow/verifications'), { recursive: true });
   await fs.writeFile(path.join(runner.worktree, '.protoflow/verifications', `${report.id}.json`), JSON.stringify(report));
   runner.status = 'RUNNING'; runner.current = entry.manifestId;
@@ -518,7 +518,7 @@ test('a review rejection after PASS reopens the same version in the runner and k
   const manifest = JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/manifests', `${first.manifestId}.json`), 'utf8'));
   // Synthetic PASS evidence, recovered by the runner like an interrupted PASS (no executor or browser involved).
   const report = { id: 'VER-before-rejection', createdAt: new Date(Date.now() - 1000).toISOString(), manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
-    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir] }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir], gitIgnore: true }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
   await fs.mkdir(path.join(runner.worktree, '.protoflow/verifications'), { recursive: true });
   await fs.writeFile(path.join(runner.worktree, '.protoflow/verifications', `${report.id}.json`), JSON.stringify(report));
   runner.status = 'RUNNING'; runner.current = first.manifestId;
@@ -556,7 +556,7 @@ test('revoked unfinished delivery history permits the same-version repair execut
   const manifest = JSON.parse(await fs.readFile(path.join(root, '.protoflow/manifests', `${first.manifestId}.json`), 'utf8'));
   // Seed an already accepted version; this test verifies repair scheduling, not browser/provider acceptance.
   const report = { id: 'VER-delivery-rejected', createdAt: new Date(Date.now() - 1000).toISOString(), manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
-    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir] }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir], gitIgnore: true }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' };
   for (const base of [root, runner.worktree]) {
     await fs.mkdir(path.join(base, '.protoflow/verifications'), { recursive: true });
     await fs.writeFile(path.join(base, '.protoflow/verifications', `${report.id}.json`), JSON.stringify(report));

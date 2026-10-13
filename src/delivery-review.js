@@ -151,7 +151,8 @@ async function capture(root, config, options, ownedMerge = null) {
   // Same scope as the target's verification: sibling targets' roots are not this target's application.
   const application = await applicationFingerprint(worktree, config, target ?? undefined);
   const outside = [config.prototypeDir, ...(target ? config.targets.filter(item => item.id !== target).map(item => item.root.replace(/\/+$/, '')) : [])];
-  const content = await fingerprint(worktree);
+  // Full workspace content as Git can commit it; ignored build output is the build's, not the binding's.
+  const content = await fingerprint(worktree, { gitIgnore: true });
   const treeFiles = new Map((await git(worktree, ['ls-tree', '-r', '-z', head])).split('\0').filter(Boolean).map(row => {
     const [meta, file] = row.split('\t'); return [file, meta.split(' ')];
   }));

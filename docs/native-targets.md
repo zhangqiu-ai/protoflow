@@ -104,6 +104,17 @@ React Native 注意事項：
 
 原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）與 `screen.png`（比較用的裁切圖）。
 
+## 生成檔與自動交付
+
+原生專案的 build 會產生大量檔案。application hash（context、verify、review 與交付共用）排除兩類：
+
+- 任何深度的 `RUNTIME_DIRS`：DerivedData、Pods、`.gradle`、xcuserdata、node_modules 等，不論是否有 Git。
+- Git checkout 中被忽略的**未追蹤**檔，例如 React Native 的 `ios/build/generated/`（codegen）、`vendor/`、`.bundle/`、`ios/.xcode.env.local`，以及 Expo Continuous Native Generation 產生並忽略的整個 `ios/`／`android/`。
+
+因此 build 或 functional 重新產生這些檔案不會讓驗收記為 `changedDuringVerification`，交付 commit 不含它們，獨立 review gate 也不會因「application bytes 與 commit tree 不符」而 BLOCKED。已追蹤的原生檔案（例如手寫的 `ios/` 專案、`Podfile.lock`，或用 `git add -f` 加入的檔）照常綁定。
+
+這表示 evidence 只證明被 commit 的內容；被忽略的生成檔由 target 的 `build` 負責。請讓 build 從 commit 可重複地重建它們（例如先 `pod install`，Expo 用 `npx expo prebuild --clean`），不要依賴手動放在 worktree 中、無法從 commit 重建的忽略檔。非 Git 專案只排除 `RUNTIME_DIRS`。細節見 [Git 忽略的檔案](independent-review.md#git-忽略的檔案)。
+
 ## 效能與限制
 
 - 每個場景是一次 `xcodebuild test-without-building`，約 15–40 秒；runner 只在驅動器原始碼或 Xcode 版本改變時重新建置。

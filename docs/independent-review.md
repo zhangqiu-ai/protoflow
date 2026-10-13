@@ -44,7 +44,18 @@ await assertIndependentReview(projectRoot, config, review.id, { published: true 
 
 真正的授權錨點是共享引擎程序內、模組私有的 attestation；只有已實際完成的 adapter／provider PASS 才建立，綁定完整 AIR record、request、run、process 和 options。磁碟上的 JSON／JSONL 即使全部重算 hash 也不能建立或改寫這個錨點。程序重啟後錨點不存在，已保存的 PASS 只能供稽核，正常 sync 保守 BLOCKED；不自動重跑任何 review。需明確選定 deliveryId／reviewId 執行下述新 provider revalidation。應用與 executor 不得修改可信共享引擎或其程序記憶體；本地可寫的證據目錄不屬於可信授權儲存。
 
-binding 包含 HEAD/tree、主 root HEAD、完整 workspace content hash（含 live prototype）、application hash（排除 prototype）、source entry、manifest／新 VER 全 hash、frozen version 和 artifact 完整性、executor 文件與 trace/session、config 和 remote URL/base/head。只忽略 `.git`、`.protoflow`、node_modules 和測試輸出等既有 runtime 目錄。工作中的 application bytes／modes 必須吻合被 commit 的 tree。主 root 是 manifest／VER 權威；snapshot 只容許 top-level runnerWorktree 匯出 metadata 差異（只出現在 0.2.0 及以前匯出的主 root VER；0.2.1 起 Runner 匯出與 worktree 完全相同的紀錄）。
+binding 包含 HEAD/tree、主 root HEAD、完整 workspace content hash（含 live prototype）、application hash（排除 prototype）、source entry、manifest／新 VER 全 hash、frozen version 和 artifact 完整性、executor 文件與 trace/session、config 和 remote URL/base/head。content hash 與 application hash 都只涵蓋 Git 能 commit 的內容：任何深度的 `.git` 與既有 runtime 目錄（`RUNTIME_DIRS`：`.protoflow`、node_modules、測試輸出、DerivedData、Pods、`.gradle`、xcuserdata）一律排除，另外排除 checkout 中 Git 忽略的未追蹤檔案（見下節）。工作中的 application bytes／modes 必須吻合被 commit 的 tree。主 root 是 manifest／VER 權威；snapshot 只容許 top-level runnerWorktree 匯出 metadata 差異（只出現在 0.2.0 及以前匯出的主 root VER；0.2.1 起 Runner 匯出與 worktree 完全相同的紀錄）。
+
+### Git 忽略的檔案
+
+React Native codegen（例如 `ios/build/generated/`）、Expo Continuous Native Generation 產生的整個 `ios/`／`android/` 等生成檔通常被專案的 `.gitignore` 忽略。`git add -A` 不會 stage 它們，被 commit 的 tree 也不含它們；若 binding 仍把它們算進 application hash，「application bytes 必須吻合 commit tree」的檢查會讓每次交付都 BLOCKED。因此 context 新鮮度、verify 前後比對、Review／approval、交付 staging 與這個 gate 使用同一個規則：
+
+- 在 Git checkout 中，以 `git ls-files --others --ignored --exclude-standard --directory -z` 找出被忽略的**未追蹤**路徑並排除。規則來源與 Git 相同：各層 `.gitignore`、`.git/info/exclude` 與使用者的 `core.excludesFile`。命令移除外部 `GIT_*` 環境並停用 fsmonitor。
+- **已追蹤**的檔案即使符合忽略規則（例如以 `git add -f` 加入的 `ios/build/Info.plist`）仍屬 application，照常綁定。
+- 未追蹤但未被忽略的檔案照常綁定；交付時會被 stage 並 commit。
+- 非 Git 專案，或專案 root 本身被上層 repository 忽略時，沿用原本只排除 `RUNTIME_DIRS` 的行為。
+
+安全含意：evidence 只綁定 tracked 與 untracked-but-not-ignored 的內容，也就是交付 commit 實際包含的內容。被忽略的檔案仍可能影響本機 build 與驗收（例如 build 讀取了 codegen 輸出、`.xcode.env.local` 或 `vendor/`），但它們不會被交付，也不在 reviewer 看到的 diff 中。這些檔案由 target 的 `build` 命令負責：build 應該可重複地重新產生它們（`pod install`、codegen、`expo prebuild --clean` 等），不能依賴無法從 commit 重建的忽略檔。忽略規則本身是內容：修改 `.gitignore` 會改變 application hash，reviewer 也會在 diff 中看到；`.git/info/exclude` 與全域 excludes 不在 tree 中，只能讓更多檔案「不被交付」，不能讓未經 review 的內容進入交付 commit。0.3.2 以前產生、且包含忽略檔的 context／VER 在升級後 hash 不同，需要重新產生 context 或重新驗收。
 
 reviewer 在 worktree 中只讀，看得到的是 worktree 的 VER 副本。為了讓 reviewer 重算的 hash 與 binding 比對同一份內容，`binding.versions[]` 每筆包含：
 

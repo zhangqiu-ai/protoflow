@@ -106,12 +106,36 @@ export async function withLock(root, action, name = 'active') {
  */
 export const RUNTIME_DIRS = ['.protoflow', 'node_modules', 'test-results', 'playwright-report', 'DerivedData', 'Pods', '.gradle', 'xcuserdata'];
 
-/** Project content hash; `exclude` lists project-relative directories (e.g. the prototype) owned by another version stream. */
-export async function fingerprint(root, { exclude = [] } = {}) {
+/**
+ * Untracked paths Git ignores under `root`, relative to it (a wholly ignored directory ends in '/'), or null when
+ * `root` is not inside a Git work tree (or is itself ignored). Tracked files are never listed, even when they match an ignore pattern.
+ * Runs without inherited GIT_* variables and with fsmonitor off, so only the checkout's own repository answers.
+ */
+export async function gitIgnoredPaths(root) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  try {
+    const { stdout } = await exec('git', ['-c', 'core.fsmonitor=false', 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: root, env, maxBuffer: 64 * 1024 * 1024 });
+    const paths = stdout.split('\0').filter(Boolean);
+    // A root that is itself ignored is reported as './': Git cannot commit it, so treat it as a non-Git project.
+    return paths.includes('./') ? null : paths;
+  } catch (error) {
+    if (error.code === 'ENOENT' || /not a git repository/i.test(error.stderr ?? '')) return null;
+    throw error;
+  }
+}
+
+/**
+ * Project content hash; `exclude` lists project-relative directories (e.g. the prototype) owned by another version stream.
+ * With `gitIgnore`, files Git ignores in the checkout are left out as well (see gitIgnoredPaths); outside Git only
+ * RUNTIME_DIRS apply. Evidence then binds exactly what `git add -A` can commit: tracked plus untracked-but-not-ignored
+ * content. Ignored files (codegen, CNG native dirs) may still shape a local build; the build, not this hash, owns them.
+ */
+export async function fingerprint(root, { exclude = [], gitIgnore = false } = {}) {
   root = await realpath(root);
   const files = {};
   const ignored = new Set(['.git', ...RUNTIME_DIRS]);
   const excluded = exclude.map(entry => entry.split(path.sep).join('/').replace(/^\.\/|\/+$/g, ''));
+  const gitIgnored = new Set(gitIgnore ? await gitIgnoredPaths(root) ?? [] : []);
   const visiting = new Set();
   async function walk(relative = '') {
     const directory = relative ? await projectPath(root, relative) : root;
@@ -121,7 +145,7 @@ export async function fingerprint(root, { exclude = [] } = {}) {
     for (const item of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       if (ignored.has(item.name)) continue;
       const name = relative ? `${relative}/${item.name}` : item.name;
-      if (excluded.includes(name)) continue;
+      if (excluded.includes(name) || gitIgnored.has(name) || gitIgnored.has(`${name}/`)) continue;
       const location = await projectPath(root, name);
       let entry = item;
       if (item.isSymbolicLink()) {
