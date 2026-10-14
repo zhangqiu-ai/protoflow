@@ -1349,3 +1349,25 @@ test('exhausted transient retries block with the provider failure', async t => {
   assert.equal(attempt.transientRetries.length, 1);
   assert.equal(attempt.processes.filter(child => child.phase === 'execute').length, 2);
 });
+
+test('a failed executor run is one bounded attempt and the next attempt is told why', async t => {
+  const { root, config } = await fixture(t);
+  const log = path.join(root, '..', 'executor-requests.jsonl');
+  // Record each request, then fail with an ordinary (non-transient) error.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);require('node:fs').appendFileSync(process.argv[1],JSON.stringify({kind:r.kind,repair:r.repair})+'\\n');console.error('TypeError: executor crashed');process.exit(1)})`, log];
+  config.policy = { ...config.policy, maxRepairAttempts: 1, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event.event) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /Codex execution FAIL .*exit 1.*executor crashed/);
+  assert.deepEqual(events, ['execute', 'execute-failed', 'repair']);
+  const requests = (await fs.readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(requests.map(request => request.kind), ['implement', 'repair']);
+  assert.equal(requests[1].repair.attempt, 1); assert.equal(requests[1].repair.verification, null);
+  assert.equal(requests[1].repair.execution.attempt, 0); assert.equal(requests[1].repair.execution.timedOut, false);
+  assert.match(requests[1].repair.execution.reason, /executor crashed/);
+  const attempts = (await sourceStatus(root)).entries[0].attempts;
+  assert.deepEqual(attempts.map(attempt => attempt.status), ['FAIL', 'FAIL']);
+  assert.ok(attempts.every(attempt => attempt.completedAt));
+});
