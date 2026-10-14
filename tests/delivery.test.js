@@ -1290,3 +1290,19 @@ test('FAKE provider: after a restart the runner revalidates an unattested PASS w
   assert.deepEqual(delivery.independentReviewAttempts.map(attempt => attempt.status), ['PASS', 'PASS']);
   assert.deepEqual(delivery.approvalHistory, [old.approval]);
 });
+
+test('FAKE transport: a published delivery accepts a retry of a legacy transient block known only by its reason text', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const trigger = path.join(f.base, 'outage-trigger'); await fs.writeFile(trigger, 'armed');
+  // A restarted engine revalidates; a proxy failure blocks that review before the provider runs.
+  const blocked = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram(`
+    process.env.FAKE_DELIVERY_GIT_UNAVAILABLE = trigger; await retry();`), f.root, JSON.stringify(f.config), trigger])).stdout);
+  const stranded = blocked.state.deliveries[0], file = path.join(f.root, `.protoflow/delivery/independent-reviews/${stranded.independentReviewId}.json`);
+  const record = await readJson(file); assert.equal(record.status, 'BLOCKED'); assert.match(record.reason, /CONNECT tunnel failed/);
+  // Records written before 0.3.7 had no retryable flag for some network signatures.
+  delete record.retryable; delete record.reasonCode; await writeJson(file, record);
+  const resumed = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram('await retry();'), f.root, JSON.stringify(f.config), trigger])).stdout);
+  assert.equal(resumed.results[0].status, 'PASS', JSON.stringify(resumed.results[0]));
+  assert.equal(resumed.state.deliveries[0].status, 'MERGED');
+});

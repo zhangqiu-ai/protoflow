@@ -3,7 +3,7 @@ import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerSt
 import { projectPath, readJson, writeJson, id, hash, RUNTIME_DIRS } from './util.js';
 import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict } from './delivery-review.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
-import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient } from './delivery-scope.js';
+import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient, transientFailure } from './delivery-scope.js';
 import { verificationRevocation } from './queue.js';
 
 // The automated approver is recorded as such; it never stands in for a named human.
@@ -324,7 +324,9 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       if (!revalidation) return { status: 'BLOCKED', reason: 'Only an unattested persisted PASS can be explicitly revalidated; live or changed evidence cannot be retried' };
     } else if (published) {
       // After approval or publication only an infrastructure failure outside the verdict can be retried.
-      if (record.retryable !== true || record.reasonCode !== 'TRANSIENT_INFRASTRUCTURE') return { status: 'BLOCKED', reason: 'After approval or publication only a review attempt BLOCKED by a transient network failure can be retried' };
+      // Records written before a network signature was classified transient carry only their reason text.
+      const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!verdict && transientFailure(record.reason));
+      if (!transient) return { status: 'BLOCKED', reason: 'After approval or publication only a review attempt BLOCKED by a transient network failure can be retried' };
       revalidation = true;
     }
     if (previous.approval && !config.policy?.autoApprove) return { status: 'BLOCKED', reason: 'Revalidating an automated approval requires the current autoApprove policy' };
