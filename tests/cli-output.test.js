@@ -69,3 +69,10 @@ test('multi-target source status and runner status show per-target progress and 
   assert.equal(status.source.completedSha, sha);
   assert.deepEqual(Object.fromEntries(Object.entries(status.targets).map(([id, item]) => [id, item.summary.status])), { web: 'IDLE', desktop: 'IDLE' });
 });
+
+test('help names the version from package.json', async () => {
+  const { version } = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const help = await run(['--help'], process.env);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout.split('\n')[0], new RegExp(`^ProtoFlow ${version.replaceAll('.', '\\.')} — `));
+});

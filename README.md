@@ -1,30 +1,37 @@
 # ProtoFlow
 
-ProtoFlow 是可透過 Codex Skill 接入的原型驅動工程引擎。共享 Node.js 引擎持有流程、協定與驗證；目標專案安裝輕量 Skill、配置及 AGENTS 約定，保留自己的原型、實作和回歸測試。
+ProtoFlow 是原型驅動的工程引擎：設計者提交 HTML 原型，引擎逐版交給 Codex 實作到正式應用，以建置、功能測試與分層視覺比對驗收，再經獨立 AI 審查後自動提交、開 PR 與合併；也可停在人工 Review。
 
-**目前可執行：**GitHub 原型提交掃描、固定 SHA 與完整資源 checkpoint、持久 FIFO／進度、隔離本機 worktree 的前景 Codex Runner、doctor／離線補抓／阻塞重試，以及相容的原型目錄監聽、Design Session／checkpoint、Git diff／Change Manifest、L0–L3 路由、Spec Kit／BMad 邊界、Codex 執行接口、瀏覽器視覺驗證、有限修復迴圈、人工 Review 與 UI Baseline。初版採本機 JSON 證據，沒有雲端服務或畫布 UI。
+共享 Node.js 引擎持有流程、協定與驗證；目標專案只接入輕量 Codex Skill、`protoflow.config.json` 與 AGENTS 約定，保留自己的原型、應用與回歸測試，**不複製引擎**。所有證據以 JSON 保存在目標專案的 `.protoflow/`，沒有雲端服務、帳號系統或畫布 UI。
+
+## 目前能力
+
+- **原型來源**：追蹤 GitHub repo／branch／path 的提交，逐筆凍結完整原型快照（固定 SHA 與內容 hash）；未配置 Git 來源時，可改用本機 Design Session／watch／checkpoint。
+- **兩種 UI 協定**：schemaVersion 2 以平台中立的**語意錨點**（`data-pf`）描述原型，新增畫面不需改配置；schemaVersion 1 以 selector **元件映射**對應原型與應用。
+- **多平台 target**：Web（Playwright）、Electron、iOS（XCUITest）、Android（UiAutomator）、React Native 與 Flutter；一份原型可同時驅動多個 target，各自獨立推進。
+- **分層驗收**：T1 結構語意、T2 design token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM），每層可設為 required／advisory／off。
+- **本機 Runner**：在隔離 worktree 依序呼叫 Codex、驗證與有限次修復；可自動重試暫時性故障、清理殘留程序、持久保存進度，中斷後可安全恢復。
+- **自動交付**：通過驗收的版本會被 commit，取得獨立 Codex 審查 PASS 後才推送、開 PR、合併，並且保留 branch protection。
+- **政策閘門**：依 L0–L3 分級；L2 需要 Spec Kit 規格，L3 需要人類批准的 ADR。版本必須依序驗收，人工批准綁定當前內容與驗證證據。
 
 ```mermaid
 flowchart LR
-  P[Prototype] --> S[Session / Checkpoint]
-  S --> M[Manifest / L0–L3]
-  M --> C[Codex Context]
-  M --> K[Spec Kit / ADR]
-  K --> C
-  C --> A[Application]
-  A --> V[Build / Playwright / Visual]
-  V -->|失敗且有 adapter| C
-  V --> R[Human Review]
-  R --> B[UI Baseline]
+  G[GitHub 原型提交] --> F[凍結快照 / Manifest]
+  L[本機 Session / Checkpoint] --> F
+  F --> Q[版本佇列 FIFO]
+  Q --> C[Context Package]
+  K[Spec Kit / ADR] --> C
+  C --> X[Codex 執行者]
+  X --> V[Build / Functional / T1–T4]
+  V -->|FAIL，未達上限| C
+  V -->|PASS| D[Commit + 獨立 AI 審查]
+  D --> P[Push / PR / Merge]
+  V -->|PASS| R[人工 Review / Baseline]
 ```
-
-## GitHub 提交驅動的正式應用
-
-以指定 GitHub repo／branch／path 的新提交逐版實作，Skill 負責接入指引，前景 Runner 依序呼叫 Codex 與獨立驗證。先讀 [本機 Runner 操作與恢復](docs/git-runner.md)，填好 mapping／build／Playwright／visual 後執行 `protoflow doctor`、`protoflow source scan` 與 `protoflow runner start`。前版未 PASS 時後版保持待辦。既有本機 watch 流程保留給未配置 Git source 的設計工作。
 
 ## 安裝共享引擎
 
-需要 Node.js 22+、npm、Git，以及 Playwright Chromium。初版尚未發布到 npm；使用 checkout 或本機打包檔安裝。
+需要 Node.js 22+、npm、Git 與 Playwright Chromium。原生 target 另需 Xcode、JDK 17、Android SDK 或 Flutter SDK，見 [原生 target](docs/native-targets.md#需求)。引擎尚未發布到 npm，請使用 checkout 或 `npm pack` 產生的本機套件。
 
 ```sh
 git clone https://github.com/zhangqiu-ai/protoflow.git
@@ -32,39 +39,70 @@ cd protoflow
 npm ci
 npx playwright install chromium
 npm run validate
-# 選用：將這份共享引擎的 CLI 加到 PATH
-npm link
+npm link   # 選用：把 protoflow CLI 加到 PATH
 ```
 
-也可直接使用 `node /absolute/path/protoflow/bin/protoflow.js`，不需全域安裝。所有以下命令的 `protoflow` 都可替換為此形式。
+不想全域安裝時，可以把下文所有 `protoflow` 換成 `node /absolute/path/protoflow/bin/protoflow.js`。
+
+## 接入目標專案
 
 ```sh
 protoflow init --project /path/to/app
 protoflow install --project /path/to/app
 ```
 
-目標專案新增 `protoflow.config.json`、`.agents/skills/protoflow/` 和 AGENTS managed block，**不複製引擎**。既有配置、既有 Skill 及使用者 AGENTS 內容保留；重複執行會列出 skipped。
+- `init` 建立 `protoflow.config.json`（schemaVersion 1 的保守預設：沒有映射、adapter 或驗證命令）、prototype 目錄，並在 `AGENTS.md` 加入 managed block。加上 `--repository URL --branch NAME --path DIR [--start-sha SHA]` 會同時寫入 Git 來源與內建 Codex adapter 的路徑。
+- `install` 把 Skill 安裝到 `.agents/skills/protoflow/`，接著把 [Spec Kit](https://github.com/github/spec-kit) 與 [BMad Method](https://github.com/bmad-code-org/BMAD-METHOD) 安裝到目標專案，供 L2／L3 使用。安裝命令取自 `adapters.specKit.install`／`adapters.bmad.install`，設為 `null` 表示不安裝。已偵測到的整合會跳過；`--skip-integrations` 只偵測並提醒。安裝前先 commit 或 stash，安裝後檢查 diff，細節見 [整合接口](docs/integrations.md#安裝-spec-kit-與-bmad)。
+- 既有配置、Skill 與使用者的 AGENTS 內容都會保留，重複執行會列出 skipped。
+- 把 `.protoflow/` 加入目標專案的 `.gitignore`。
+- 個人安裝（`install --personal`）見 [Skill 安裝](docs/skill-installation.md)。
 
-`install` 接著把 [Spec Kit](https://github.com/github/spec-kit) 與 [BMad Method](https://github.com/bmad-code-org/BMAD-METHOD) 安裝到目標專案，供 L2 規格與 L3 架構決策使用。命令取自配置的 `adapters.specKit.install`／`adapters.bmad.install`（`init` 寫入預設值，可改寫；`null` 表示不安裝）：
+## 配置
 
-| 整合 | 預設 argv | 偵測依據 |
-|---|---|---|
-| Spec Kit | `uvx --from specify-cli specify init --here --force --non-interactive --integration codex --script sh` | `.specify/`、`.agents/skills/speckit*` |
-| BMad | `npx --yes skills add bmad-code-org/BMAD-METHOD --skill * --agent codex --yes` | `_bmad/`、`.agents/skills/bmad*`／`bmod*` |
+配置以 JSON Schema 驗證，會拒絕未知欄位、無效門檻和專案外的路徑。
 
-已偵測到的整合會略過，不重複安裝。需要 `uv`（Spec Kit）與 Node.js／Git（BMad）並可連網。執行前先 commit 或 stash，安裝後檢查 diff：`specify init --force` 可能覆寫其自身管理的路徑，結果的 `changed` 列出每個安裝器新增或修改的檔案。安裝結果與提醒寫入 JSON 的 `integrations`／`notices`，同時以 `ProtoFlow:` 前綴輸出到 stderr；任一安裝失敗時退出碼為 `1`。BMad 安裝後在 Codex 請 `bmad` skill 執行 `bmad setup`。`--skip-integrations` 只偵測並提醒，`protoflow status` 也會顯示兩者的安裝狀態。
+### schemaVersion 2：語意錨點與 targets（新專案建議）
 
-個人 Skill 安裝（只偵測整合，不安裝）：
+從 [錨點配置模板](templates/protoflow.anchors.config.json) 開始，設計見 [提案 0001](docs/proposals/0001-anchor-contracts.md) 與 [提案 0002](docs/proposals/0002-android-flutter.md)。
 
-```sh
-protoflow install --personal --project /path/to/app
+```json
+{
+  "schemaVersion": 2,
+  "prototypeDir": "prototype",
+  "anchors": {"attribute": "data-pf", "requireScreenAnchor": true, "tokens": "prototype/tokens.json"},
+  "targets": [{
+    "id": "web",
+    "platform": "web",
+    "root": "app",
+    "driver": {"kind": "playwright-web", "urlTemplate": "app/{page}.html"},
+    "build": {"argv": ["npm", "run", "build"]},
+    "functional": {"argv": ["npx", "playwright", "test"]},
+    "viewport": {"width": 1280, "height": 800, "scale": 1}
+  }],
+  "policy": {"maxRepairAttempts": 3, "requireHumanReview": true, "sequentialVersions": true}
+}
 ```
 
-依此使用者環境的安裝政策，來源為 `/Users/feature/GitHub/skills/protoflow`，Codex discovery 是 `/Users/feature/.codex/skills/protoflow` 的個別 symlink。其他機器可使用 `--source-dir` 和 `--discovery-dir`。細節見 [Skill 安裝](docs/skill-installation.md)。
+- **原型**：每頁一個畫面錨點（`<body data-pf="checkout" data-pf-role="screen">`）；需要追蹤的元素標上 `data-pf="checkout.pay"`。狀態與互動步驟寫在同目錄的 `<page>.pf.json`，tokens 可放在 `prototype/tokens.json`（W3C Design Tokens 格式）。
+- **應用**：用該平台原生的測試標記帶上**完全相同的 ID**。
 
-## 接入配置
+  | 平台 | 標記 |
+  |---|---|
+  | Web／Electron | `data-testid` |
+  | iOS | `accessibilityIdentifier` |
+  | Android | `testTag`（搭配 `testTagsAsResourceId`） |
+  | React Native | `testID` |
+  | Flutter | `Semantics(identifier:)` |
 
-`init` 產生保守預設：沒有臆測的元件映射、沒有外部 adapter、沒有驗證命令。填入真實配置後開始流程。參考 [完整模板](templates/protoflow.config.json)、[可執行 Demo](examples/demo/protoflow.config.json) 與 [配置協定](schemas/config.schema.json)。
+- **驅動器**：`driver.kind` 可以是 `playwright-web`、`playwright-electron`（`main`、`route`）或 `external`。原生平台使用 `external`，透過 [驅動器協定](schemas/driver-request.schema.json) 接入；內建 `scripts/ios-driver.js` 與 `scripts/android-driver.js` 兩個參考驅動器。應用要能以 `PROTOFLOW_SCREEN` 啟動參數直接打開指定畫面，見 [原生 target](docs/native-targets.md)。
+- **分層與回歸範圍**：Web 預設四層全部 required，並做全量回歸；原生預設 T4 為 advisory，回歸範圍是 `affected+smoke`。checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響的畫面與錨點；錨點無效的版本不會產生。
+- **變體與差異**：同一份程式碼跑在多個平台（React Native、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
+- **多目標**：`targets` 可以列出多個平台，各有獨立的 `root`、進度、worktree 與交付分支，一個 target 阻塞不影響其他 target。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已完成的最新版本。多目標時用 `--target <id>` 指定命令作用的 target。
+- **工具**：`anchors lint`、`anchors suggest --patch-file`、`contract show`，以及從 v1 遷移的 `migrate anchors`（只產生草稿，不套用）。
+
+### schemaVersion 1：元件映射
+
+每筆 mapping 以 glob 列出原型檔案，並用兩邊頁面的 CSS selector 對應到應用元件；視覺場景寫在 `visual.scenes`。參考 [完整模板](templates/protoflow.config.json)、[原型拆分指南](docs/prototype-structure.md) 與 [配置協定](schemas/config.schema.json)。
 
 ```json
 {
@@ -78,161 +116,170 @@ protoflow install --personal --project /path/to/app
     "component": "src/ChatInput.tsx",
     "priority": "critical"
   }],
-  "classification": {"rules": [{"pattern": "prototype/auth/**", "level": "L3"}]},
-  "policy": {"maxRepairAttempts": 3, "requireHumanReview": true},
-  "verification": {
-    "build": {"argv": ["npm", "run", "build"]},
-    "functional": {"argv": ["npx", "playwright", "test"]}
-  },
-  "visual": {
-    "maxDiffRatio": 0.01,
-    "geometryTolerance": 1,
-    "scenes": [{
-      "id": "chat.default",
-      "prototypeUrl": "http://127.0.0.1:3001/chat.html",
-      "applicationUrl": "http://127.0.0.1:3000/chat",
-      "viewport": {"width": 1440, "height": 900},
-      "mappings": ["chat-input"]
-    }]
-  }
+  "verification": {"build": {"argv": ["npm", "run", "build"]}, "functional": {"argv": ["npx", "playwright", "test"]}},
+  "visual": {"maxDiffRatio": 0.01, "geometryTolerance": 1, "scenes": [{
+    "id": "chat.default",
+    "prototypeUrl": "http://127.0.0.1:3001/chat.html",
+    "applicationUrl": "http://127.0.0.1:3000/chat",
+    "viewport": {"width": 1440, "height": 900},
+    "mappings": ["chat-input"]
+  }]}
 }
 ```
 
-`prototypeFiles` 是專案相對路徑 glob，支援 `*`、`**`、`?`。`prototype`／`application` 是各自頁面的 CSS selector；`component` 是實作檔案路徑。每個映射 selector 必須唯一且可見。配置以 schema 驗證，拒絕未知欄位、無效門檻和專案外檔案路徑。
+`protoflow mappings suggest` 會掃描原型頁面及其引用的資源，產生 mapping 草稿；`component` 與 selector 留空，由開發者填寫。功能測試與應用擷取也可以透過 [專案驗收 adapter](docs/acceptance-adapters.md)（雙向 JSONL 協定）接入。
 
-將 `.protoflow/` 加入目標專案的 `.gitignore`，或明確選擇 evidence 版本化方式；`init` 會保留既有忽略策略。
+## 原型來源與 Runner
 
-### 語意錨點（schemaVersion 2，跨平台）
+### GitHub 提交驅動（正式應用）
 
-`schemaVersion: 2` 以平台中立的**語意錨點**取代元件映射，設計見 [提案 0001](docs/proposals/0001-anchor-contracts.md)，可執行範例見 [examples/anchors](examples/anchors/)。
-
-- **原型**：每頁一個畫面錨點（建議 `<body data-pf="checkout" data-pf-role="screen">`），需要追蹤的元素標上 `data-pf="checkout.pay"`；狀態寫在同目錄的 `<page>.pf.json`，步驟只引用錨點。可選 `prototype/tokens.json`（W3C Design Tokens）。
-- **應用**：以該平台原生的測試標記帶上完全相同的 ID——Web／Electron `data-testid`、iOS `accessibilityIdentifier`、Android `testTag`、Flutter `Semantics(identifier:)`、React Native `testID`。
-- **配置**：`targets` 描述應用平台與驅動器（內建 `playwright-web`，原生平台以 `external` 驅動器協定接入，見 `schemas/driver-*.schema.json`）。不需要 `mappings`、`visual.scenes`，新增畫面也不需改配置。
-- **原生平台**：內建兩個參考驅動器（`external` 驅動器）——iOS 的 `scripts/ios-driver.js`（XCUITest，依 bundle id）與 Android 的 `scripts/android-driver.js`（UiAutomator，依 package），驅動 SwiftUI、UIKit、Compose、View、React Native 與 Flutter 應用；擷取無障礙樹與截圖、裁到內容區域後以 T1–T3 required、T4 advisory 驗收。應用以 `PROTOFLOW_SCREEN` 啟動參數（iOS launch argument、Android intent extra）直接打開畫面。見 [原生 target](docs/native-targets.md) 與 [examples/mobile](examples/mobile/)。
-- **target 變體**：同一份程式碼跑在多個平台（React Native、Flutter）時，一個 target 以 `variants` 列出 `ios`、`android` 等執行變體；每個必要變體都 PASS 才接受，交付仍只有一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
-- **範圍**：checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響畫面與錨點；錨點無效的版本不會產生。
-- **分層驗收**：T1 結構語意、T2 token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM）。各 target 設定 `required`／`advisory`／`off`；Web 預設全部 required 並全量回歸，原生預設 T4 advisory、`affected+smoke` 回歸。
-- **工具**：`protoflow anchors lint|suggest`、`protoflow contract show --manifest <id>`、`protoflow migrate anchors`（v1 → v2 草稿：原型 patch、應用 patch、v2 配置）。
-
-- **Electron**：`driver.kind: "playwright-electron"`（`main`、`route`）以 Playwright 啟動真實 Electron；原型參考也在同一 Electron 版本中渲染，四層維持 required，異常結束碼判 FAIL。
-- **專案驗收 adapter（v1）**：功能與應用擷取可透過雙向 JSONL 協定介接專案工具，程序啟動與完成均由共享引擎監督；配置與證據界線見 [acceptance-adapters.md](docs/acceptance-adapters.md)。
-- **多目標**：`targets` 可列出多個平台（各自獨立的 `root`），每個 target 依序推進同一串原型版本、有自己的 worktree 與交付分支（`<branch>/<id>`），一個 target 阻塞不影響其他。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已接受的最新版本。多目標時以 `--target <id>` 指定命令作用的 target。
-
-`schemaVersion: 1` 的 mapping 流程維持不變，說明如下。
-
-`npm run validate` 執行靜態檢查、單元測試與全部 Playwright 專案。CI 將 Chromium E2E 放在 Ubuntu、真實 Electron E2E 放在 macOS，兩者均受必要檢查 `validate` 約束；缺少原生執行環境不會以 skip 當作驗收通過。可用 `npm run test:e2e -- --project=chromium` 或 `--project=electron` 分別執行。
-
-### 原型適度拆分（schemaVersion 1）
-
-先依可獨立瀏覽、修改和驗收的頁面拆分，再整理共用 tokens、styles、scripts 與 assets。原型目錄不必對應應用元件目錄；同一 HTML 可透過多筆 mapping 對應導覽、頁面內容等不同元件。共用資源必須明確列入每個受影響 mapping 的 `prototypeFiles`，引擎依檔案變更保守展開影響範圍，selector 只用於定位與視覺驗證。
-
-引擎與模板不預設任何頁面或元件。`protoflow mappings suggest` 掃描目標專案自己的原型頁面及其引用的樣式、腳本與素材，輸出每頁一筆 mapping 草稿；`component` 與 selector 留空，由開發者依專案實際元件填寫後再寫入配置。參考 [原型拆分指南](docs/prototype-structure.md) 與 [多頁可執行範例](examples/modular/)（範例的頁面與元件只屬於該範例）。checkpoint 路由不解析 DOM 差異或 import 依賴圖，也不自動 commit 原型。
-
-## 核心命令
-
-| 命令 | 作用 |
-|---|---|
-| `init` / `install [--skip-integrations]` | 建立配置與約定／安裝 Skill、Spec Kit 與 BMad |
-| `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
-| `contract show --manifest ID` | 版本的靜態 UI 合約與變更範圍（v2） |
-| `migrate anchors [--output DIR]` | v1 mapping → 錨點遷移草稿（不套用） |
-| `mappings suggest` | 依原型頁面與引用資源產生 mapping 草稿（唯讀） |
-| `source scan` / `source status` | Git 來源掃描、固定提交 checkpoint／持久來源進度 |
-| `runner start [--once]` / `runner status` / `runner retry` | 隔離 worktree、真實 Codex、逐版驗證與阻塞恢復；多目標時 `runner status` 以各 target 進度合成 source entries 狀態（`statusBasis: "targets"`）並附每個 target 的 `summary` |
-| `runner gc [--apply]` | 列出本專案的 runner worktree（active／stale／unsafe）；`--apply` 先封存其 `.protoflow` 證據，再移除未被使用且乾淨的 worktree，分支只在提交已存在於其他 ref 時刪除 |
-| `delivery sync` / `delivery status` | commit 後先取得獨立 AI review PASS，再允許自動批准、推送、PR 與合併；多目標時每個 target 在 `<branch>/<id>` 各自通過 review；缺配置或證據漂移時 BLOCKED。網路／5xx 暫時故障標為 `retryable`，以 `delivery sync --retry-review --delivery <DLV> --review <AIR>` 明確重跑新 review（reviewer FAIL 不重試） |
-| `doctor` | 接入環境診斷 |
-| `session start` / `session list` | 設計會話及修改前快照 |
-| `watch [--once]` | 檔案輪詢、idle debounce、checkpoint |
-| `checkpoint [--session ID]` | 精確 before/after Manifest |
-| `prepare --adapter specKit\|bmad --manifest ID` | 執行明確配置的規格／架構 adapter |
-| `context --manifest ID [--spec PATH] [--adr PATH]` | 建立有映射與政策閘門的 Context Package |
-| `execute --context ID [--execute]` | 乾跑 request 或實際 Codex adapter |
-| `verify --manifest ID` | build、functional、視覺與證據 hash |
-| `repair --manifest ID [--execute]` | 驗證→修復→再驗證，最多配置次數 |
-| `review create --manifest ID --verification ID` | 建立待人工判斷資料 |
-| `review approve\|reject\|request-changes --review ID --reviewer NAME` | 記錄人工決定 |
-| `review reject\|request-changes --review ID --reviewer ai:… --reviewer-kind model --model-evidence FILE` | 記錄綁定 verification 的獨立模型審查 FAIL；拒收 PASS 會重開該 target 的同一版本（提案 §16.8） |
-| `baseline create --review ID` / `baseline show` | 保存批准節點／讀取最新節點 |
-| `queue` | 原型版本佇列；應用端只處理 `current` |
-| `status` | 會話、最新 Baseline、版本佇列及 Spec Kit／BMad 安裝狀態 |
-
-各命令接受 `--project PATH`。輸出 JSON；`watch` 先輸出 `ready`，每個穩定修改批次輸出 `checkpoint`。退出碼：`0` 成功，`1` 錯誤／驗證失敗，`2` 未執行／仍需 Review，`3` 應用端跨原型版本操作被拒絕。不自動 Git add、commit、push 或部署。
-
-### 原型版本佇列
-
-原型可以隨時修改並連續 checkpoint；每個 checkpoint 是一個原型版本，依建立順序排隊。正式應用依原型版本自動推進，因此應用端必須**按順序逐一**處理：`context`、`prepare`、`execute`、`verify`、`repair` 只接受佇列的 `current`，也就是最早一個還沒有驗收的版本。版本驗收的條件是一份 `PASS` 的 verification，綁定該 manifest hash 與原型內容 hash。對後面的版本操作會被拒絕，輸出 `{"status":"BLOCKED","queue":{…}}` 並以退出碼 `3` 結束；已驗收的版本也不能再被重新實作。
+配置 `source.kind: "git"` 後，正式應用只由指定 repo／branch／path 的提交觸發，本機的 `watch`／`checkpoint`／`session start` 會被拒絕。完整操作、恢復與限制見 [本機 Runner](docs/git-runner.md)，範本見 [templates/protoflow.git.config.json](templates/protoflow.git.config.json)。
 
 ```sh
-protoflow queue --project /path/to/app   # current、waiting、lastAccepted 與每個版本的驗收狀態
+protoflow doctor --project /path/to/app          # Git、來源、Codex、驗證設定、Chromium、Skill
+protoflow source scan --project /path/to/app     # fetch 並凍結新提交
+protoflow queue --project /path/to/app
+protoflow runner start --project /path/to/app --once   # 省略 --once 則每 15 秒輪詢，Ctrl+C 停止
+protoflow runner status --project /path/to/app
 ```
 
-- 每個 checkpoint 會把該版本的原型完整凍結到 `.protoflow/versions/<manifest-id>/`（含二進位素材），並以 manifest 的 `afterHash` 核對完整性。Context 的 `prototypeVersion.prototypeDir` 指向凍結副本，執行代理讀取該版本而不是現行原型。
-- `verify` 也比對凍結版本：專案相對路徑的 scene 直接改指向副本；http scene 在 URL 路徑以 `/<prototypeDir>/` 開頭時自動攔截並由副本回應，其他 server 配置需設定 `visual.prototypeBaseUrl`（對應 `prototypeDir/` 的 URL）。
-- 應用的 project hash 不含原型目錄，設計者持續修改原型不會讓應用端的 context／verification／review 失效。
-- 設計命令（`session`、`checkpoint`、`watch`）使用 `.protoflow/design.lock`，應用命令使用 `.protoflow/active.lock`，兩邊可以同時進行。
-- 放行只需 verify `PASS`；人工 Review／Baseline 照舊可對已驗收版本補做。不需要依序推進的專案可設定 `policy.sequentialVersions: false`；代理不得自行關閉。
+- **掃描**：沿 branch 的 first-parent 歷史逐筆凍結原型子目錄，包括 HTML、CSS、腳本與二進位素材。只要有外部、可變或無法靜態稽核的資源引用就報錯。快照上限為每檔 2 MiB、總計 20 MiB、1000 個檔案。歷史被改寫（rewind、force push）時記為 `HISTORY_REWRITTEN` 並停止。
+- **執行**：應用在 `.protoflow/runner/worktree-*` 的獨立本機分支上實作，不碰主 checkout、index 或 HEAD。每個版本依序執行 Codex → build → functional → 凍結版本的視覺比對，全部 PASS 才前進。
+- **重試與失敗**：
+  - 供應端的暫時性故障（限流、5xx、串流中斷）會自動重試，次數與間隔由 `policy.transientRetries`、`policy.transientRetryDelayMs` 設定，不計入修復次數。
+  - 執行失敗或逾時算一次 attempt，在 `policy.maxRepairAttempts` 內進入下一輪修復，用盡才 BLOCKED。
+  - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。
+- **恢復**：BLOCKED、STOPPED 或中斷的 RUNNING 必須先查明原因，再執行 `runner retry [--target id]`。設定錯誤時，先用 `runner configure` 明確綁定新設定。啟動意圖沒有留下 PID 時，用 `runner retry --recover-unknown-start`；引擎會先確認沒有存活程序。`runner gc [--apply]` 會封存並回收不再使用的乾淨 worktree。
+- **定期巡查**：可在 Codex app 建立 heartbeat 自動化，定期執行 `runner start --once`、`delivery sync` 與 `delivery status`，見 [定期巡查](docs/git-runner.md#定期巡查codex-自動化)。
 
-### 修改與批准
+### 本機設計流程（未配置 Git 來源）
 
 ```sh
 protoflow session start --project /path/to/app --label "Adjust chat input"
-# 編輯 prototype；使用回傳的 session ID
+# 編輯 prototype，或讓 protoflow watch 自動 checkpoint
 protoflow checkpoint --project /path/to/app --session SESSION_ID
-protoflow context --project /path/to/app --manifest MANIFEST_ID
-protoflow execute --project /path/to/app --context CONTEXT_ID
-# 確認 request 與授權後，加入 --execute 執行已配置的 adapter
-protoflow verify --project /path/to/app --manifest MANIFEST_ID
+```
+
+設計命令持有 `.protoflow/design.lock`，應用命令持有 `.protoflow/active.lock`，兩邊可以同時進行。若程序意外退出，必須先確認鎖的 `owner.json` 已不活躍，才能人工恢復。
+
+## 版本佇列
+
+每個 checkpoint 都是一個原型版本，會完整凍結到 `.protoflow/versions/<manifest-id>/`，依建立順序排隊。`context`、`prepare`、`execute`、`verify`、`repair` 只接受佇列的 `current`，也就是最早一個還沒驗收的版本；操作其他版本會回傳 `BLOCKED`（退出碼 3），已驗收的版本也不能重新實作。驗收條件是一份綁定 manifest hash 與原型 hash 的 `PASS` verification。
+
+執行代理與 `verify` 都讀凍結副本，不讀現行原型。應用的 hash 不包含原型目錄與 Git 忽略的未追蹤檔，設計者繼續修改原型不會讓應用端的證據失效。確實不需要依序推進的專案可設定 `policy.sequentialVersions: false`，但代理不得自行關閉。
+
+## 手動推進一個版本
+
+```sh
+protoflow context --project /path/to/app --manifest MANIFEST_ID [--spec PATH] [--adr PATH] [--target ID]
+protoflow execute --project /path/to/app --context CONTEXT_ID            # 乾跑，先檢查 request
+protoflow execute --project /path/to/app --context CONTEXT_ID --execute  # 實際呼叫 Codex adapter
+protoflow verify  --project /path/to/app --manifest MANIFEST_ID
+protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗證 → 修復 → 再驗證，有次數上限
+```
+
+- **分級**：L0 是樣式細節；L1 是局部結構與互動；L2 是資料、API 等功能變更，需 `--spec`（新增或未知的 JavaScript 通常屬 L2）；L3 涉及架構或安全，另需綁定 `manifestHash`、`status: approved` 與真實 reviewer 的 ADR。`--level` 與分類規則只能提高等級。
+- **驗證**：固定 viewport、DPR、locale、theme、timezone、fixture、互動步驟與遮罩。任何錨點或映射失敗、未映射的變更、缺少的覆蓋，都不能靠整頁平均值通過。報告輸出到 `.protoflow/artifacts/VER_ID/`，包含截圖、overlay、diff 與逐元件結果。沒有配置或沒有執行的驗證記為 `NOT_RUN`，不算通過。
+
+## 自動交付與獨立 AI 審查
+
+設定 `runner.delivery` 與 `adapters.independentReview` 後，每個 PASS 版本在 Runner 前進前完成交付：
+
+1. 在隔離 worktree commit 應用改動（排除 `.protoflow/`、`node_modules`、建置快取，以及 Git 忽略的生成檔）。
+2. 以全新、唯讀、ephemeral 的 Codex session 審查已 commit 的完整應用（`scripts/codex-review-adapter.js`）。審查 session 必須不同於執行者，只有嚴格的結構化 PASS 且沒有 findings 才算通過。
+3. `policy.autoApprove: true` 時，才建立 `reviewerKind: automated` 的 Review 與 Baseline。這不能代替真人 ADR 或 GitHub approval。
+4. 推送到專用交付分支（多目標時為 `<branch>/<id>`），重用或建立 PR，並留言證據。`merge: "auto"` 以 `--match-head-commit` 合併；`"manual"` 留給人合併。不使用 `--admin`，也不強推。
+
+在 `autoApprove` 下，審查 FAIL 且附 findings 時，Runner 會自動記錄模型拒收並重開版本修復（每版最多 3 次）。因暫時性網路故障而 BLOCKED 的審查會自動重新審查；審查判斷本身永不重擲。GitHub 的只讀請求遇到暫時性錯誤會原地重試（`PROTOFLOW_NETWORK_RETRIES`，預設 2）。
+
+需要人工介入時，用 `delivery sync --retry-review --delivery DLV-… --review AIR-…` 明確取得新的審查。`gh` 必須已登入，且對目標 repo 有寫入權。細節見 [自動交付](docs/git-runner.md#自動交付commit--pr--合併) 與 [獨立 AI review gate](docs/independent-review.md)。
+
+**沒有配置 `runner.delivery` 時，引擎不會 add、commit、push、合併或部署任何東西。**
+
+## 人工 Review 與 Baseline
+
+```sh
 protoflow review create --project /path/to/app --manifest MANIFEST_ID --verification VERIFICATION_ID
-# 真實人類看過視覺報告並明確批准後：
+# 真實的人看過視覺報告並明確批准後：
 protoflow review approve --project /path/to/app --review REVIEW_ID --reviewer HUMAN_NAME
 protoflow baseline create --project /path/to/app --review REVIEW_ID
 ```
 
-`watch` 持有設計端鎖（`.protoflow/design.lock`）；應用端命令可同時執行，其他設計命令（session、checkpoint）需先以 Ctrl+C 停止 watch。中斷的 active session 可在下次 watch 恢復。鎖會在正常退出釋放；若程序意外退出，先核對 `.protoflow/active.lock/owner.json` 或 `.protoflow/design.lock/owner.json` 的 owner 是否仍活躍，再人工恢復，不能因鎖看起來舊就刪除。
+批准綁定當前內容與驗證證據，內容或驗證一變就失效。PASS 之後若有人或模型拒收（`reject`／`request-changes`；模型拒收需 `--reviewer-kind model --model-evidence FILE`），Runner 下一輪會重開該 target 的同一版本。
 
-初次 checkpoint 包含現有未追蹤原型。新增或未知 JavaScript 通常屬 L2，需 `--spec`；`--level` 與規則只能提高等級。L3 額外需要綁定 `manifestHash`、`status: approved` 和真實 reviewer 的 ADR JSON。詳細範例見 [協定與狀態](docs/protocols.md)。
+## 命令總覽
 
-## Demo
+所有命令都接受 `--project PATH`；以 `protoflow --help` 為準。
 
-Demo 的 prototype 與 app 是獨立 HTML，包含建立 Design Session 的互動。Demo 命令應從 repository 根目錄執行：
+| 命令 | 作用 |
+|---|---|
+| `init` / `install [--personal] [--skip-integrations]` | 建立配置與約定／安裝 Skill、Spec Kit 與 BMad |
+| `doctor` | 接入環境診斷 |
+| `source scan` / `source status` | 掃描並凍結 Git 提交／來源進度 |
+| `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、綁定新設定、回收 worktree |
+| `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |
+| `queue` / `status` | 版本佇列（含 `release`）／會話、Baseline、佇列與整合狀態 |
+| `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
+| `contract show --manifest ID` | 凍結版本的靜態 UI 合約與變更範圍（v2） |
+| `migrate anchors [--output DIR]` | v1 映射 → v2 錨點遷移草稿（v1） |
+| `mappings suggest` | 由原型頁面產生 mapping 草稿（v1） |
+| `session start` / `session list` / `watch [--once]` / `checkpoint` | 本機設計流程 |
+| `context` / `prepare --adapter specKit\|bmad` / `execute` / `verify` / `repair` | 手動推進當前版本 |
+| `review create\|approve\|reject\|request-changes` | 人工或模型審查決定 |
+| `baseline create` / `baseline show` | 保存／讀取批准節點 |
+
+**輸出契約**：stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件）；失敗時，stderr 最後一行是 JSON 錯誤，之前的行是 `ProtoFlow:` 提醒或診斷。外部命令一律是 argv 陣列，不經 shell 執行。
+
+**退出碼**：`0` 成功；`1` 錯誤或 FAIL；`2` NOT_RUN 或仍需 Review；`3` BLOCKED（包括跨版本操作）。
+
+Node API 從 `src/index.js` 匯出，包括 `requestIndependentReview`、`acceptanceClient` 等可重用接口。
+
+## 範例
+
+| 範例 | 內容 |
+|---|---|
+| [examples/demo](examples/demo/) | 最小 v1 流程，`npm run demo` 啟動原型與應用 |
+| [examples/modular](examples/modular/) | 多頁原型、共用資源與多筆映射（v1） |
+| [examples/anchors](examples/anchors/) | 語意錨點、sidecar 狀態與 tokens，一個 Web target（v2） |
+| [examples/mobile](examples/mobile/) | 同一份原型驅動 SwiftUI、Compose、React Native、Flutter 四個 target（v2） |
+
+範例命令請從引擎根目錄執行，例如：
 
 ```sh
-node bin/protoflow.js init --project examples/demo
-node bin/protoflow.js install --skip-integrations --project examples/demo
-node bin/protoflow.js checkpoint --project examples/demo
-# 使用 checkpoint 回傳的 ID；提供已備妥的 Demo specification
-node bin/protoflow.js context --project examples/demo --manifest MANIFEST_ID --spec specs/demo.md
-npm run demo
+node bin/protoflow.js anchors lint --project examples/anchors
+node bin/protoflow.js checkpoint --project examples/anchors --summary "Tasks v1"
+node bin/protoflow.js verify --project examples/anchors --manifest MANIFEST_ID
 ```
 
-在第二個 terminal：
+範例的頁面與元件只屬於該範例；試跑只會建立 pending Review，不能代替真實產品的批准。
+
+## 開發與測試
 
 ```sh
-node bin/protoflow.js verify --project examples/demo --manifest MANIFEST_ID
+npm run check       # JavaScript 語法與配置 schema
+npm test            # node --test 單元測試
+npm run test:e2e    # Node.js Playwright runner
+npm run validate    # 以上全部
+npm pack            # 產生可移交的本機套件，不會 publish
 ```
 
-驗證會生成 `.protoflow/artifacts/VER_ID/visual-review.html`、prototype/app 截圖、side-by-side、overlay、diff，以及逐元件幾何／樣式／像素結果。Demo 的 functional 命令使用此 checkout 的 Playwright runner；搬到其他專案時改成該專案自己的命令。Demo 試跑只建立 pending Review，不代替真實產品批准。
+Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可用 `npm run test:e2e -- --project=<name>` 分別執行。`ios` 與 `android` 是真實模擬器驗收，需要設定 `PROTOFLOW_IOS_DEVICE` 或 `PROTOFLOW_ANDROID_AVD`。缺少原生環境時，會在報告中明確顯示為 skip，不能當作驗收通過。CI 在 Ubuntu 執行單元測試與 Chromium E2E，在 macOS 執行真實 Electron E2E。
 
-## 外部工具與驗證界線
+測試都在暫存專案中隔離執行；人工批准測試使用明確標示的 synthetic reviewer。本機 Git fixture 和假的 provider 只是測試替身，真實 GitHub + Codex 驗收另需保留來源 SHA、EXEC JSONL、verification 與截圖，見 [原生 target 驗收紀錄](docs/native-targets.md#驗收紀錄)。
 
-Spec Kit／BMad 由 `install` 安裝到目標專案，但仍是獨立工具：它們的 skills 由 Codex 或開發者在對話中使用，ProtoFlow 產生 request，接受 adapter 回傳的實際 artifact，**不把 agent skill 當 terminal 命令**。安裝與 adapter 接口已用本機測試替身驗證；真實安裝依賴網路與兩個上游專案的 CLI。官方來源：[Spec Kit](https://github.com/github/spec-kit)、[BMad](https://github.com/bmad-code-org/BMAD-METHOD)。
+版本號規則見 [AGENTS.md](AGENTS.md)：沒有特別指定時，只遞增第三段。
 
-Codex 橋接在 `scripts/codex-adapter.js`：配置 `argv: ["node", "/absolute/shared-engine/scripts/codex-adapter.js"]`。它將 Context Package 經 stdin 交給 `codex exec --json --sandbox workspace-write -`；需要已安裝且可使用的 Codex。命令參數已對照本機 CLI help 和 [官方非互動模式](https://developers.openai.com/codex/noninteractive)。設定 `adapters.codex.ignoreUserConfig: true` 可讓執行者不載入 `~/.codex/config.toml`（含 memories），避免個人記憶進入獨立 reviewer 會讀的 EXEC trace；代價是 config 中的模型、provider、MCP 與 sandbox 設定也不生效，詳見 [整合：Codex](docs/integrations.md#執行者隔離ignoreuserconfig)。Adapter 退出成功只表示程序完成，最終是否可批准仍由 `verify` 決定。
+## 文件
 
-交付另需配置 `adapters.independentReview.command`，使用共享 `scripts/codex-review-adapter.js`。它以既有 CLI 登入啟動新的 read-only、ephemeral Codex session；從完整 JSONL 保存真實 session、structured verdict 與 hash，不接受執行代理或 Runner 自填 PASS。詳見 [獨立 AI review gate 與重用接口](docs/independent-review.md)。這份 AI 證據不代替真人 ADR 或 GitHub approval，合併仍遵守 branch protection。
-
-視覺驗證固定 viewport、DPR、locale、theme、timezone、fixture、互動步驟與遮罩；比較 geometry、computed styles、全視窗與每個元件區域。任何映射失敗、未映射變更、缺失覆蓋都不能靠整頁平均值通過。原生 UI、動畫時序、真正裝置和後端 provider 驗收需另接專案測試；native 模式記錄 `NOT_RUN`。詳見 [架構](docs/architecture.md) 與 [整合協定](docs/integrations.md)。
-
-## 驗證與擴充
-
-```sh
-npm run check       # JavaScript syntax + 配置 schema
-npm test            # 安裝、分類、watch、協定、政策及過期證據
-npm run test:e2e    # Node.js Playwright runner：互動、視覺、CLI完整流程、修復迴圈
-npm run validate   # 全部
-npm pack           # 可移交的本機 npm package；不會 publish
-```
-
-測試隔離在暫存專案；人工批准測試使用明確的 synthetic reviewer，沒有批准真實專案。CI 保存相同 runner 流程。Node API 從 `src/index.js` 匯出；CLI 是薄入口，adapter 使用版本化 JSON。下一步是在真實目標專案填入映射、固定測試資料、配置 build／Playwright 與 Codex adapter，再由人類驗收第一個 Baseline。
+| 文件 | 內容 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 模組邊界、路由、驗證可信度與限制 |
+| [docs/git-runner.md](docs/git-runner.md) | Git 來源、Runner、多目標、自動交付與恢復 |
+| [docs/independent-review.md](docs/independent-review.md) | 獨立 AI 審查閘門與重用接口 |
+| [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Flutter 的需求、配置與約定 |
+| [docs/integrations.md](docs/integrations.md) | Codex、Spec Kit、BMad adapter 與沙箱權限 |
+| [docs/acceptance-adapters.md](docs/acceptance-adapters.md) | 專案驗收 adapter 協定（v1） |
+| [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
+| [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
+| [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）與 Android／Flutter（0002）提案及實作紀錄 |
