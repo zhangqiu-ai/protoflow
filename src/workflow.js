@@ -183,7 +183,13 @@ export async function prepareIntegration(root, config, manifestId, adapter, { ta
   }
   return persist(root, 'contexts', { schemaVersion: 1, id: id('INT'), createdAt: date(), request, result, response, status: result.status });
 }
-export async function executeContext(root, config, contextId, { execute = false, repair = null, signal, onBeforeSpawn, onStart } = {}) {
+/** The executor that runs first and the one that takes over when it has no capacity (proposal 0003); Codex before 0003. */
+export function executorPlan(config) {
+  const primary = config.policy?.executor?.primary ?? 'codex', fallback = config.policy?.executor?.fallback ?? null;
+  return { primary, fallback: fallback && fallback !== primary ? fallback : null };
+}
+export const executorCommand = (config, provider) => config.adapters?.[provider]?.command ?? null;
+export async function executeContext(root, config, contextId, { execute = false, repair = null, signal, onBeforeSpawn, onStart, provider = executorPlan(config).primary } = {}) {
   const context = await loadArtifact(root, 'contexts', contextId);
   await assertCurrentVersion(root, config, context.manifestId, { target: context.target });
   const { manifest } = await manifestVersion(root, config, context.manifestId);
@@ -203,15 +209,15 @@ export async function executeContext(root, config, contextId, { execute = false,
     repair: repair && { ...repair, ...(repair.verification && { verification: { ...repair.verification, project: brief(repair.verification.project), git: briefGit(repair.verification.git) } }) },
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
-  if (!execute) return { status: 'NOT_RUN', contextId, request, reason: 'Use --execute after configuring the Codex adapter' };
-  const command = config.adapters?.codex?.command;
+  if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
+  const command = executorCommand(config, provider);
   const before = await snapshot(root, config);
   const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart });
   try { await loadVersion(root, config, manifest); }
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
   // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.
   const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
-  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
+  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
 }
 export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, reverify = false } = {}) {
   // `reverify` re-checks an accepted version after its target merged a moved base; the latest PASS then accepts it.

@@ -62,6 +62,26 @@
 
 這是合併到既有配置的片段，不是完整 config。橋接執行 `codex exec --json --sandbox workspace-write -`，從 stdin 傳入 prompt。可於 adapter argv 指定 `--model MODEL` 與 `--ephemeral`；仍固定 workspace-write，不接受繞過 sandbox 的參數。程序結果、stdout JSONL 與 stderr 保存至 execution evidence；exit zero 不代替產品驗證。官方：[Codex 非互動模式](https://developers.openai.com/codex/noninteractive)。
 
+### Claude 執行者與 Codex 備援（提案 0003）
+
+`policy.executor` 選擇執行者；未配置時維持 Codex（與既有專案相容）。提案 0003 的預設為 Claude Sonnet，額度不足時由 Codex 接手：
+
+```json
+{
+  "policy": { "executor": { "primary": "claude", "fallback": "codex" } },
+  "adapters": {
+    "claude": { "command": { "argv": ["node", "/absolute/shared/protoflow/scripts/claude-exec-adapter.js", "--model", "claude-sonnet-5-5", "--max-budget-usd", "10"], "timeoutMs": 1800000 } },
+    "codex": { "command": { "argv": ["node", "/absolute/shared/protoflow/scripts/codex-adapter.js"], "timeoutMs": 1800000 } }
+  }
+}
+```
+
+- `scripts/claude-exec-adapter.js` 以 `claude -p --restricted` 執行：檔案工具限制在 worktree（`--add-dir` 可加絕對路徑），只開 Read、Grep、Glob、Edit、Write、Bash；Bash 在 OS 沙箱內執行且不允許退回非沙箱；編輯自動接受，其他需要確認的操作一律拒絕；不載入使用者設定、MCP 或保存的 session。stdout 是完整的 stream-json trace，作為執行證據。
+- 執行指示與 Codex 相同（`src/executor-prompt.js`）。
+- **備援**：主要執行者回報額度或限流（usage limit、rate limit、quota、overloaded、429／529、model at capacity）時，同一個 attempt 改由 `fallback` 重做一次，attempt 記錄 `executor` 與 `executorFallback`，並發出 `executor-fallback` 事件。其他失敗照一般規則處理（暫時性重試、失敗 attempt、修復上限）。
+- **交付證據**：EXEC 紀錄帶 `executor`。Claude 執行者的 trace 以執行者規則驗證（單一 session、工具不超出上述集合、`acceptEdits` 或 `dontAsk`、成功結束），binding 的 `executors` 記錄 `executor: "claude"` 與 session；Codex 紀錄維持原格式。
+- **登入**：Claude CLI 從啟動 ProtoFlow 的環境取得憑證（`claude setup-token` 產生的 `CLAUDE_CODE_OAUTH_TOKEN`，或 `ANTHROPIC_API_KEY`）。ProtoFlow 不讀取或保存憑證；未登入時 Claude 回報失敗，有備援時改由 Codex 執行。
+
 ### 專案工具鏈的沙箱權限（`--add-dir`、`--network`）
 
 workspace-write 只允許寫入專案 worktree，且禁止網路。有些工具鏈即使只跑本機測試也需要更多權限，執行者因此無法驗證自己的修改，只能盲改：

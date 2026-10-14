@@ -1371,3 +1371,33 @@ test('a failed executor run is one bounded attempt and the next attempt is told 
   assert.deepEqual(attempts.map(attempt => attempt.status), ['FAIL', 'FAIL']);
   assert.ok(attempts.every(attempt => attempt.completedAt));
 });
+
+test('a primary executor without capacity hands the same attempt to the fallback executor once', async t => {
+  const { root, config } = await fixture(t);
+  const log = path.join(root, '..', 'executors.log');
+  const quota = JSON.stringify({ type: 'result', subtype: 'success', is_error: true, session_id: 'fake-session-a', result: 'Claude usage limit reached; resets at 5pm' });
+  config.adapters.claude = { command: { argv: [process.execPath, '-e', `require('node:fs').appendFileSync(process.argv[1],'claude\\n');process.stdin.resume();process.stdin.on('end',()=>{console.log(process.argv[2]);process.exit(1)})`, log, quota] } };
+  config.adapters.codex.command.argv = [process.execPath, '-e', `require('node:fs').appendFileSync(process.argv[1],'codex\\n');process.stdin.resume();process.stdin.on('end',()=>{console.error('TypeError: executor crashed');process.exit(1)})`, log];
+  config.policy = { ...config.policy, executor: { primary: 'claude', fallback: 'codex' }, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /^Codex execution FAIL .*executor crashed/);
+  assert.equal(await fs.readFile(log, 'utf8'), 'claude\ncodex\n');
+  const fallback = events.find(event => event.event === 'executor-fallback');
+  assert.deepEqual([fallback.from, fallback.to], ['claude', 'codex']); assert.match(fallback.reason, /usage limit/);
+  const attempt = (await sourceStatus(root)).entries[0].attempts[0];
+  assert.equal(attempt.executor, 'codex'); assert.equal(attempt.executorFallback.from, 'claude');
+  assert.equal(attempt.processes.filter(child => child.phase === 'execute').length, 2);
+  const executions = (await fs.readdir(path.join((await runnerStatus(root)).runner.worktree, '.protoflow/contexts'))).filter(name => name.startsWith('EXEC-'));
+  const providers = await Promise.all(executions.map(async name => JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, '.protoflow/contexts', name), 'utf8')).executor));
+  assert.deepEqual(providers.sort(), ['claude', 'codex']);
+});
+
+test('without a policy the executor stays Codex, and a missing executor adapter is NOT_RUN', async t => {
+  const { root, config } = await fixture(t);
+  config.policy = { ...config.policy, executor: { primary: 'claude' } };
+  await scanSource(root, config);
+  assert.deepEqual(await runOnce(root, config), { status: 'NOT_RUN', reason: 'The claude executor adapter is not configured' });
+});

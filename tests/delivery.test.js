@@ -1290,3 +1290,24 @@ test('FAKE provider: after a restart the runner revalidates an unattested PASS w
   assert.deepEqual(delivery.independentReviewAttempts.map(attempt => attempt.status), ['PASS', 'PASS']);
   assert.deepEqual(delivery.approvalHistory, [old.approval]);
 });
+
+test('FAKE provider: Claude executor evidence is verified with the executor rules and bound with its provider', async t => {
+  const execTrace = tools => [
+    { type: 'system', subtype: 'init', session_id: 'claude-executor-1', tools, mcp_servers: [], model: 'claude-sonnet-5-5', permissionMode: 'acceptEdits' },
+    { type: 'assistant', session_id: 'claude-executor-1', message: { content: [{ type: 'tool_use', name: 'Edit' }] } },
+    { type: 'result', subtype: 'success', is_error: false, session_id: 'claude-executor-1', result: 'FAKE FIXTURE ONLY' }
+  ].map(event => JSON.stringify(event)).join('\n') + '\n';
+  for (const [tools, expected] of [[['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'], 'PASS'], [['Read', 'Edit', 'WebFetch'], 'BLOCKED']]) {
+    const f = await fixture(t);
+    const file = path.join(f.worktree, '.protoflow/contexts/EXEC-fixture-1.json'), record = await readJson(file);
+    Object.assign(record, { executor: 'claude' }); record.result.stdout = execTrace(tools);
+    await writeJson(file, record);
+    const result = await syncDeliveries(f.root, f.config);
+    assert.equal(result.status, expected, JSON.stringify(result));
+    if (expected === 'PASS') {
+      const [delivery] = (await deliveryStatus(f.root)).deliveries;
+      const { binding } = await readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}/request.json`));
+      assert.deepEqual(binding.executors.map(item => [item.executor, item.sessionId]), [['claude', 'claude-executor-1']]);
+    } else assert.match(result.deliveries[0].error, /beyond the executor set: WebFetch/);
+  }
+});

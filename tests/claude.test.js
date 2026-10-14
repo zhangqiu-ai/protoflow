@@ -112,3 +112,21 @@ test('the claude executable resolves from an explicit path or PATH, and is NOT_R
   const result = await run(empty, request, { env: { PATH: path.dirname(process.execPath), PROTOFLOW_CLAUDE: '' } });
   assert.equal(result.code, 2); assert.equal(result.envelope.reasonCode, 'CLAUDE_UNAVAILABLE');
 });
+
+test('the executor may edit and run sandboxed commands, nothing else; its trace needs no structured output', async () => {
+  const { claudeExecutorArgv, CLAUDE_EXECUTOR_TOOLS } = await import('../src/claude.js');
+  const argv = claudeExecutorArgv({ model: 'claude-sonnet-5-5', maxBudgetUsd: 10, addDirs: ['/opt/flutter'] });
+  assert.deepEqual(CLAUDE_EXECUTOR_TOOLS, ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash']);
+  for (const flag of ['--restricted', '--no-session-persistence', '--strict-mcp-config']) assert.ok(argv.includes(flag), flag);
+  assert.equal(argv[argv.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash');
+  assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'acceptEdits');
+  assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1]), { sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false } });
+  assert.deepEqual(argv.slice(argv.indexOf('--add-dir'), argv.indexOf('--add-dir') + 2), ['--add-dir', '/opt/flutter']);
+  assert.ok(!argv.includes('--dangerously-skip-permissions') && !argv.includes('bypassPermissions'));
+  const edit = { type: 'assistant', session_id: 'session-0001', message: { content: [{ type: 'tool_use', name: 'Edit' }, { type: 'tool_use', name: 'Bash' }] } };
+  const executorInit = init({ tools: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'], permissionMode: 'acceptEdits' });
+  assert.equal(readClaudeTrace(jsonl([executorInit, edit, done({ structured_output: undefined })]), { executor: true }).output, null);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit, edit, done()])), /offered tools beyond read-only: Edit, Write, Bash/);
+  assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Read', 'WebFetch'], permissionMode: 'acceptEdits' }), done()]), { executor: true }), /beyond the executor set: WebFetch/);
+  assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Read'], permissionMode: 'bypassPermissions' }), done()]), { executor: true }), /not dontAsk or acceptEdits/);
+});

@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
+import { readClaudeTrace } from './claude.js';
 import { hash, id, fingerprint, projectPath, readJson, writeJson, runCommand, RUNTIME_DIRS } from './util.js';
 import { loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, deliveryBranch, isMultiTarget } from './streams.js';
@@ -145,7 +146,11 @@ async function executorRecords(root, worktree, entries, external) {
     const record = JSON.parse(bytes), manifestId = record.request?.manifest?.id;
     if (!/^EXEC-[A-Za-z0-9-]+$/.test(record.id ?? '') || record.status !== 'PASS' || record.result?.status !== 'PASS' || record.result?.exitCode !== 0 || record.result?.spawned === false || record.result?.processGroupActive || !['implement', 'repair'].includes(record.request?.kind) || record.request.manifestHash !== hash(record.request.manifest) || !entries.some(entry => entry.manifestId === manifestId) || (reference.manifestId && reference.manifestId !== manifestId)) throw blocked('Executor provenance is not a successful execution of the accepted manifest');
     if (hash(record.request.manifest) !== hash(await loadArtifact(root, 'manifests', manifestId))) throw blocked('Executor provenance manifest changed');
-    records.push({ path: reference.path, origin: external ? 'root' : 'worktree', hash: hash(bytes), manifestId, executionId: record.id, ...readCodexTrace(record.result.stdout) });
+    // The executor that produced this record (proposal 0003); records before it were all Codex.
+    const executor = record.executor ?? 'codex';
+    if (!['codex', 'claude'].includes(executor)) throw blocked(`Unknown executor ${executor}`);
+    const trace = executor === 'claude' ? readClaudeTrace(record.result.stdout, { executor: true }) : readCodexTrace(record.result.stdout);
+    records.push({ path: reference.path, origin: external ? 'root' : 'worktree', hash: hash(bytes), manifestId, executionId: record.id, ...(executor !== 'codex' && { executor }), sessionId: trace.sessionId, traceHash: trace.traceHash });
   }
   if (entries.some(entry => !records.some(record => record.manifestId === entry.manifestId))) throw blocked('Executor provenance is missing an accepted source version');
   return records;
