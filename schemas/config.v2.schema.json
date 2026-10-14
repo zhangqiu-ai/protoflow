@@ -278,6 +278,12 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "provider": {
+              "enum": [
+                "claude",
+                "codex"
+              ]
+            },
             "command": {
               "anyOf": [
                 {

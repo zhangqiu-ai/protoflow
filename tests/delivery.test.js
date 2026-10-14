@@ -12,7 +12,7 @@ import { writeJson, hash, fingerprint, readJson } from '../src/util.js';
 import { applicationFingerprint, createReview, decideReview } from '../src/workflow.js';
 import { snapshot } from '../src/sessions.js';
 import { freezeVersion } from '../src/versions.js';
-import { assertIndependentReview, requestIndependentReview } from '../src/delivery-review.js';
+import { assertIndependentReview, requestIndependentReview, recordedVerdict } from '../src/delivery-review.js';
 import { deliveryGit, transientFailure } from '../src/delivery-scope.js';
 import { fileURLToPath } from 'node:url';
 import { FAKE_GH } from './helpers/fake-gh.js';
@@ -82,11 +82,12 @@ async function fakeEnvironment(t, base, root, remote) {
   await fs.writeFile(path.join(bin, 'gh'), FAKE_GH, { mode: 0o755 });
   await fs.copyFile(fileURLToPath(new URL('./fixtures/fake-delivery-git.cjs', import.meta.url)), path.join(bin, 'git')); await fs.chmod(path.join(bin, 'git'), 0o755);
   await fs.copyFile(fileURLToPath(new URL('./fixtures/fake-codex-review.cjs', import.meta.url)), path.join(bin, 'codex')); await fs.chmod(path.join(bin, 'codex'), 0o755);
+  await fs.copyFile(fileURLToPath(new URL('./fixtures/fake-claude.cjs', import.meta.url)), path.join(bin, 'claude')); await fs.chmod(path.join(bin, 'claude'), 0o755);
   const db = path.join(base, 'gh.json');
   const transport = path.join(base, 'git-transport.json'), transportLog = path.join(base, 'git-calls.json');
   await writeJson(transport, { realGit, urls: { [fixtureUrl]: remote }, log: transportLog });
   await git(root, 'remote', 'set-url', 'origin', fixtureUrl);
-  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE'].map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE', 'FAKE_CLAUDE_MODE', 'PROTOFLOW_CLAUDE'].map(key => [key, process.env[key]]));
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   process.env.FAKE_GH_DB = db;
   process.env.FAKE_DELIVERY_GIT = transport;
@@ -1309,5 +1310,45 @@ test('FAKE provider: Claude executor evidence is verified with the executor rule
       const { binding } = await readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}/request.json`));
       assert.deepEqual(binding.executors.map(item => [item.executor, item.sessionId]), [['claude', 'claude-executor-1']]);
     } else assert.match(result.deliveries[0].error, /beyond the executor set: WebFetch/);
+  }
+});
+
+test('FAKE provider: a Claude acceptor reviews the same bound request, and its FAIL blocks like any verdict', async t => {
+  const claudeReview = fileURLToPath(new URL('../scripts/claude-review-adapter.js', import.meta.url));
+  for (const mode of ['review-pass', 'review-fail']) {
+    const f = await fixture(t); delete process.env.PROTOFLOW_CLAUDE;
+    f.config.adapters.independentReview = { provider: 'claude', command: { argv: [process.execPath, claudeReview, '--model', 'claude-opus-5-5', '--max-budget-usd', '5'], timeoutMs: 10000 } };
+    process.env.FAKE_CLAUDE_MODE = mode;
+    const result = await syncDeliveries(f.root, f.config); delete process.env.FAKE_CLAUDE_MODE;
+    const [delivery] = (await deliveryStatus(f.root)).deliveries;
+    const record = await reviewRecord(f, delivery.independentReviewId);
+    const request = await readJson(path.join(f.root, record.requestFile)), run = await readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${record.id}/run.json`));
+    assert.equal(request.binding.provider, 'claude'); assert.match(request.binding.providerExecutable.path, /claude$/);
+    assert.equal(run.provider, 'claude'); assert.equal(run.sandbox, 'read-only'); assert.equal(run.sessionId, 'fake-session-a');
+    if (mode === 'review-pass') {
+      assert.equal(result.status, 'PASS', JSON.stringify(result)); assert.equal(delivery.status, 'MERGED'); assert.equal(record.status, 'PASS');
+    } else {
+      assert.equal(result.status, 'BLOCKED'); assert.equal(record.status, 'BLOCKED'); assert.match(record.reason, /Independent review FAIL/);
+      assert.equal((await recordedVerdict(f.root, record)).findings[0].description, 'Synthetic Claude fixture finding, no real provider review');
+    }
+  }
+});
+
+test('FAKE provider: the Claude acceptor must be the shared adapter with known options and a read-only trace', async t => {
+  const claudeReview = fileURLToPath(new URL('../scripts/claude-review-adapter.js', import.meta.url));
+  for (const [argv, mode, pattern] of [
+    [[process.execPath, claudeReview, '--dangerously-skip-permissions', 'yes'], 'review-pass', /Unsupported independent review adapter options/],
+    [[process.execPath, fileURLToPath(new URL('../scripts/codex-review-adapter.js', import.meta.url))], 'review-pass', /must use the shared read-only Claude review adapter/],
+    [[process.execPath, claudeReview], 'write-tool', /provider did not complete safely/]
+  ]) {
+    const f = await fixture(t); delete process.env.PROTOFLOW_CLAUDE;
+    f.config.adapters.independentReview = { provider: 'claude', command: { argv, timeoutMs: 10000 } };
+    process.env.FAKE_CLAUDE_MODE = mode;
+    const result = await syncDeliveries(f.root, f.config); delete process.env.FAKE_CLAUDE_MODE;
+    assert.equal(result.status, 'BLOCKED', JSON.stringify(result));
+    const record = await reviewRecord(f, (await deliveryStatus(f.root)).deliveries[0].independentReviewId);
+    assert.match(record.reason, pattern);
+    if (mode === 'write-tool') assert.match(JSON.parse((await readJson(path.join(f.root, record.processFile))).stdout).error, /offered tools beyond read-only: Bash/);
+    await assertNoPublication(f);
   }
 });

@@ -9,7 +9,12 @@ process.stdin.on('end', () => {
   if (process.env.FAKE_CLAUDE_RECORD) fs.writeFileSync(process.env.FAKE_CLAUDE_RECORD, JSON.stringify({ args, input, cwd: process.cwd() }));
   const session = mode === 'mixed' ? 'fake-session-b' : 'fake-session-a';
   const tools = mode === 'write-tool' ? ['Read', 'Grep', 'Glob', 'Bash', 'StructuredOutput'] : ['Glob', 'Grep', 'Read', 'StructuredOutput'];
-  const output = process.env.FAKE_CLAUDE_OUTPUT ? JSON.parse(process.env.FAKE_CLAUDE_OUTPUT) : { status: 'PASS' };
+  // Review modes answer the bound request through the consts the bridge put into --json-schema.
+  const schema = args.includes('--json-schema') ? JSON.parse(args[args.indexOf('--json-schema') + 1]) : null;
+  const review = mode.startsWith('review-') && schema?.properties?.requestId?.const
+    ? { protocol: 'protoflow.independent-review/1', requestId: schema.properties.requestId.const, bindingHash: schema.properties.bindingHash.const, status: mode === 'review-fail' ? 'FAIL' : 'PASS', findings: mode === 'review-fail' ? [{ severity: 'high', file: 'app/index.html', line: 1, description: 'Synthetic Claude fixture finding, no real provider review' }] : [], summary: 'FAKE CLAUDE FIXTURE ONLY; no provider run' }
+    : null;
+  const output = review ?? (process.env.FAKE_CLAUDE_OUTPUT ? JSON.parse(process.env.FAKE_CLAUDE_OUTPUT) : { status: 'PASS' });
   const events = [
     { type: 'system', subtype: 'init', session_id: 'fake-session-a', tools, mcp_servers: [], model: 'claude-fake', permissionMode: mode === 'default-mode' ? 'default' : 'dontAsk' },
     { type: 'assistant', session_id: session, message: { content: [{ type: 'tool_use', name: mode === 'uses-edit' ? 'Edit' : 'Read', input: { file_path: 'README.md' } }] } },
