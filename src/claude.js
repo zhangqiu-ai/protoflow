@@ -61,7 +61,9 @@ export function readClaudeTrace(trace, { executor = false } = {}) {
   const forbidden = used.filter(name => !allowed.has(name));
   if (forbidden.length) throw claudeBlocked(`Claude session used tools beyond ${scope}: ${[...new Set(forbidden)].join(', ')}`);
   const results = events.filter(event => event.type === 'result');
-  if (results.length !== 1 || events.at(-1) !== results[0]) throw claudeBlocked('Claude trace has no single final result');
+  // After the result only informational events may follow (system task_summary, rate_limit_event); no more turns.
+  const after = results.length === 1 ? events.slice(events.indexOf(results[0]) + 1) : [];
+  if (results.length !== 1 || after.some(event => ['assistant', 'user', 'result'].includes(event.type) || (event.type === 'system' && event.subtype === 'init'))) throw claudeBlocked('Claude trace has no single final result');
   const result = results[0];
   if (result.subtype !== 'success' || result.is_error) {
     const reason = String(result.result ?? result.subtype ?? 'unknown').slice(0, 500);

@@ -34,9 +34,16 @@ test('traces that are not one read-only, completed session are blocked', () => {
     [jsonl([init(), { ...read, session_id: 'session-0002' }, done()]), /mixes sessions/],
     [jsonl([init(), read]), /no single final result/],
     [jsonl([init(), done(), read]), /no single final result/],
+    [jsonl([init(), done(), done()]), /no single final result/],
     [jsonl([init(), done({ subtype: 'error_max_budget_usd', is_error: true, result: 'budget' })]), /did not complete: budget/],
     [jsonl([init(), done({ structured_output: undefined })]), /no structured output/]
   ]) assert.throws(() => readClaudeTrace(trace), pattern, String(trace).slice(0, 80));
+});
+
+test('informational events from a real CLI around the result are accepted', () => {
+  // Recorded shape of claude 2.1.299: rate_limit_event mid-session and system task_summary after the result.
+  const trace = jsonl([init(), read, { type: 'rate_limit_event', session_id: 'session-0001' }, { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }, done(), { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }]);
+  assert.deepEqual(readClaudeTrace(trace).output, { status: 'PASS' });
 });
 
 test('a provider that cannot run here is an environment failure, a failed session is not', () => {
