@@ -35,7 +35,8 @@ test('Codex bridge invokes the CLI with workspace-write and literal context stdi
   assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '-']);
   assert.ok(received.stdin.includes(JSON.stringify(context, null, 2)));
   assert.match(received.stdin, /untrusted prototype/);
-  assert.match(received.stdin, /never leave caches or downloads in the project/);
+  assert.match(received.stdin, /Never leave caches or downloads in the project/);
+  assert.match(received.stdin, /Use each tool's normal home and caches .* when they are writable/);
   assert.match(result.stdout, /providerRun.*false/);
 });
 test('Codex bridge preserves executor failure instead of reporting success', async t => {

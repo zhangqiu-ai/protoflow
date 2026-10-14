@@ -12,6 +12,9 @@ while (args[command] === '-c' || args[command] === '--no-replace-objects') comma
 // One proxy outage of the next ls-remote, armed by a trigger file; mirrors git's real error text.
 const outage = process.env.FAKE_DELIVERY_GIT_UNAVAILABLE;
 if (outage && args[command] === 'ls-remote' && fs.existsSync(outage)) { fs.unlinkSync(outage); console.error("fatal: unable to access 'https://github.com/protoflow-fixture/application.git/': CONNECT tunnel failed, response 503"); process.exit(128); }
+// One non-transient push rejection, armed by a trigger file; mirrors GitHub's permission error text.
+const rejection = process.env.FAKE_DELIVERY_GIT_PUSH_REJECT;
+if (rejection && args[command] === 'push' && fs.existsSync(rejection)) { fs.unlinkSync(rejection); console.error('remote: Permission to protoflow-fixture/application.git denied to fixture.'); process.exit(1); }
 if (['ls-remote', 'fetch', 'push'].includes(args[command])) {
   let position = command + 1;
   while (args[position]?.startsWith('-')) position++;

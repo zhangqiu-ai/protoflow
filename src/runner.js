@@ -9,7 +9,8 @@ import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
-import { recordedVerdict, isRejectingVerdict, assertIndependentReview } from './delivery-review.js';
+import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interruptedProvider } from './delivery-review.js';
+import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
@@ -206,14 +207,31 @@ async function automateBlockedDelivery(root, config, stream, runner, { onEvent }
   if (record.status === 'PASS') {
     try { await assertIndependentReview(root, config, record.id); }
     catch (error) { retry = error.reasonCode === 'ENGINE_ATTESTATION_MISSING'; }
-  } else if (record.status === 'BLOCKED' && record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') {
-    retry = (delivery.independentReviewAttempts?.length ?? 1) < MAX_REVIEW_ATTEMPTS;
+  } else {
+    // The budget counts reviews the provider actually ran; a network failure before the provider costs nothing and
+    // the runner's own cadence spaces those retries.
+    let ran = 0;
+    for (const attempt of delivery.independentReviewAttempts ?? [{ id: record.id }]) {
+      const previous = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${attempt.id}.json`), null);
+      if (previous?.processFile) ran += 1;
+    }
+    retry = transientReviewBlock(record, verdict, ran) || (!verdict && ran < MAX_REVIEW_ATTEMPTS && await interruptedProvider(root, record));
   }
   if (!retry) return null;
   await onEvent({ event: 'review-retry', deliveryId: delivery.id, reviewId: record.id, reason: record.status === 'PASS' ? 'attestation lost on restart' : record.reason });
   const result = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream, retryIndependentReview: { deliveryId: delivery.id, reviewId: record.id } });
   await onEvent({ event: 'delivered', automated: 'review-retry', ...result });
   return { status: result.status === 'PASS' ? 'PASS' : 'BLOCKED', reason: result.reason ?? result.deliveries?.find(item => item.error)?.error, delivery: result };
+}
+/**
+ * A review attempt BLOCKED by the network without a rejecting verdict, within the budget of provider runs. Records written
+ * before a network signature was classified transient carry only their reason text, so that is checked as well.
+ */
+export function transientReviewBlock(record, verdict, attempts) {
+  // A PASS without findings may be re-reviewed after a network failure; FAIL, NOT_RUN or a finding never is.
+  if (record?.status !== 'BLOCKED' || isRejectingVerdict(verdict)) return false;
+  const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || transientFailure(record.reason);
+  return transient && attempts < MAX_REVIEW_ATTEMPTS;
 }
 async function rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent }) {
   const progress = await loadProgress(root, config, stream);
@@ -392,6 +410,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         });
         record.executionId = execution.id; record.executionStatus = execution.status;
         await processFinished('execute', record.pid, { ...execution.result, status: execution.status });
+        await reapLeftovers(root, runner.worktree, record, 'execute', onEvent);
         if (execution.result.processGroupActive) {
           const error = new Error('Executor subprocess group remains active; stop it before verification or repair');
           error.code = 'PROCESS_GROUP_ACTIVE'; error.phase = 'execute'; error.result = execution.result;
@@ -424,6 +443,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       executionFailure = null;
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
+      await reapLeftovers(root, runner.worktree, record, 'verify', onEvent);
       await saveProgress(root, config, stream, state);
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
@@ -453,7 +473,31 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   }
 }
 /** Live processes whose working directory is inside, or whose command line names, the runner worktree. */
-async function processesUsing(root, worktree) {
+/** Device services may have been started from a worktree by an older driver; they are shared, never leftovers. */
+const DEVICE_SERVICE = /qemu-system|\/emulator\/emulator|Simulator\.app|CoreSimulator|launchd_sim/;
+/**
+ * An executor's sandbox can start commands in their own process groups that outlive it (a Gradle build of a killed
+ * Codex run kept downloading for 40 minutes), and Xcode helpers keep a worktree as their directory. After each phase,
+ * whatever still works in the runner worktree belongs to that phase: stop it and record it in the attempt.
+ */
+async function reapLeftovers(root, worktree, record, phase, onEvent) {
+  let leftovers;
+  try { leftovers = await processesUsing(root, worktree, { commandLines: false }); }
+  catch (error) { record.leftoverCheck = { phase, error: error.message }; return []; }
+  const commands = new Map();
+  for (const item of leftovers) {
+    try { commands.set(item.pid, (await runCommand(root, { argv: ['ps', '-o', 'command=', '-p', String(item.pid)], timeoutMs: 10000 })).stdout.trim()); } catch { commands.set(item.pid, ''); }
+  }
+  const stray = leftovers.filter(item => !DEVICE_SERVICE.test(commands.get(item.pid) ?? '')).map(item => ({ ...item, command: (commands.get(item.pid) ?? '').slice(0, 200) }));
+  if (!stray.length) return [];
+  for (const item of stray) { try { process.kill(item.pid, 'SIGTERM'); } catch { /* already gone */ } }
+  await delay(3000);
+  for (const item of stray) { try { process.kill(item.pid, 0); process.kill(item.pid, 'SIGKILL'); item.forced = true; } catch { /* exited */ } }
+  record.leftoverProcesses = [...(record.leftoverProcesses ?? []), ...stray.map(item => ({ ...item, phase, at: new Date().toISOString() }))];
+  await onEvent({ event: 'leftover-processes', phase, processes: stray.map(item => ({ pid: item.pid, command: item.command.slice(0, 120) })) });
+  return stray;
+}
+async function processesUsing(root, worktree, { commandLines = true } = {}) {
   const real = await fs.realpath(worktree);
   const inside = value => value === real || value.startsWith(`${real}${path.sep}`) || value === worktree || value.startsWith(`${worktree}${path.sep}`);
   const found = new Map();
@@ -465,6 +509,7 @@ async function processesUsing(root, worktree) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
     else if (line.startsWith('n') && inside(line.slice(1)) && pid !== process.pid) found.set(pid, `cwd ${line.slice(1)}`);
   }
+  if (!commandLines) return [...found].map(([id, detail]) => ({ pid: id, detail }));
   const listed = await runCommand(root, { argv: ['ps', '-Ao', 'pid=,command='], timeoutMs: 60000 });
   if (listed.status !== 'PASS' || listed.overflow) throw new Error('ps failed; cannot confirm that no executor runs in the runner worktree');
   for (const line of listed.stdout.split('\n')) {
@@ -538,10 +583,13 @@ async function configureStream(root, config, stream) {
   if (hash(routing(old)) !== hash(routing(config))) throw new Error('Cannot change source/prototypeDir/targets or mapping ownership in an existing stream');
   const current = state.entries.find(entry => entry.status !== 'PASS');
   if (current && (await versionQueue(runner.worktree, old, { target: stream ?? undefined })).versions.find(version => version.id === current.manifestId)?.acceptedBy) throw new Error('Recover the interrupted PASS with the original config before reconfiguring');
-  runner.configurationHistory = [...(runner.configurationHistory ?? []), { previousHash: runner.configHash, configHash: hash(config), previousConfig: old, updatedAt: new Date().toISOString() }];
-  await writeJson(await projectPath(runner.worktree, 'protoflow.config.json'), config);
+  // A committed delivery that has not settled binds this worktree's bytes; rewriting its config file would make the
+  // reviewed tree differ from the checkout. The base branch carries the change in and integration reverifies it.
+  const deferred = (await deliveryStatus(root, config, stream)).deliveries.some(delivery => !['MERGED', 'PR_OPEN_MANUAL', 'REVOKED'].includes(delivery.status));
+  runner.configurationHistory = [...(runner.configurationHistory ?? []), { previousHash: runner.configHash, configHash: hash(config), previousConfig: old, updatedAt: new Date().toISOString(), ...(deferred && { configSync: 'deferred' }) }];
+  if (!deferred) await writeJson(await projectPath(runner.worktree, 'protoflow.config.json'), config);
   runner.configHash = hash(config); await saveRunner(root, runner, statePath);
-  return { status: 'PASS', worktree: runner.worktree, configHash: runner.configHash, next: current ? 'runner retry, then runner start' : 'runner start' };
+  return { status: 'PASS', worktree: runner.worktree, configHash: runner.configHash, configSync: deferred ? 'deferred' : 'written', next: current ? 'runner retry, then runner start' : 'runner start' };
 }
 /** Explicit operational configuration recovery; frozen source/routing ownership stays fixed. Applies to every target. */
 export async function configureRunner(root, config) {

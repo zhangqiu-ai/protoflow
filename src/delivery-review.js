@@ -68,6 +68,15 @@ export async function recordedVerdict(root, record) {
   })].filter(value => value && typeof value === 'object' && 'status' in value);
   return verdicts.find(verdict => !verdictAllowsRetry(verdict)) ?? verdicts.at(-1) ?? null;
 }
+/**
+ * A recorded attempt whose provider was stopped or killed before answering: the process has no exit code and printed
+ * nothing. Records written before this was marked retryable are recognized from their process evidence.
+ */
+export async function interruptedProvider(root, record) {
+  if (record?.status !== 'BLOCKED' || !record.processFile) return false;
+  const process = await readJson(await projectPath(root, record.processFile), null);
+  return Boolean(process) && process.exitCode === null && !String(process.stdout ?? '').trim();
+}
 /** A FAIL, NOT_RUN or finding from the reviewer is a judgment, never an infrastructure failure to retry. */
 export const isRejectingVerdict = verdict => Boolean(verdict) && !verdictAllowsRetry(verdict);
 export function assertStructuredVerdict(verdict, request) {
@@ -247,7 +256,12 @@ export async function requestIndependentReview(root, config, options) {
     const processFile = `${directory}/${reviewId}/process.json`;
     await writeJson(await projectPath(root, processFile), result);
     Object.assign(record, { processFile, processHash: hash(result) });
-    if (result.status !== 'PASS' || result.processGroupActive) throw blocked(`Independent review ${result.status}: provider did not complete safely`);
+    if (result.status !== 'PASS' || result.processGroupActive) {
+      const error = blocked(`Independent review ${result.status}: provider did not complete safely`);
+      // Stopped or killed before it answered (exit null, no output): infrastructure, never a judgment.
+      if (result.aborted || (result.exitCode === null && !String(result.stdout ?? '').trim())) error.transient = true;
+      throw error;
+    }
     try { run = JSON.parse(result.stdout); } catch { throw blocked('Independent review returned no strict structured run evidence'); }
     await writeJson(await projectPath(root, runFile), run);
     if (run?.verdict) Object.assign(record, { runFile, runHash: hash(run), sessionId: run.sessionId, traceHash: run.traceHash, verdictHash: hash(run.verdict) });
