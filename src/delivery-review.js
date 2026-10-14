@@ -78,13 +78,17 @@ function checkVerdict(verdict, request) {
   assertStructuredVerdict(verdict, request);
   if (verdict.status !== 'PASS' || verdict.findings.length) throw blocked(`Independent review ${verdict.status}; ${verdict.summary}`);
 }
+const RECONNECT = /^Reconnecting\.\.\. \d+\/\d+\b/;
 export function readCodexTrace(trace, { finalVerdict = false } = {}) {
   if (typeof trace !== 'string' || !trace.trim()) throw blocked('Missing raw Codex trace');
   let events;
   try { events = trace.trim().split(/\r?\n/).map(line => JSON.parse(line)); }
   catch { throw blocked('Malformed raw Codex JSONL trace'); }
   const threads = events.filter(event => event.type === 'thread.started');
-  if (threads.length !== 1 || !session.test(threads[0].thread_id ?? '') || events.filter(event => event.type === 'turn.started').length !== 1 || events.filter(event => event.type === 'turn.completed').length !== 1 || events.findIndex(event => event.type === 'thread.started') >= events.findIndex(event => event.type === 'turn.started') || events.findIndex(event => event.type === 'turn.started') >= events.findIndex(event => event.type === 'turn.completed') || events.some(event => ['error', 'turn.failed'].includes(event.type))) throw blocked('Codex trace has no single completed fresh session');
+  const started = events.findIndex(event => event.type === 'turn.started'), completed = events.findIndex(event => event.type === 'turn.completed');
+  // Codex reports a dropped model stream it retried as an `error` event ("Reconnecting... 1/5"); inside a turn that still completes it is not a failure.
+  const fatal = (event, index) => event.type === 'turn.failed' || (event.type === 'error' && !(index > started && index < completed && RECONNECT.test(event.message ?? '')));
+  if (threads.length !== 1 || !session.test(threads[0].thread_id ?? '') || events.filter(event => event.type === 'turn.started').length !== 1 || events.filter(event => event.type === 'turn.completed').length !== 1 || events.findIndex(event => event.type === 'thread.started') >= started || started >= completed || events.some(fatal)) throw blocked('Codex trace has no single completed fresh session');
   const result = { sessionId: threads[0].thread_id, traceHash: hash(trace) };
   if (finalVerdict) {
     const messages = events.filter(event => event.type === 'item.completed' && event.item?.type === 'agent_message');
@@ -122,6 +126,11 @@ function reviewTarget(config, target) {
   if (!config.targets.some(item => item.id === target)) throw blocked('Independent review requires the delivering target');
   return target;
 }
+/** What a multi-target review judges: the delivering target's root; sibling roots ship through their own streams. */
+const reviewScope = (config, target) => ({
+  target, root: config.targets.find(item => item.id === target).root.replace(/\/+$/, ''),
+  siblings: config.targets.filter(item => item.id !== target).map(item => ({ target: item.id, root: item.root.replace(/\/+$/, '') }))
+});
 // ProtoFlow <= 0.2.0 exported the main-root VER with a top-level runnerWorktree path; that key is not evidence.
 const contentReport = ({ runnerWorktree, ...report }) => report;
 async function executorRecords(root, worktree, entries, external) {
@@ -202,7 +211,7 @@ async function capture(root, config, options, ownedMerge = null) {
   try { await git(worktree, ['merge-base', '--is-ancestor', remote.baseSha, head]); }
   catch { throw blocked('Current remote base is not an ancestor of the reviewed application HEAD'); }
   return {
-    schemaVersion: 1, target, commit: head, tree: await git(worktree, ['rev-parse', `${head}^{tree}`]), rootHead: await git(root, ['rev-parse', 'HEAD']),
+    schemaVersion: 1, target, ...(target && { scope: reviewScope(config, target) }), commit: head, tree: await git(worktree, ['rev-parse', `${head}^{tree}`]), rootHead: await git(root, ['rev-parse', 'HEAD']),
     checkout: { gitDir: await fs.realpath(await git(worktree, ['rev-parse', '--absolute-git-dir'])), commonDir: await fs.realpath(path.resolve(worktree, await git(worktree, ['rev-parse', '--git-common-dir']))), branch: await git(worktree, ['symbolic-ref', '--quiet', 'HEAD']) },
     applicationHash: application.hash, contentHash: content.hash, filesHash: hash(content.files), configHash: hash(config),
     versions, executors, ambientAuthorIds, remote, providerExecutable: await resolveCodexExecutable()
@@ -226,8 +235,10 @@ export async function requestIndependentReview(root, config, options) {
   try {
     const command = await commandFor(config), binding = await capture(root, config, options);
     const worktree = options.worktree ?? root;
-    const diff = await git(worktree, ['diff', '--no-ext-diff', '--no-textconv', binding.remote.baseSha, binding.commit, '--', '.']);
-    if (diff.length > 2 * 1024 * 1024) throw blocked('Review diff exceeds the bounded request limit');
+    let diff;
+    try { diff = await git(worktree, ['diff', '--no-ext-diff', '--no-textconv', binding.remote.baseSha, binding.commit, '--', '.']); }
+    catch (error) { if (error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error; diff = null; }
+    if (diff === null || diff.length > 2 * 1024 * 1024) throw blocked(`Review diff exceeds the bounded request limit (${(await git(worktree, ['diff', '--shortstat', binding.remote.baseSha, binding.commit, '--', '.'])).trim()})`);
     const request = { protocol: 'protoflow.independent-review-request/1', id: reviewId, binding, bindingHash: hash(binding), diff };
     const requestFile = `${directory}/${reviewId}/request.json`, runFile = `${directory}/${reviewId}/run.json`;
     await writeJson(await projectPath(root, requestFile), request);

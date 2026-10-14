@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
-import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand } from './util.js';
+import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand, applicationHygiene } from './util.js';
 import { snapshot } from './sessions.js';
 import { verifyVisual } from './visual.js';
 import { runAcceptanceAdapter } from './acceptance.js';
@@ -103,8 +103,18 @@ async function rejectionFindings(root, version, config, target) {
   const rejections = (version?.rejections ?? []).filter(item => selected === undefined || (item.target ?? config.targets[0]?.id) === selected);
   return Promise.all(rejections.map(async item => {
     const review = await loadArtifact(root, 'reviews', item.reviewId);
-    return { reviewId: review.id, manifestId: review.manifestId, verificationId: review.verificationId, status: review.status, reviewerKind: review.reviewerKind ?? 'human', reviewer: review.reviewer, notes: review.notes, findings: review.findings, model: review.model ?? null };
+    return { reviewId: review.id, manifestId: review.manifestId, verificationId: review.verificationId, status: review.status, reviewerKind: review.reviewerKind ?? 'human', reviewer: review.reviewer, notes: review.notes, findings: review.findings, model: review.model ?? null, rejectedVerification: await verificationSummary(root, review.verificationId) };
   }));
+}
+/** What the rejected verification measured, so an executor can check findings against evidence it cannot rerun. */
+async function verificationSummary(root, verificationId) {
+  let report;
+  try { report = await loadArtifact(root, 'verifications', verificationId); } catch { return null; }
+  return {
+    status: report.status, build: report.build?.status ?? null, functional: report.functional?.status ?? null, visual: report.visual?.status ?? null,
+    scenes: (report.visual?.scenes ?? []).map(scene => ({ id: scene.id, ...(scene.variant && { variant: scene.variant }), status: scene.status, tiers: Object.fromEntries(Object.entries(scene.tiers ?? {}).map(([name, tier]) => [name, tier.status])) })),
+    evidence: `.protoflow/artifacts/${report.id}/ (per scene: prototype.png and application.png share the prototype viewport; driver/device.png is the whole device screen)`
+  };
 }
 async function selectPlanning(root, manifest) {
   const { readdir } = await import('node:fs/promises');
@@ -152,7 +162,7 @@ export async function createContext(root, config, manifestId, { spec, adr, targe
     ...(anchors && { anchors }),
     spec: specEvidence, adr: adrEvidence,
     ...(rejections.length && { rejections }),
-    instructions: `${versionInstructions(version)} ${scopeInstruction}${rejections.length ? ' An earlier accepted implementation was rejected in review and this version was reopened; address every finding in rejections.' : ''} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
+    instructions: `${versionInstructions(version)} ${scopeInstruction}${rejections.length ? ' An earlier accepted implementation was rejected in review and this version was reopened; address every finding in rejections. Treat each finding as a claim to check against the frozen prototype and the verification evidence: fix what the evidence confirms, but do not implement a finding that the prototype or the tiered verification (content-area screenshots, structure, tokens, layout) contradicts; explain that in your report instead, and the next independent review decides.' : ''} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
     verification: isV2(config) ? { build: checkCommands(config, target).build ?? null, functional: checkCommands(config, target).functional ?? null } : config.verification ?? {},
     visual: isV2(config) ? targetSettings(selectTarget(config, target)) : config.visual ?? {}
   });
@@ -183,7 +193,16 @@ export async function executeContext(root, config, contextId, { execute = false,
     if ((await evidenceFile(root, evidence.path)).hash !== evidence.hash) throw new Error('Planning evidence changed; regenerate context');
   }
   // Executor isolation travels in stdin JSON; the built-in Codex adapter honors it, custom adapters must implement it.
-  const request = { ...context, kind: repair ? 'repair' : 'implement', repair, ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } }) };
+  // The executor gets the application hash and size, not one hash per file: thousands of files would exceed its input limit.
+  const brief = project => project && { hash: project.hash, fileCount: Object.keys(project.files ?? {}).length };
+  const LIMIT = 64 * 1024;
+  const clip = text => typeof text === 'string' && text.length > LIMIT ? `${text.slice(0, LIMIT)}\n[truncated: ${text.length} characters, ${text.split('\n').length} lines]` : text;
+  const briefGit = info => info && { ...info, status: clip(info.status), diff: clip(info.diff) };
+  const request = {
+    ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
+    repair: repair && { ...repair, ...(repair.verification && { verification: { ...repair.verification, project: brief(repair.verification.project), git: briefGit(repair.verification.git) } }) },
+    ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
+  };
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: 'Use --execute after configuring the Codex adapter' };
   const command = config.adapters?.codex?.command;
   const before = await snapshot(root, config);
@@ -194,8 +213,9 @@ export async function executeContext(root, config, contextId, { execute = false,
   const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
   return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
 }
-export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish } = {}) {
-  await assertCurrentVersion(root, config, manifestId, { target });
+export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, reverify = false } = {}) {
+  // `reverify` re-checks an accepted version after its target merged a moved base; the latest PASS then accepts it.
+  await assertCurrentVersion(root, config, manifestId, { target, allowAccepted: reverify });
   const { manifest, version } = await manifestVersion(root, config, manifestId);
   const verificationId = id('VER');
   const directory = await projectPath(root, `.protoflow/artifacts/${verificationId}`);
@@ -250,9 +270,10 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   try { await loadVersion(root, config, manifest); } catch { versionIntact = false; }
   const liveChanged = visual.prototypeSource === 'live' && (await snapshot(root, config)).hash !== manifest.afterHash;
   const changedDuringVerification = before.hash !== after.hash || !versionIntact || liveChanged;
-  const checks = [build.status, functional.status, visual.status];
+  const hygiene = await applicationHygiene(root, after.files);
+  const checks = [build.status, functional.status, visual.status, hygiene.status];
   const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, status };
+  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status };
   // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
   if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
   return persist(root, 'verifications', record);
@@ -294,7 +315,8 @@ async function assertReviewFresh(root, config, review) {
 /**
  * Independent model review evidence: a completed review JSON bound to this exact verification. Required fields:
  * kind "independent-model-review", status "FAIL", reviewExecuted true, sessionId, verificationId, verificationHash and
- * manifestId; target and applicationHash must match when present. verificationHash may be the record hash ProtoFlow
+ * manifestId; target and applicationHash must match when present. Findings come from modelResult.findings or, for an
+ * independent review verdict, its top-level findings. verificationHash may be the record hash ProtoFlow
  * uses (hash of the parsed verification) or the SHA-256 of the verification file's bytes; both bind the same content. decideReview copies the file into this review's artifacts.
  */
 async function modelEvidence(root, review, verification, { evidence, session } = {}) {
@@ -317,7 +339,7 @@ async function modelEvidence(root, review, verification, { evidence, session } =
     data.applicationHash !== undefined && data.applicationHash !== review.projectHash && 'applicationHash does not match the verified application'
   ].filter(Boolean);
   if (mismatch.length) throw new Error(`Model review evidence is not bound to this review: ${mismatch.join('; ')}`);
-  return { bytes, record: { source, path: `.protoflow/artifacts/${review.id}/model-review.json`, hash: hash(bytes), verificationHashForm: data.verificationHash === review.verificationHash ? 'record' : 'file', sessionId: data.sessionId, completedAt: data.completedAt ?? null, status: data.status }, findings: data.modelResult?.findings ?? [] };
+  return { bytes, record: { source, path: `.protoflow/artifacts/${review.id}/model-review.json`, hash: hash(bytes), verificationHashForm: data.verificationHash === review.verificationHash ? 'record' : 'file', sessionId: data.sessionId, completedAt: data.completedAt ?? null, status: data.status }, findings: data.modelResult?.findings ?? (Array.isArray(data.findings) ? data.findings : []) };
 }
 const MODEL_SEVERITY = { critical: 'critical', high: 'high', medium: 'normal', normal: 'normal', low: 'low' };
 
@@ -345,7 +367,7 @@ export async function decideReview(root, config, reviewId, { status, reviewer, r
     const { manifest } = await manifestVersion(root, config, review.manifestId);
     if (hash(manifest) !== review.manifestHash || hash(verification) !== review.verificationHash || verification.manifestHash !== hash(manifest) || verification.prototypeHash !== manifest.afterHash) throw new Error('Review evidence changed');
     modelResult = await modelEvidence(root, review, verification, model ?? {});
-    if (!findings.length) findings = modelResult.findings.map(item => ({ severity: MODEL_SEVERITY[item.severity] ?? 'normal', description: [item.file, item.reason ?? item.description].filter(Boolean).join(': ') }));
+    if (!findings.length) findings = modelResult.findings.map(item => ({ severity: MODEL_SEVERITY[item.severity] ?? 'normal', description: [item.file && (item.line ? `${item.file}:${item.line}` : item.file), item.reason ?? item.description].filter(Boolean).join(': ') }));
   }
   if (findings.some(finding => !finding || typeof finding !== 'object' || typeof finding.description !== 'string' || !finding.description.trim() || !['critical', 'high', 'normal', 'low'].includes(finding.severity))) throw new Error('Each finding requires description and severity (critical|high|normal|low)');
   let independent = null;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PNG } from 'pngjs';
-import { mkdtemp, mkdir, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -173,4 +173,25 @@ esac`,
   const absent = await driver(['--package', 'dev.example', '--avd', 'ProtoFlow Pixel', '--apk', path.join(sdk, 'missing.apk'), '--cache', path.join(sdk, 'cache')], { ANDROID_HOME: sdk });
   assert.equal(absent.status, 'FAIL');
   assert.match(absent.reason, /missing\.apk does not exist; the target's build must produce it/);
+});
+
+test('an installed copy signed with another key is uninstalled and replaced by the verified APK', async t => {
+  const sdk = await fakeSdk(t, {
+    adb: `echo "$*" >> "$ANDROID_HOME/adb.log"
+case "$*" in
+  devices) printf 'List of devices attached\\nemulator-5554\\tdevice\\n\\n' ;;
+  *"emu avd name"*) printf 'ProtoFlow Pixel\\nOK\\n' ;;
+  *"uninstall dev.example"*) touch "$ANDROID_HOME/uninstalled"; echo Success ;;
+  *install*) if [ -f "$ANDROID_HOME/uninstalled" ]; then echo Success; else echo "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package dev.example signatures do not match newer version; ignoring!]"; exit 1; fi ;;
+  *) exit 0 ;;
+esac`,
+    emulator: 'echo "ProtoFlow Pixel"'
+  });
+  await writeFile(path.join(sdk, 'app.apk'), 'fixture apk');
+  // No usable JDK: the capture stops at the runner build, after the app install it is testing.
+  const result = await driver(['--package', 'dev.example', '--avd', 'ProtoFlow Pixel', '--apk', path.join(sdk, 'app.apk'), '--cache', path.join(sdk, 'cache')], { ANDROID_HOME: sdk, JAVA_HOME: path.join(sdk, 'no-jdk') });
+  assert.equal(result.status, 'NOT_RUN');
+  assert.match(result.reason, /JDK/);
+  const calls = (await readFile(path.join(sdk, 'adb.log'), 'utf8')).split('\n').filter(line => /install/.test(line));
+  assert.deepEqual(calls.map(line => line.replace(path.join(sdk, 'app.apk'), 'APK')), ['-s emulator-5554 install -r -g APK', '-s emulator-5554 uninstall dev.example', '-s emulator-5554 install -r -g APK']);
 });

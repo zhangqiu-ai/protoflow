@@ -1115,6 +1115,9 @@ test('multi-target: each target passes its own independent review and merges on 
     assert.equal(await git(f.remote, 'rev-parse', `refs/heads/protoflow/delivery/${id}`), delivery.commit);
     const { binding } = await readJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}/request.json`));
     assert.equal(binding.target, id); assert.equal(binding.remote.branch, `protoflow/delivery/${id}`); assert.equal(binding.commit, delivery.commit);
+    // The reviewer judges this target's root; the sibling ships through its own stream.
+    const sibling = id === 'web' ? 'desktop' : 'web';
+    assert.deepEqual(binding.scope, { target: id, root: id, siblings: [{ target: sibling, root: sibling }] });
     assert.deepEqual(binding.versions.map(version => version.verificationId), [`VER-${id}`]);
     // What the PR adds to its base is exactly this target's root.
     assert.deepEqual((await git(f.remote, 'diff', '--name-only', delivery.baseSha, delivery.commit)).split('\n'), [`${id}/index.html`]);
@@ -1138,4 +1141,107 @@ test('multi-target: sibling-root changes and base changes to shared files block 
     assert.deepEqual((await deliveryStatus(f.root, f.config, 'desktop')).deliveries, []);
     await assert.rejects(fs.access(path.join(f.worktrees.desktop, '.protoflow/fixture-review/received.json')), { code: 'ENOENT' });
   });
+});
+
+test('multi-target: a base change to a shared file that the target already verified byte for byte integrates', async t => {
+  const f = await multiFixture(t);
+  const sha = `${'1'.repeat(8)}${'a'.repeat(32)}`;
+  // A config-style edit on main that the desktop worktree already holds (runner configure syncs it) and verified.
+  await fs.writeFile(path.join(f.worktrees.desktop, 'README.md'), 'shared edit\n');
+  await acceptVersion({ root: f.root, worktree: f.worktrees.desktop, config: f.config, sha, ordinal: 1, verificationId: 'VER-desktop', executionId: 'EXEC-desktop-1', target: 'desktop', reuseFrozen: true });
+  await fs.writeFile(path.join(f.root, 'README.md'), 'shared edit\n'); await git(f.root, 'commit', '-qam', 'shared edit'); await git(f.root, 'push', '-q', 'origin', 'HEAD:main');
+  const result = await syncDeliveries(f.root, f.config, { target: 'desktop' });
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const [delivery] = (await deliveryStatus(f.root, f.config, 'desktop')).deliveries;
+  assert.equal(delivery.status, 'MERGED');
+  assert.ok(delivery.integration, 'the moved base was merged into the target before review');
+  assert.equal(await git(f.remote, 'show', 'main:README.md'), 'shared edit');
+});
+
+test('FAKE provider: a revoked unpublished commit never reaches the remote through the repaired delivery history', async t => {
+  const f = await fixture(t);
+  // The rejected attempt committed a cache the repair later deletes.
+  await fs.mkdir(path.join(f.worktree, 'app/cache'), { recursive: true }); await fs.writeFile(path.join(f.worktree, 'app/cache/blob.bin'), 'cache fixture');
+  await acceptVersion({ ...f, sha: f.shas[0], ordinal: 1, verificationId: 'VER-1', executionId: 'EXEC-fixture-1', reuseFrozen: true });
+  process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const old = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(await git(f.worktree, 'show', `${old.commit}:app/cache/blob.bin`), 'cache fixture');
+  await rejectAcceptance(f, f.root);
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  await fs.rm(path.join(f.worktree, 'app/cache'), { recursive: true });
+  await acceptRepair(f);
+
+  // A delivery committed on top of the revoked commit (as engines before this rule did) is retired unpublished.
+  await git(f.worktree, 'add', '-A'); await git(f.worktree, 'commit', '-qm', 'tainted delivery');
+  const tainted = { id: 'DLV-tainted', status: 'FAIL', versions: old.versions, shas: old.shas, commit: await git(f.worktree, 'rev-parse', 'HEAD'), baseSha: old.baseSha, steps: { committedAt: new Date().toISOString() } };
+  const state = await deliveryStatus(f.root); state.deliveries.push(tainted); await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state);
+  const source = await sourceStatus(f.root); source.entries[0].deliveryId = tainted.id; await saveSourceState(f.root, source);
+
+  const delivered = await syncDeliveries(f.root, f.config);
+  assert.equal(delivered.status, 'PASS', JSON.stringify(delivered));
+  const deliveries = (await deliveryStatus(f.root)).deliveries;
+  assert.deepEqual(deliveries.map(item => item.status), ['REVOKED', 'REVOKED', 'MERGED']);
+  assert.deepEqual(deliveries[1].revocation.revokedHistory, [old.id]);
+  assert.deepEqual(deliveries[2].discardedHistory.revokedDeliveries, [old.id, 'DLV-tainted']);
+  // Neither the cache nor either retired commit exists anywhere on the remote.
+  for (const commit of [old.commit, tainted.commit]) await assert.rejects(git(f.remote, 'cat-file', '-e', `${commit}^{commit}`));
+  assert.equal(await git(f.remote, 'log', '--all', '--format=%H', '--', 'app/cache/blob.bin'), '');
+  assert.equal(await git(f.remote, 'show', `${deliveries[2].commit}:app/index.html`), '<main>repaired v1</main>');
+});
+
+test('multi-target: a sibling change to a shared verified file is merged and the accepted version reverified before delivery', async t => {
+  const { reverifyOnBase } = await import('../src/runner.js');
+  const f = await multiFixture(t);
+  const sha = `${'1'.repeat(8)}${'a'.repeat(32)}`;
+  // Web ships a shared top-level change (e.g. a .gitignore rule) with its own verified delivery.
+  await fs.writeFile(path.join(f.worktrees.web, 'README.md'), 'app\nshared web rule\n');
+  await acceptVersion({ root: f.root, worktree: f.worktrees.web, config: f.config, sha, ordinal: 1, verificationId: 'VER-web', executionId: 'EXEC-web-1', target: 'web', reuseFrozen: true });
+  assert.equal((await syncDeliveries(f.root, f.config, { target: 'web' })).status, 'PASS');
+  // Desktop verified the old README, so integration refuses and names the divergence.
+  const blocked = await syncDeliveries(f.root, f.config, { target: 'desktop' });
+  assert.equal(blocked.status, 'BLOCKED'); assert.equal(blocked.code, 'BASE_DIVERGED');
+  assert.equal(blocked.baseSha, await git(f.remote, 'rev-parse', 'main')); assert.match(blocked.reason, /\(README\.md\)/);
+  // The runner learns about it from assertDelivered, which must carry the divergence for reverification.
+  await assert.rejects(assertDelivered(f.root, f.config, 'desktop'), error => error.code === 'BASE_DIVERGED' && error.baseSha === blocked.baseSha);
+
+  const runner = await readJson(path.join(f.root, '.protoflow/runner/desktop/state.json'));
+  const state = await loadProgress(f.root, f.config, 'desktop');
+  const events = [];
+  const verified = await reverifyOnBase(f.root, f.config, 'desktop', runner, state, blocked, {
+    onEvent: event => events.push(event.event),
+    verifyVersion: async (worktree, config, manifestId, options) => {
+      assert.equal(options.reverify, true); assert.equal(options.target, 'desktop');
+      // The merged base is what gets verified.
+      assert.equal(await fs.readFile(path.join(worktree, 'README.md'), 'utf8'), 'app\nshared web rule\n');
+      await acceptVersion({ root: f.root, worktree, config, sha, ordinal: 1, verificationId: 'VER-desktop-reverified', executionId: 'EXEC-desktop-1', target: 'desktop', reuseFrozen: true });
+      return readJson(path.join(worktree, '.protoflow/verifications/VER-desktop-reverified.json'));
+    }
+  });
+  assert.equal(verified.status, 'PASS', JSON.stringify(verified)); assert.equal(verified.reverified, true);
+  assert.deepEqual(events, ['reverify', 'verified', 'delivered']);
+  const entry = (await loadProgress(f.root, f.config, 'desktop')).entries[0];
+  assert.equal(entry.verificationId, 'VER-desktop-reverified');
+  assert.deepEqual(entry.attempts.at(-1).reverify, { baseSha: blocked.baseSha, previousVerificationId: 'VER-desktop' });
+  const [delivery] = (await deliveryStatus(f.root, f.config, 'desktop')).deliveries;
+  assert.equal(delivery.status, 'MERGED'); assert.equal(delivery.acceptance.verificationId, 'VER-desktop-reverified');
+  assert.equal(await git(f.remote, 'show', 'main:README.md'), 'app\nshared web rule');
+  assert.equal(await git(f.remote, 'show', 'main:desktop/index.html'), '<main>desktop v1</main>');
+});
+
+test('multi-target: a failing reverification on the merged base blocks the target without delivering', async t => {
+  const { reverifyOnBase } = await import('../src/runner.js');
+  const f = await multiFixture(t);
+  const sha = `${'1'.repeat(8)}${'a'.repeat(32)}`;
+  await fs.writeFile(path.join(f.worktrees.web, 'README.md'), 'app\nshared web rule\n');
+  await acceptVersion({ root: f.root, worktree: f.worktrees.web, config: f.config, sha, ordinal: 1, verificationId: 'VER-web', executionId: 'EXEC-web-1', target: 'web', reuseFrozen: true });
+  assert.equal((await syncDeliveries(f.root, f.config, { target: 'web' })).status, 'PASS');
+  const blocked = await syncDeliveries(f.root, f.config, { target: 'desktop' });
+  const runner = await readJson(path.join(f.root, '.protoflow/runner/desktop/state.json')), state = await loadProgress(f.root, f.config, 'desktop');
+  const result = await reverifyOnBase(f.root, f.config, 'desktop', runner, state, blocked, { verifyVersion: async () => ({ id: 'VER-desktop-merged', status: 'FAIL' }) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /Reverification on base [a-f0-9]{7} is FAIL \(VER-desktop-merged\).*needs a repair/);
+  const entry = (await loadProgress(f.root, f.config, 'desktop')).entries[0];
+  assert.equal(entry.status, 'BLOCKED'); assert.equal(entry.verificationId, 'VER-desktop');
+  assert.deepEqual((await deliveryStatus(f.root, f.config, 'desktop')).deliveries, []);
+  await assert.rejects(git(f.remote, 'rev-parse', '--verify', 'refs/heads/protoflow/delivery/desktop'));
 });

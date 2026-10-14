@@ -124,11 +124,18 @@ async function runner(cache) {
   return { apks, directory };
 }
 
-async function install(serial, apk, label) {
-  const result = await adb(serial, ['install', '-r', '-g', apk], { timeoutMs: 300000 });
+async function install(serial, apk, label, packageName = null) {
+  let result = await adb(serial, ['install', '-r', '-g', apk], { timeoutMs: 300000 });
+  let replaced = false;
+  // The verified build is authoritative: a copy signed with another key (another checkout, an agent's own build) is replaced.
+  if (packageName && /INSTALL_FAILED_UPDATE_INCOMPATIBLE/.test(result.stdout + result.stderr)) {
+    await adb(serial, ['uninstall', packageName], { timeoutMs: 120000 });
+    result = await adb(serial, ['install', '-r', '-g', apk], { timeoutMs: 300000 });
+    replaced = true;
+  }
   if (result.timedOut || result.code === null) return { notRun: `emulator did not finish installing ${label} within 300 s` };
   if (result.code !== 0 || !/Success/.test(result.stdout)) return { fail: `${label} could not be installed: ${tail(result.stdout + result.stderr)}` };
-  return {};
+  return { replaced };
 }
 
 async function main() {
@@ -145,18 +152,19 @@ async function main() {
   const { serial, error } = await ensureDevice(values.avd);
   if (error) return notRun(error);
   await prepare(serial);
+  let installed = {};
   if (values.apk) {
     const apk = path.resolve(values.apk);
     if (!await exists(apk)) return fail(`APK ${values.apk} does not exist; the target's build must produce it`);
-    const installed = await install(serial, apk, values.apk);
+    installed = await install(serial, apk, values.apk, values.package);
     if (installed.notRun) return notRun(installed.notRun);
     if (installed.fail) return fail(installed.fail);
   }
   const built = await runner(cache);
   if (built.error) return notRun(built.error);
   for (const [label, apk] of Object.entries(built.apks)) {
-    const installed = await install(serial, apk, `driver ${label} APK`);
-    if (installed.notRun || installed.fail) return notRun(installed.notRun ?? installed.fail);
+    const runnerInstall = await install(serial, apk, `driver ${label} APK`, label === 'app' ? RUNNER_PACKAGE : `${RUNNER_PACKAGE}.test`);
+    if (runnerInstall.notRun || runnerInstall.fail) return notRun(runnerInstall.notRun ?? runnerInstall.fail);
   }
 
   const outputDir = path.resolve(request.outputDir);
@@ -191,7 +199,7 @@ async function main() {
   if (screenshot) await writeFile(path.join(outputDir, 'device.png'), screenshot);
   const { response, png } = androidResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame });
   if (png) await writeFile(path.join(outputDir, 'screen.png'), png);
-  respond({ ...response, log: `avd ${values.avd} (${serial}), density ${raw.density ?? '?'}` });
+  respond({ ...response, log: `avd ${values.avd} (${serial}), density ${raw.density ?? '?'}${installed.replaced ? `; replaced an installed ${values.package} signed with another key` : ''}` });
 }
 
 main().catch(error => notRun(`android driver error: ${error.message}`));

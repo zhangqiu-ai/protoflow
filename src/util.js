@@ -47,6 +47,37 @@ export async function gitInfo(root, paths = []) {
   } catch { /* Non-Git or unborn repositories retain truthful null HEAD. */ }
   return result;
 }
+/** Limits for application content a verification may bind: an executor must not leave tool caches or downloads in the project. */
+export const HYGIENE = { maxNewFiles: 1000, maxFileBytes: 25 * 1024 * 1024 };
+/**
+ * Check fingerprinted application files (keys relative to the real root) for content no reviewer can read and no
+ * repository should hold: more than HYGIENE.maxNewFiles files that Git does not track yet (a GRADLE_USER_HOME or pub
+ * cache placed in the worktree), or any file above HYGIENE.maxFileBytes. Non-Git projects only get the size check.
+ */
+export async function applicationHygiene(root, files) {
+  root = await realpath(root);
+  let tracked = null;
+  try { tracked = new Set((await exec('git', ['-c', 'core.quotePath=false', 'ls-files', '-z'], { cwd: root, maxBuffer: 64 * 1024 * 1024 })).stdout.split('\0').filter(Boolean)); }
+  catch { /* not a Git checkout */ }
+  const names = Object.keys(files).filter(name => !name.endsWith(':target'));
+  const added = tracked ? names.filter(name => !tracked.has(name)) : [];
+  const large = [];
+  for (const name of names) {
+    const { size } = await stat(path.join(root, name));
+    if (size > HYGIENE.maxFileBytes) large.push({ path: name, bytes: size });
+  }
+  const counts = new Map();
+  for (const name of added) { const directory = name.split('/').slice(0, -1).slice(0, 2).join('/') || '.'; counts.set(directory, (counts.get(directory) ?? 0) + 1); }
+  const directories = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([directory, count]) => ({ path: directory, count }));
+  const problems = [
+    added.length > HYGIENE.maxNewFiles && `${added.length} untracked application files (limit ${HYGIENE.maxNewFiles}), mostly under ${directories.map(item => `${item.path} (${item.count})`).join(', ')}`,
+    large.length && `files above ${HYGIENE.maxFileBytes / 1024 / 1024} MiB: ${large.slice(0, 5).map(item => `${item.path} (${Math.round(item.bytes / 1024 / 1024)} MiB)`).join(', ')}`
+  ].filter(Boolean);
+  return {
+    status: problems.length ? 'FAIL' : 'PASS', addedFiles: added.length, largeFiles: large, directories,
+    ...(problems.length && { reason: `Application content looks like tool caches or downloads: ${problems.join('; ')}. Keep caches (GRADLE_USER_HOME, pub, DerivedData) outside the project or git-ignore them, and delete these files` })
+  };
+}
 /** `active` serializes application-side work; `design` serializes prototype sessions so both sides can run concurrently. */
 export async function withLock(root, action, name = 'active') {
   if (!['active', 'design', 'runner'].includes(name)) throw new Error(`Unknown lock: ${name}`);

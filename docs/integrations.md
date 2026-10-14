@@ -62,6 +62,17 @@
 
 這是合併到既有配置的片段，不是完整 config。橋接執行 `codex exec --json --sandbox workspace-write -`，從 stdin 傳入 prompt。可於 adapter argv 指定 `--model MODEL` 與 `--ephemeral`；仍固定 workspace-write，不接受繞過 sandbox 的參數。程序結果、stdout JSONL 與 stderr 保存至 execution evidence；exit zero 不代替產品驗證。官方：[Codex 非互動模式](https://developers.openai.com/codex/noninteractive)。
 
+### 專案工具鏈的沙箱權限（`--add-dir`、`--network`）
+
+workspace-write 只允許寫入專案 worktree，且禁止網路。有些工具鏈即使只跑本機測試也需要更多權限，執行者因此無法驗證自己的修改，只能盲改：
+
+| 工具鏈 | 需要 | adapter argv |
+|---|---|---|
+| Flutter（`flutter test`） | 寫入 SDK 的 `bin/cache` 與 `~/.dart-tool`；測試程序綁定 127.0.0.1 | `--add-dir <Flutter SDK> --add-dir <家目錄>/.dart-tool --network` |
+| Gradle（Android、React Native／Flutter 的 `android/`） | 寫入 `~/.gradle`（wrapper、依賴快取）；否則執行代理會改用暫存的 `GRADLE_USER_HOME` 與 `user.home`，較慢，且 debug 簽章金鑰不同 | `--add-dir <家目錄>/.gradle`（建議） |
+
+`--add-dir DIR`（可重複，必須是絕對路徑）轉為 `codex exec --add-dir DIR`；`--network` 轉為 `-c sandbox_workspace_write.network_access=true`。Codex 的 macOS 沙箱無法只開放 loopback，`--network` 會同時開放對外網路，也讓執行者能連上本機的 adb server：實測中執行者曾自行建置 APK、解除安裝並重裝模擬器上的受測應用（簽章用它暫時 `user.home` 下的 debug keystore），Android 驅動器因此會替換以其他金鑰簽章的已安裝版本。只在工具鏈確實需要時啟用。兩者都是明確配置的 argv，預設不開；變更後走 `runner configure`。在 `codex sandbox -c sandbox_mode='"workspace-write"' … -- <測試命令>` 中可先確認最小權限。
+
 ### 執行者隔離（`ignoreUserConfig`）
 
 預設情況下執行者會載入開發者的 `$CODEX_HOME/config.toml`（通常是 `~/.codex/config.toml`）。若其中啟用 memories，執行 session 可能讀取個人記憶並把內容寫入 EXEC JSONL；交付時獨立 reviewer 會讀這份 trace，等於把與本專案無關的個人資料交給另一個 session 並留在專案證據中。啟用隔離：

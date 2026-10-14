@@ -232,6 +232,16 @@
           "minimum": 0,
           "maximum": 10
         },
+        "transientRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "transientRetryDelayMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
         "requireHumanReview": {
           "type": "boolean"
         },

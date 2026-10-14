@@ -4,7 +4,7 @@
 
 橋接使用既有 Codex CLI 登入，不新增 token／scope。從可信 PATH 解析 Codex 實體 executable，將完整 path／file SHA256 綁定於 request 和 raw run，直接 spawn 該絕對路徑，結束和恢復時再次核對。固定 `codex exec --json --sandbox read-only --ephemeral --ignore-user-config -c approval_policy="never" --output-schema FILE -`，不載入使用者的執行設定、不延續 executor session。Review 只讀完整 source、測試和 acceptance evidence，不執行應用／Runner／build／tests 或 GitHub 操作。這是 AI evidence，不是真人 ADR、GitHub approval 或 branch protection 的替代品。
 
-嚴格 verdict 包含 protocol、requestId、bindingHash、status、findings 和 summary；未知欄位拒絕。模型 final JSON 必須在原始 Codex JSONL 中，含單一 `thread.started`、`turn.started`、`turn.completed` 且沒有 error／turn.failed。只有 PASS 且 findings 為空才有效；exit zero、單字 PASS、Runner 自填 session 或 boolean 都不能授權。
+嚴格 verdict 包含 protocol、requestId、bindingHash、status、findings 和 summary；未知欄位拒絕。模型 final JSON 必須在原始 Codex JSONL 中，含單一 `thread.started`、`turn.started`、`turn.completed` 且沒有 error／turn.failed；唯一例外是 turn 內、之後仍完成的串流重連通知（`error` 事件，訊息為 `Reconnecting... N/M`，Codex 自動重試中斷的模型串流）。執行代理的 trace 套用同一規則。只有 PASS 且 findings 為空才有效；exit zero、單字 PASS、Runner 自填 session 或 boolean 都不能授權。
 
 ## 重用接口
 
@@ -88,10 +88,12 @@ v1 與單一 target 的 v2 專案沿用上述路徑與分支。`targets` 有多�
 
 - request 的 `target` 必填且必須是已配置的 target；binding 與 AIR 紀錄保存 target，`assertIndependentReview` 傳入其他 target 時 BLOCKED，一個 target 的 PASS 不能授權兄弟 target。
 - source／VER 與 executor provenance 取自該 target 的進度 `.protoflow/targets/<id>/progress.json`，worktree 為該 target 的 `worktree-<hash>-<id>`。
+- binding 帶 `scope`：交付的 target、其 root，以及兄弟 target 的 id 與 root。reviewer 提示說明兄弟 target 由各自的串流驗證、審查與交付，可能仍落後於本 source 版本；兄弟 root 中過時或缺少的實作不屬本次審查範圍，只有本次變更破壞它時才回報。缺少這項說明時，reviewer 曾因尚未交付的 Flutter target 仍是舊版而對 Android 交付回報 FAIL。
+- 原生 target 的證據說明也寫進 reviewer 提示：`driver/device.png` 是含狀態列與 home indicator 的整個螢幕，`application.png`／`driver/screen.png` 才是裁到內容區域、對應原型 viewport 的圖；位置與版面以 `application.png` 對 `prototype.png` 及 T3 判斷，T4 在原生端為 advisory，主要反映平台字型渲染。缺少這項說明時，reviewer 曾依 `device.png` 判定 iOS 畫面「整體下移」而回報 FAIL，實際裁切後的畫面與原型一致。
 - application hash 與該 target 驗收相同：排除 prototype 與其他 target 的 root；完整 workspace content hash 仍涵蓋全部內容。committed tree 中兄弟 target root 的檔案不視為本 target 的 application。
 - remote binding 與 push、PR、merge 使用該 target 的交付分支 `<runner.delivery.branch>/<id>`，交付紀錄在 `.protoflow/delivery/<id>.json`；review 紀錄仍集中於 `.protoflow/delivery/independent-reviews/`，以唯一 AIR ID 區分。
 - 交付 commit 只能包含該 target root 與共享的頂層檔案；staged 內容落在兄弟 target root 時，在 review 前 BLOCKED。
-- 兄弟 target 合併後 base 會前進，使本 target HEAD 不再以 current base 為祖先。此時交付先在 commit 後檢查：base 自分叉點以來變更的檔案若只在兄弟 target root、prototype 或 runtime 目錄內，才以 `--no-ff` 將精確 base SHA merge 進本 target worktree，且合併前後本 target 的 application hash 必須相同；否則 BLOCKED 並要求在新 base 上重新驗收。若 base 改了共享頂層檔案或本 target root，也一律 BLOCKED。合併結果記錄於 delivery `integration`，PR 留言標示，review 針對包含該 base 的 HEAD 與 `base..HEAD` diff 執行。單一 target 不做此整合，base 前進仍 BLOCKED。
+- 兄弟 target 合併後 base 會前進，使本 target HEAD 不再以 current base 為祖先。此時交付先在 commit 後檢查：base 自分叉點以來變更的檔案若只在兄弟 target root、prototype 或 runtime 目錄內，或與本 target HEAD 的內容逐位元相同（例如 `runner configure` 已同步進 worktree、並以此驗收過的配置變更），才以 `--no-ff` 將精確 base SHA merge 進本 target worktree，且合併前後本 target 的 application hash 必須相同；否則交付以 `code: "BASE_DIVERGED"` BLOCKED；若 base 以不同內容改了共享頂層檔案或本 target root，也是如此。Runner 收到後自動在新 base 上重新驗收：把該 base merge 進本 target worktree（衝突則 BLOCKED，人工解決後 `runner retry`），以 reverify 模式（允許已驗收版本）重新驗證（attempt 帶 `reverify.baseSha` 與先前的 verificationId），PASS 才以新 verification 交付並重新做獨立審查；不通過則 BLOCKED，等待修復。合併結果記錄於 delivery `integration`，PR 留言標示，review 針對包含該 base 的 HEAD 與 `base..HEAD` diff 執行。單一 target 不做此整合，base 前進仍 BLOCKED。
 - merge 後的 Runner 對齊只作用於該 target 自身的 `.protoflow/runner/<id>/state.json` 與 worktree。
 
 正常 sync 不自動重跑 BLOCKED review。確認失敗原因後，可用 CLI `protoflow delivery sync --retry-review --delivery <DLV> --review <AIR> [--target <id>]` 或明確接口啟動新 attempt：

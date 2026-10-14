@@ -172,6 +172,73 @@ async function reopenRejected(root, config, stream) {
   return reopened;
 }
 
+/** Provider-side failures that say nothing about the version: capacity, rate limits, 5xx, a dropped connection. */
+export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
+function executionDiagnostic(execution) {
+  let diagnostic = execution.result.error;
+  for (const line of execution.result.stdout.split('\n')) {
+    try { const event = JSON.parse(line); if (event.type === 'turn.failed' || event.type === 'error') diagnostic = event.error?.message ?? event.message; } catch { /* retain execution evidence */ }
+  }
+  return String(diagnostic || execution.result.stderr || '');
+}
+/** Durable launch intent, PID and completion of each child process of an attempt. */
+function processHooks(root, config, stream, state, record) {
+  const processStarting = async phase => {
+    record.processes.push({ phase, pid: null, pgid: null, spawned: null, status: 'STARTING', startedAt: new Date().toISOString() });
+    await saveProgress(root, config, stream, state);
+  };
+  const processStarted = async (phase, pid) => {
+    const child = record.processes.find(item => item.phase === phase && item.status === 'STARTING' && !item.completedAt);
+    if (!child) throw new Error(`Missing ${phase} launch intent`);
+    child.pid = pid; child.pgid = pid; child.spawned = true; child.status = 'RUNNING';
+    await saveProgress(root, config, stream, state);
+  };
+  const processFinished = async (phase, pid, result) => {
+    const child = record.processes.find(item => item.phase === phase && item.pid === (pid ?? null) && !item.completedAt);
+    if (child) {
+      if (!result.processGroupActive) child.completedAt = new Date().toISOString();
+      child.status = result.status; child.spawned = result.spawned ?? child.spawned; child.error = result.error ?? null; child.processGroupActive = result.processGroupActive ?? false;
+    }
+    await saveProgress(root, config, stream, state);
+  };
+  return { processStarting, processStarted, processFinished };
+}
+/**
+ * A sibling target merged changes to files this target verified (a shared top-level file) after this target's worktree
+ * forked. Merge that base into the worktree and verify the accepted version again on it; only a PASS on the merged
+ * content may be delivered. A conflict or a failing verification blocks for repair.
+ */
+export async function reverifyOnBase(root, config, stream, runner, state, divergence, { signal, onEvent = () => {}, verifyVersion = verify } = {}) {
+  const entry = state.entries.filter(item => item.status === 'PASS' && !item.deliveryId).at(-1);
+  if (!entry) return null;
+  const statePath = runnerStatePath(config, stream), base = divergence.baseSha;
+  const blocked = async reason => {
+    entry.status = 'BLOCKED'; entry.error = reason; runner.status = 'BLOCKED';
+    await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
+    return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason };
+  };
+  try { await git(runner.worktree, ['merge', '--no-ff', '--no-edit', '-m', `ProtoFlow: integrate ${base.slice(0, 7)} into target ${stream} for reverification`, base]); }
+  catch (error) {
+    try { await git(runner.worktree, ['merge', '--abort']); } catch { /* nothing to abort */ }
+    return blocked(`Base ${base} does not merge cleanly into target ${stream}; resolve the merge in the runner worktree, then runner retry: ${String(error.stderr || error.message).trim().slice(-500)}`);
+  }
+  const record = { attempt: entry.attempts.length, reverify: { baseSha: base, previousVerificationId: entry.verificationId }, startedAt: new Date().toISOString(), status: 'RUNNING', processes: [] };
+  entry.attempts.push(record); await saveProgress(root, config, stream, state);
+  await onEvent({ event: 'reverify', sha: entry.sha, manifestId: entry.manifestId, baseSha: base });
+  const hooks = processHooks(root, config, stream, state, record);
+  let report;
+  try { report = await verifyVersion(runner.worktree, config, entry.manifestId, { target: stream ?? undefined, reverify: true, signal, onBeforeSpawn: hooks.processStarting, onStart: hooks.processStarted, onFinish: hooks.processFinished }); }
+  catch (error) { record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = error.message; return blocked(`Reverification on base ${base.slice(0, 7)} failed: ${error.message}`); }
+  record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
+  await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status, reverify: true });
+  if (report.status !== 'PASS') return blocked(`Reverification on base ${base.slice(0, 7)} is ${report.status} (${report.id}); the merged base changes this target's accepted result and needs a repair`);
+  await exportEvidence(root, runner.worktree, report);
+  entry.verificationId = report.id; await saveProgress(root, config, stream, state);
+  const delivery = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream });
+  await onEvent({ event: 'delivered', sha: entry.sha, reverified: true, ...delivery });
+  return { status: delivery.status === 'PASS' ? 'PASS' : 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, reverified: true, delivery };
+}
+
 /** One source stream, one isolated application worktree, one bounded FIFO executor. No implicit commits or approval. */
 export async function runOnce(root, config, { signal, onEvent = () => {}, target: stream = null } = {}) {
   if (config.policy?.sequentialVersions === false) throw new Error('Git runner requires sequentialVersions');
@@ -184,9 +251,18 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   catch (error) { return { status: 'BLOCKED', reason: `Review reconciliation failed: ${error.message}` }; }
   if (reopened.length) await onEvent({ event: 'reopened', versions: reopened });
   // Reconcile revoked delivery history, then commit earlier accepted versions so every commit holds its own version.
+  let diverged = null;
   try { await assertDelivered(root, config, stream); }
-  catch (error) { return { status: 'BLOCKED', reason: error.message }; }
+  catch (error) {
+    if (error.code !== 'BASE_DIVERGED') return { status: 'BLOCKED', reason: error.message };
+    diverged = { code: error.code, baseSha: error.baseSha, reason: error.message };
+  }
   const state = await loadProgress(root, config, stream);
+  if (diverged) {
+    const runner = await readJson(await projectPath(root, statePath), null);
+    if (!runner?.worktree) return { status: 'BLOCKED', reason: diverged.reason };
+    return await reverifyOnBase(root, config, stream, runner, state, diverged, { signal, onEvent }) ?? { status: 'BLOCKED', reason: diverged.reason };
+  }
   if (state.status === 'HISTORY_REWRITTEN') throw new Error(state.error);
   if (!state.entries.length) return { status: 'IDLE', reason: 'No scanned checkpoints' };
   const entry = state.entries.find(item => item.status !== 'PASS');
@@ -204,6 +280,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     }
     // Retry pending pushes, pull requests and merges while idle.
     const delivery = runner?.worktree ? await syncDeliveries(root, config, { worktree: runner.worktree, target: stream }) : undefined;
+    if (delivery?.code === 'BASE_DIVERGED') return await reverifyOnBase(root, config, stream, runner, state, delivery, { signal, onEvent }) ?? { status: 'BLOCKED', reason: delivery.reason };
     return { status: 'IDLE', completedSha: state.completedSha, ...(delivery && { delivery }) };
   }
   if (['BLOCKED', 'STOPPED', 'RUNNING'].includes(entry.status)) return { status: 'BLOCKED', manifestId: entry.manifestId, reason: entry.status === 'RUNNING' ? 'Interrupted execution; inspect evidence and run runner retry' : entry.error };
@@ -243,47 +320,39 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       currentAttempt = record;
       entry.attempts.push(record); await saveProgress(root, config, stream, state);
       await onEvent({ event: attempt ? 'repair' : 'execute', sha: entry.sha, manifestId: entry.manifestId, attempt, worktree: runner.worktree });
-      const processStarting = async phase => {
-        record.processes.push({ phase, pid: null, pgid: null, spawned: null, status: 'STARTING', startedAt: new Date().toISOString() });
-        await saveProgress(root, config, stream, state);
-      };
-      const processStarted = async (phase, pid) => {
-        const child = record.processes.find(item => item.phase === phase && item.status === 'STARTING' && !item.completedAt);
-        if (!child) throw new Error(`Missing ${phase} launch intent`);
-        child.pid = pid; child.pgid = pid; child.spawned = true; child.status = 'RUNNING';
-        await saveProgress(root, config, stream, state);
-      };
-      const processFinished = async (phase, pid, result) => {
-        const child = record.processes.find(item => item.phase === phase && item.pid === (pid ?? null) && !item.completedAt);
-        if (child) {
-          if (!result.processGroupActive) child.completedAt = new Date().toISOString();
-          child.status = result.status; child.spawned = result.spawned ?? child.spawned; child.error = result.error ?? null; child.processGroupActive = result.processGroupActive ?? false;
+      const { processStarting, processStarted, processFinished } = processHooks(root, config, stream, state, record);
+
+      // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
+      const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
+      let execution, diagnostic = '', executionContext = context;
+      for (let retry = 0; ; retry++) {
+        execution = await executeContext(runner.worktree, config, executionContext.id, {
+          execute: true, repair: attempt ? { attempt, verification: report } : null, signal,
+          onBeforeSpawn: () => processStarting('execute'),
+          onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
+        });
+        record.executionId = execution.id; record.executionStatus = execution.status;
+        await processFinished('execute', record.pid, { ...execution.result, status: execution.status });
+        if (execution.result.processGroupActive) {
+          const error = new Error('Executor subprocess group remains active; stop it before verification or repair');
+          error.code = 'PROCESS_GROUP_ACTIVE'; error.phase = 'execute'; error.result = execution.result;
+          throw error;
         }
         await saveProgress(root, config, stream, state);
-      };
-
-      const execution = await executeContext(runner.worktree, config, context.id, {
-        execute: true, repair: attempt ? { attempt, verification: report } : null, signal,
-        onBeforeSpawn: () => processStarting('execute'),
-        onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
-      });
-      record.executionId = execution.id; record.executionStatus = execution.status;
-      await processFinished('execute', record.pid, { ...execution.result, status: execution.status });
-      if (execution.result.processGroupActive) {
-        const error = new Error('Executor subprocess group remains active; stop it before verification or repair');
-        error.code = 'PROCESS_GROUP_ACTIVE'; error.phase = 'execute'; error.result = execution.result;
-        throw error;
+        if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
+        if (execution.status === 'PASS') break;
+        diagnostic = executionDiagnostic(execution);
+        if (retry >= retries || !TRANSIENT_PROVIDER.test(diagnostic)) break;
+        record.transientRetries = [...(record.transientRetries ?? []), { executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() }];
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'execute-retry', sha: entry.sha, manifestId: entry.manifestId, attempt, retry: retry + 1, reason: diagnostic.slice(-200) });
+        try { await delay(retryDelayMs * 2 ** retry, undefined, { signal }); }
+        catch { throw new Error('STOPPED: runner was interrupted'); }
+        // The failed run may have edited files; a fresh context binds the current application content.
+        executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+        record.contextId = executionContext.id;
       }
-
-      await saveProgress(root, config, stream, state);
-      if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
-      if (execution.status !== 'PASS') {
-        let diagnostic = execution.result.error;
-        for (const line of execution.result.stdout.split('\n')) {
-          try { const event = JSON.parse(line); if (event.type === 'turn.failed' || event.type === 'error') diagnostic = event.error?.message ?? event.message; } catch { /* retain execution evidence */ }
-        }
-        throw new Error(`Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}): ${(diagnostic || execution.result.stderr || 'see execution evidence').slice(-1000)}`);
-      }
+      if (execution.status !== 'PASS') throw new Error(`Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}): ${(diagnostic || 'see execution evidence').slice(-1000)}`);
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
       await saveProgress(root, config, stream, state);
@@ -299,6 +368,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
     const delivery = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream });
     await onEvent({ event: 'delivered', sha: entry.sha, ...delivery });
+    if (delivery?.code === 'BASE_DIVERGED') return await reverifyOnBase(root, config, stream, runner, state, delivery, { signal, onEvent }) ?? { status: 'BLOCKED', reason: delivery.reason };
     return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, worktree: runner.worktree, delivery };
   } catch (error) {
     if (currentAttempt) {
@@ -313,11 +383,60 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message, worktree: runner.worktree };
   }
 }
-export async function retryRunner(root, config = {}, { target = null } = {}) {
+/** Live processes whose working directory is inside, or whose command line names, the runner worktree. */
+async function processesUsing(root, worktree) {
+  const real = await fs.realpath(worktree);
+  const inside = value => value === real || value.startsWith(`${real}${path.sep}`) || value === worktree || value.startsWith(`${worktree}${path.sep}`);
+  const found = new Map();
+  // Listed from the project root: a lister started inside the worktree would report itself.
+  const cwd = await runCommand(root, { argv: ['lsof', '-n', '-w', '-d', 'cwd', '-F', 'pn'], timeoutMs: 60000 });
+  if (cwd.spawned === false || cwd.timedOut || cwd.overflow || (cwd.status !== 'PASS' && !cwd.stdout)) throw new Error('lsof is unavailable or incomplete; cannot confirm that no executor runs in the runner worktree');
+  let pid = null;
+  for (const line of cwd.stdout.split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1));
+    else if (line.startsWith('n') && inside(line.slice(1)) && pid !== process.pid) found.set(pid, `cwd ${line.slice(1)}`);
+  }
+  const listed = await runCommand(root, { argv: ['ps', '-Ao', 'pid=,command='], timeoutMs: 60000 });
+  if (listed.status !== 'PASS' || listed.overflow) throw new Error('ps failed; cannot confirm that no executor runs in the runner worktree');
+  for (const line of listed.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (match && Number(match[1]) !== process.pid && (match[2].includes(real) || match[2].includes(worktree))) found.set(Number(match[1]), match[2].slice(0, 200));
+  }
+  return [...found].map(([id, detail]) => ({ pid: id, detail }));
+}
+/**
+ * Launch intents the runner recorded (onBeforeSpawn) without a PID: the runner died between recording the intent and
+ * the spawn returning. With --recover-unknown-start, retry checks that no live process uses the runner worktree and
+ * records that check on the intent instead of a PID; it never applies to a recorded PID or to earlier versions.
+ */
+async function recoverUnknownStarts(root, config, target, current) {
+  const runner = await readJson(await projectPath(root, runnerStatePath(config, target)), null);
+  if (!runner?.worktree) throw new Error('Unknown-PID recovery requires the runner worktree record');
+  const unknown = [];
+  for (const attempt of current.attempts ?? []) {
+    if (attempt.status === 'RUNNING' && !attempt.completedAt && !(attempt.processes ?? []).some(child => child.phase === 'execute') && !Number.isSafeInteger(attempt.pid)) {
+      attempt.processes = [...(attempt.processes ?? []), { phase: 'execute', pid: null, pgid: null, spawned: null, status: 'STARTING', startedAt: attempt.startedAt }];
+    }
+    for (const child of attempt.processes ?? []) if (!child.completedAt && !(Number.isSafeInteger(child.pid) && child.pid > 0)) unknown.push(child);
+  }
+  if (!unknown.length) return null;
+  const live = await processesUsing(root, runner.worktree);
+  if (live.length) throw new Error(`Unknown-PID recovery refused: live processes use the runner worktree: ${live.map(item => `${item.pid} (${item.detail})`).join('; ')}`);
+  const recovery = { by: 'runner retry --recover-unknown-start', checkedAt: new Date().toISOString(), worktree: runner.worktree, method: 'lsof cwd and ps command lines', liveProcesses: [] };
+  for (const child of unknown) { child.status = 'NOT_STARTED'; child.spawned = false; child.completedAt = recovery.checkedAt; child.error = 'Launch intent without a PID; no live process used the runner worktree'; child.recovery = recovery; }
+  return { phases: unknown.map(child => child.phase), ...recovery };
+}
+export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false } = {}) {
   const state = await loadProgress(root, config, target);
   const current = state.entries.find(entry => entry.status !== 'PASS');
   if (!current || !['BLOCKED', 'STOPPED', 'RUNNING'].includes(current.status)) throw new Error('No blocked/interrupted current version to retry');
-  for (const previous of state.entries) assertNoActiveProcesses(previous);
+  for (const previous of state.entries.filter(entry => entry !== current)) assertNoActiveProcesses(previous);
+  const recovered = recoverUnknownStart ? await recoverUnknownStarts(root, config, target, current) : null;
+  try { assertNoActiveProcesses(current); }
+  catch (error) {
+    if (error.code === 'PROCESS_START_UNKNOWN') error.message += '; after confirming, run runner retry --recover-unknown-start';
+    throw error;
+  }
   for (const attempt of current.attempts ?? []) {
     for (const child of attempt.processes ?? []) {
       if (!child.completedAt) {
@@ -330,7 +449,7 @@ export async function retryRunner(root, config = {}, { target = null } = {}) {
       attempt.error = current.error ?? 'Interrupted execution recovered by runner retry';
     }
   }
-  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', at: new Date().toISOString() }];
+  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', at: new Date().toISOString(), ...(recovered && { recoveredUnknownStart: recovered }) }];
   current.status = 'PENDING'; current.error = null;
   await saveProgress(root, config, target, state);
   return { status: 'PASS', ...(target && { target }), current: current.manifestId, next: 'runner start --once' };

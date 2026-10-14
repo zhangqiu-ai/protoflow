@@ -28,7 +28,7 @@ hw.keyboard=yes
 
 AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-window`），模擬器在擷取後繼續執行，與 iOS 模擬器相同視為裝置服務。
 
-**Flutter**：Flutter SDK 在 `PATH` 上（3.19 以上，`Semantics(identifier:)`）。
+**Flutter**：Flutter SDK 在 `PATH` 上（3.19 以上，`Semantics(identifier:)`）。Codex 執行者要能跑 `flutter test`，adapter argv 需加 `--add-dir <Flutter SDK> --add-dir ~/.dart-tool（絕對路徑） --network`，見 [整合：專案工具鏈的沙箱權限](integrations.md#專案工具鏈的沙箱權限--add-dir--network)。
 
 沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。
 
@@ -86,7 +86,7 @@ AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-wi
 |---|---|
 | `--package` | 目標應用的 package（必填） |
 | `--avd` | AVD 名稱（必填）；未開機時由驅動器開機 |
-| `--apk` | 每次擷取前安裝的 APK，相對專案根目錄 |
+| `--apk` | 每次擷取前安裝的 APK，相對專案根目錄；裝置上同 package 若以其他金鑰簽章（另一個 checkout、或執行代理自行建置安裝），先解除安裝再安裝，回應的 `log` 會註明 |
 | `--activity` | 啟動的 Activity 類別；省略時用 launcher activity |
 
 | 共用參數 | 說明 |
@@ -162,7 +162,7 @@ Compose 與 Flutter 注意事項：
 
 ### 鍵盤
 
-`fill` 會叫出軟體鍵盤（Android AVD 設硬體鍵盤時不會）。狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL，因為鍵盤會遮住畫面，原型中也不存在。
+`fill` 會叫出軟體鍵盤（Android AVD 設硬體鍵盤時不會）。狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL，因為鍵盤會遮住畫面，原型中也不存在。失焦後鍵盤是非同步收起的（Flutter 需要數個影格），Android 驅動器最多等 3 秒，只有仍在螢幕上（範圍非空）的輸入法視窗才算可見。
 
 ## 驅動器如何回報元素
 
@@ -259,3 +259,32 @@ React Native 與 Flutter 的同一份程式碼同時是 iOS 與 Android 應用�
 | `flutter`（3.47.7） | `ios`、`android` | PASS／PASS | `flutter test` 3/3 | PASS／PASS | 0.975–0.984／0.978–0.983 |
 
 Android 每個場景約 5–10 秒；整個 Compose target（build、functional、5 個場景）約 40 秒，React Native 兩個變體約 2 分鐘，Flutter 兩個變體約 1 分 45 秒。過程中發現並修正的事項見 [提案 0002 §13](proposals/0002-android-flutter.md)。
+
+### 2026-10-14：protoflow-test 真實自動交付（iOS、Android、Flutter）
+
+在 `zhangqiu-ai/protoflow-test` 以 Runner 全自動處理兩個原型版本：Codex 執行代理實作 → build／functional／T1–T4 分層驗收 → 有界修復 → 獨立唯讀 Codex 審查 → automated approval（`ai:` 身分）→ 每個 target 各自的 PR 與合併。三個必要 target 都交付後 `release.version` 前進（`basis: "delivery"`）。
+
+| 版本 | iOS（SwiftUI） | Android（Compose） | Flutter（`ios`＋`android` 變體） |
+|---|---|---|---|
+| v(a) `2fc9e77`：靛藍主色與「My day」標題 | PR #15 | PR #16 | PR #17 |
+| v(b) `dc8811c`：新增可展開的 About 畫面 | PR #20 | PR #19 | PR #18 |
+
+驗收中發現並修正的引擎缺陷（v0.3.4）：
+
+| 現象 | 修正 |
+|---|---|
+| Codex 串流中斷後自動重連，trace 中的 `Reconnecting... 1/5` 讓審查關卡判定「沒有完成的 session」 | turn 內、之後仍完成的重連通知不算失敗 |
+| 多 target 審查要求整個 repository 符合新版本，因尚未交付的 Flutter 判 Android FAIL | binding 帶 `scope`，兄弟 target 不在審查範圍 |
+| Flutter 輸入框失焦後鍵盤非同步收起，Android 驅動器誤判鍵盤仍可見 | 輸入法視窗須在螢幕上持續 3 秒才算可見 |
+| 執行代理沙箱無法寫入 Flutter SDK、`~/.dart-tool` 且不能綁定 127.0.0.1，無法跑 `flutter test` | adapter 的 `--add-dir`、`--network` |
+| 執行代理經 adb 以其他金鑰簽章重裝受測應用，驗收 APK 無法覆蓋安裝 | 驅動器替換以其他金鑰簽章的已安裝版本 |
+| `runner configure` 同步到 worktree 的配置變更，被當成「基底改了共享檔」 | 內容逐位元相同的基底變更可整合 |
+| 執行代理把 `GRADLE_USER_HOME` 放進專案，26,437 個快取檔被驗收並提交 | 驗證的 `hygiene` 檢查；執行代理指示快取放在專案外；審查 diff 過大時清楚回報 |
+| 送給執行代理的 context 夾帶逐檔雜湊與完整 `git status`，超過 Codex 輸入上限 | 只送雜湊與檔案數，`git` 欄位截到 64 KB；adapter 先行檢查上限 |
+| 被拒、未發布的交付 commit 留在祖先中，修復後的交付會把它們帶進共用分支 | 提交前丟棄被拒歷史；已建立在其上的未發布交付退役重做 |
+| 一個 target 改了共享頂層檔（`.gitignore`），兄弟 target 的交付永久 BLOCKED | Runner 合併新基底並以 reverify 重新驗收 |
+| Runner 在記錄 PID 前被終止，`runner retry` 只能人工修改紀錄 | `runner retry --recover-unknown-start` 由引擎確認並記錄 |
+| reviewer 依含狀態列的整螢幕截圖誤判 iOS 畫面下移；執行代理照做兩次都被 T1／T3 擋下 | 審查提示說明各證據檔；拒收 findings 須對照證據檢驗，拒收附被拒驗證摘要 |
+| 模型滿載等供應端暫時錯誤讓版本 BLOCKED | 同一 attempt 有界退避重試 |
+
+reviewer 的真實發現也在過程中被修正：Android 開關未勾選時沿用 Material 3 預設色（`layout` deviation 不豁免顏色），重開後由執行代理修正並重新驗收。所有 automated approval 都標示為 AI 證據，遠端分支不含任何被拒內容（以 `git log -- '*gradle-user-home*'` 驗證）。證據摘要保存在驗收專案的 `evidence/mobile-real-acceptance-20261014.json`。

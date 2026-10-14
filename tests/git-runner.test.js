@@ -215,7 +215,12 @@ test('stopping during execution closes the active attempt and leaves the next ve
   await scanSource(root, config);
   const controller = new AbortController();
   const result = await runOnce(root, config, { signal: controller.signal, onEvent: event => {
-    if (event.event === 'execute') setTimeout(() => controller.abort(), 50);
+    // Stop once the executor process is recorded; a fixed delay races the spawn on a loaded machine.
+    if (event.event !== 'execute') return;
+    const poll = setInterval(async () => {
+      try { if (Number.isSafeInteger((await sourceStatus(root)).entries[0].attempts?.[0]?.pid)) { clearInterval(poll); controller.abort(); } }
+      catch { /* state is being rewritten; poll again */ }
+    }, 25);
   } });
   assert.equal(result.status, 'BLOCKED');
   const state = await sourceStatus(root), attempt = state.entries[0].attempts[0];
@@ -760,7 +765,22 @@ for (const phase of ['setup', 'execute', 'build', 'functional']) {
     const {runner} = await runnerStatus(root);
     await assert.rejects(fs.access(path.join(runner.worktree, marker)), error => error.code === 'ENOENT');
     if (phase === 'setup') await assert.rejects(runOnce(root, config), /setup launch has unknown PID/);
-    else await assert.rejects(retryRunner(root), new RegExp(`Runner ${phase} launch has unknown PID`));
+    else {
+      await assert.rejects(retryRunner(root), new RegExp(`Runner ${phase} launch has unknown PID; inspect possible subprocesses before manual recovery; after confirming, run runner retry --recover-unknown-start`));
+      // Explicit recovery refuses while anything still runs in the worktree, then records the check on the intent.
+      const straggler = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: runner.worktree, stdio: 'ignore' });
+      t.after(() => straggler.kill('SIGKILL'));
+      await once(straggler, 'spawn');
+      await assert.rejects(retryRunner(root, {}, { recoverUnknownStart: true }), new RegExp(`Unknown-PID recovery refused: live processes use the runner worktree: ${straggler.pid} `));
+      const gone = once(straggler, 'exit'); straggler.kill('SIGKILL'); await gone;
+      const retried = await retryRunner(root, {}, { recoverUnknownStart: true });
+      assert.equal(retried.status, 'PASS');
+      const entry = (await sourceStatus(root)).entries[0], intent = entry.attempts[0].processes.find(child => child.phase === phase);
+      assert.equal(entry.status, 'PENDING');
+      assert.equal(intent.status, 'NOT_STARTED'); assert.equal(intent.spawned, false); assert.equal(intent.pid, null); assert.ok(intent.completedAt);
+      assert.deepEqual(intent.recovery.liveProcesses, []); assert.equal(intent.recovery.worktree, runner.worktree);
+      assert.deepEqual(entry.retries.at(-1).recoveredUnknownStart.phases, [phase]);
+    }
   });
   test(`known ${phase} ENOENT spawn failure completes intent and allows recovery`, async t => {
     const { root, config } = await fixture(t);
@@ -1296,4 +1316,36 @@ test('SVG and foreign SVG raw bodies audit decoded script imports and reject uns
     await git(source, ['add', 'prototype']); await git(source, ['commit', '-m', 'Decoded SVG raw-body resource']);
     await assert.rejects(gitSnapshot(source, (await git(source, ['rev-parse', 'HEAD'])).trim(), config), entry.error);
   }
+});
+
+test('transient provider failures retry the same attempt with a fresh context; other failures block at once', async t => {
+  const { root, config } = await fixture(t);
+  const counter = path.join(root, '..', 'executor-runs');
+  // Two capacity failures, then an ordinary executor failure that must not be retried.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const fs=require('node:fs');const n=fs.existsSync(process.argv[1])?Number(fs.readFileSync(process.argv[1],'utf8')):0;fs.writeFileSync(process.argv[1],String(n+1));fs.writeFileSync('edited-'+n+'.txt','partial');console.error(n<2?'Selected model is at capacity. Please try a different model.':'TypeError: undefined is not a function');process.exit(1)`, counter];
+  config.policy = { ...config.policy, transientRetries: 3, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /TypeError: undefined is not a function/);
+  assert.equal(await fs.readFile(counter, 'utf8'), '3');
+  assert.deepEqual(events.filter(event => event.event === 'execute-retry').map(event => event.retry), [1, 2]);
+  const attempt = (await sourceStatus(root)).entries[0].attempts[0];
+  assert.equal(attempt.transientRetries.length, 2); assert.match(attempt.transientRetries[0].reason, /at capacity/);
+  assert.equal(attempt.processes.filter(child => child.phase === 'execute').length, 3);
+  assert.ok(attempt.processes.every(child => child.completedAt));
+});
+
+test('exhausted transient retries block with the provider failure', async t => {
+  const { root, config } = await fixture(t);
+  config.adapters.codex.command.argv = [process.execPath, '-e', "console.error('unexpected status 503 Service Unavailable');process.exit(1)"];
+  config.policy = { ...config.policy, transientRetries: 1, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const result = await runOnce(root, config);
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /503 Service Unavailable/);
+  const attempt = (await sourceStatus(root)).entries[0].attempts[0];
+  assert.equal(attempt.transientRetries.length, 1);
+  assert.equal(attempt.processes.filter(child => child.phase === 'execute').length, 2);
 });

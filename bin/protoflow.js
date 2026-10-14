@@ -36,6 +36,7 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          Draft v1 mappings -> anchors (patches + v2 config; nothing applied)
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
+  runner retry --recover-unknown-start  Also close launch intents without a PID once no live process uses the worktree
   runner gc [--apply]                    List runner worktrees; --apply archives and removes unused clean ones
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
   delivery sync --retry-review --delivery id --review AIR-id [--target id]
@@ -67,7 +68,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, apply: { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
     ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -88,7 +89,7 @@ try {
         case 'doctor': return doctor(root, config);
         case 'runner':
           if (action === 'status') return runnerStatus(root, config);
-          if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null });
+          if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null, recoverUnknownStart: values['recover-unknown-start'] === true });
           if (action === 'configure') return configureRunner(root, config);
           if (action === 'gc') return collectRunnerWorktrees(root, config, { apply: values.apply });
           if (action === 'start') {

@@ -61,3 +61,11 @@ test('FAKE CLI only: provider output schema explicitly types every field, includ
   assert.equal(schema.properties.requestId.const, 'AIR-adapter-fixture');
   assert.match(schema.properties.bindingHash.const, /^[a-f0-9]{64}$/);
 });
+
+test('FAKE CLI only: the prompt limits a multi-target review to the delivering target and its bound scope', async t => {
+  const root = await fixture(t), result = await run(root); assert.equal(result.code, 0, result.stderr);
+  const { input } = JSON.parse(await fs.readFile(path.join(root, '.protoflow/fixture-review/received.json')));
+  assert.match(input, /When binding\.scope is present .* only target binding\.scope\.target/);
+  assert.match(input, /stale or missing implementation is out of scope; report a sibling only if this change breaks it/);
+  assert.match(input, /judge position and layout by application\.png against prototype\.png and by the T3 layout tier, never by device\.png/);
+});
