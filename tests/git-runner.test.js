@@ -1371,3 +1371,14 @@ test('a failed executor run is one bounded attempt and the next attempt is told 
   assert.deepEqual(attempts.map(attempt => attempt.status), ['FAIL', 'FAIL']);
   assert.ok(attempts.every(attempt => attempt.completedAt));
 });
+
+test('automatic review retries cover transient blocks, including legacy records known only by their reason', async () => {
+  const { transientReviewBlock } = await import('../src/runner.js');
+  const legacy = { status: 'BLOCKED', reason: 'Canonical GitHub repository lookup failed: Get "https://api.github.com/repos/o/r": EOF' };
+  assert.equal(transientReviewBlock(legacy, null, 3), true);
+  assert.equal(transientReviewBlock({ status: 'BLOCKED', retryable: true, reasonCode: 'TRANSIENT_INFRASTRUCTURE', reason: 'x' }, null, 1), true);
+  assert.equal(transientReviewBlock(legacy, null, 6), false, 'the attempt budget is bounded');
+  assert.equal(transientReviewBlock(legacy, { status: 'FAIL', findings: [{}] }, 1), false, 'a verdict is never retried');
+  assert.equal(transientReviewBlock({ status: 'BLOCKED', reason: 'Application HEAD differs from the delivery commit' }, null, 1), false);
+  assert.equal(transientReviewBlock({ status: 'PASS', reason: legacy.reason }, null, 1), false);
+});

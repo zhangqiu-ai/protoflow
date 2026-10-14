@@ -10,6 +10,7 @@ import { git, scanSource, sourceStatus, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
 import { recordedVerdict, isRejectingVerdict, assertIndependentReview } from './delivery-review.js';
+import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
@@ -206,14 +207,21 @@ async function automateBlockedDelivery(root, config, stream, runner, { onEvent }
   if (record.status === 'PASS') {
     try { await assertIndependentReview(root, config, record.id); }
     catch (error) { retry = error.reasonCode === 'ENGINE_ATTESTATION_MISSING'; }
-  } else if (record.status === 'BLOCKED' && record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') {
-    retry = (delivery.independentReviewAttempts?.length ?? 1) < MAX_REVIEW_ATTEMPTS;
-  }
+  } else retry = transientReviewBlock(record, verdict, delivery.independentReviewAttempts?.length ?? 1);
   if (!retry) return null;
   await onEvent({ event: 'review-retry', deliveryId: delivery.id, reviewId: record.id, reason: record.status === 'PASS' ? 'attestation lost on restart' : record.reason });
   const result = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream, retryIndependentReview: { deliveryId: delivery.id, reviewId: record.id } });
   await onEvent({ event: 'delivered', automated: 'review-retry', ...result });
   return { status: result.status === 'PASS' ? 'PASS' : 'BLOCKED', reason: result.reason ?? result.deliveries?.find(item => item.error)?.error, delivery: result };
+}
+/**
+ * A review attempt BLOCKED by the network before any verdict, within the attempt budget. Records written before a
+ * network signature was classified transient carry only their reason text, so that is checked as well.
+ */
+export function transientReviewBlock(record, verdict, attempts) {
+  if (record?.status !== 'BLOCKED' || verdict) return false;
+  const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || transientFailure(record.reason);
+  return transient && attempts < MAX_REVIEW_ATTEMPTS;
 }
 async function rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent }) {
   const progress = await loadProgress(root, config, stream);

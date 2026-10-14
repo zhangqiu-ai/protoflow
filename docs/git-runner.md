@@ -95,7 +95,7 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 `policy.autoApprove` 下，Runner 在交付被擋時自動做原本由操作者執行的兩件事，閘門本身不放寬：
 
 - **審查 FAIL → 自動拒收**：獨立審查回傳 FAIL 且有 findings 時，Runner 以 `ai:codex-independent-review:<session>`、`reviewerKind: "model"` 對被接受的 verification 記錄 `changes_requested`；證據檔為 `.protoflow/delivery/automated-rejections/<AIR>.json`，並發出 `auto-rejected` 事件。下一輪版本重開修復，findings 是要對照證據檢驗的主張。同一版本已重開 3 次時停止自動拒收，由人決定；NOT_RUN 也留給人。
-- **重新審查**：重啟後已保存的 PASS 失去進程內認證，或審查因暫時性網路問題 BLOCKED（最多 6 次）時，Runner 自動走明確重試路徑，執行新的 provider 審查並發出 `review-retry` 事件。審查判斷永不重擲。
+- **重新審查**：重啟後已保存的 PASS 失去進程內認證，或審查在得到判斷前因暫時性網路問題 BLOCKED（最多 6 次；紀錄沒有 `retryable` 旗標時以原因文字判斷，例如 `gh` 的 `Get "…": EOF`）時，Runner 自動走明確重試路徑，執行新的 provider 審查並發出 `review-retry` 事件。審查判斷永不重擲。
 
 未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。
 
