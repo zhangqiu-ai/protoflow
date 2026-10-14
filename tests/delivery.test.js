@@ -86,8 +86,10 @@ async function fakeEnvironment(t, base, root, remote) {
   const transport = path.join(base, 'git-transport.json'), transportLog = path.join(base, 'git-calls.json');
   await writeJson(transport, { realGit, urls: { [fixtureUrl]: remote }, log: transportLog });
   await git(root, 'remote', 'set-url', 'origin', fixtureUrl);
-  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE', 'FAKE_DELIVERY_GIT_PUSH_REJECT'].map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE', 'FAKE_DELIVERY_GIT_PUSH_REJECT', 'PROTOFLOW_NETWORK_RETRIES'].map(key => [key, process.env[key]]));
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  // Outage fixtures are one-shot; in-place read retries are exercised by their own test.
+  process.env.PROTOFLOW_NETWORK_RETRIES = '0';
   process.env.FAKE_GH_DB = db;
   process.env.FAKE_DELIVERY_GIT = transport;
   t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
@@ -1395,6 +1397,42 @@ test('FAKE transport: a PASS lost to the network after the provider ran is re-re
   const blocked = (await deliveryStatus(f.root)).deliveries[0], record = await reviewRecord(f, blocked.independentReviewId);
   assert.equal(record.status, 'BLOCKED'); assert.ok(record.processFile, 'the provider ran');
   assert.equal((await recordedVerdict(f.root, record)).status, 'PASS');
+  const events = [];
+  const result = await runOnce(f.root, f.config, { onEvent: event => events.push(event.event) });
+  assert.equal(result.status, 'PASS', JSON.stringify(result)); assert.equal(events[0], 'review-retry');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
+});
+
+test('FAKE transport: in-place retries absorb a dropped read so the delivery completes in one sync', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const trigger = path.join(f.base, 'outage-trigger'); await fs.writeFile(trigger, 'armed');
+  // One proxy failure of the next ls-remote: without retries the commit step blocks on it.
+  process.env.FAKE_DELIVERY_GIT_UNAVAILABLE = trigger;
+  process.env.PROTOFLOW_NETWORK_RETRIES = '1';
+  const result = await syncDeliveries(f.root, f.config);
+  delete process.env.FAKE_DELIVERY_GIT_UNAVAILABLE;
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  await assert.rejects(fs.access(trigger), { code: 'ENOENT' }, 'the outage happened and was absorbed');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
+});
+
+test('FAKE transport: a review whose provider was stopped before answering is retried as infrastructure', async t => {
+  const { interruptedProvider } = await import('../src/delivery-review.js');
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const trigger = path.join(f.base, 'outage-trigger');
+  Object.assign(process.env, { FAKE_REVIEW_TRIGGER: trigger, FAKE_GH_UNAVAILABLE_AFTER: trigger });
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
+  delete process.env.FAKE_REVIEW_TRIGGER; delete process.env.FAKE_GH_UNAVAILABLE_AFTER;
+  // Rewrite the attempt as a runner stop would have left it: no run, no answer, killed process.
+  const delivery = (await deliveryStatus(f.root)).deliveries[0], file = path.join(f.root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}.json`);
+  const record = await readJson(file);
+  for (const key of ['runFile', 'runHash', 'sessionId', 'traceHash', 'verdictHash', 'retryable', 'reasonCode']) delete record[key];
+  record.reason = 'Independent review FAIL: provider did not complete safely';
+  await writeJson(path.join(f.root, record.processFile), { status: 'FAIL', exitCode: null, spawned: true, stdout: '', stderr: '', processGroupActive: false, error: 'Command exited with a surviving subprocess group; terminated the group and blocked advancement' });
+  record.processHash = hash(await readJson(path.join(f.root, record.processFile)));
+  await writeJson(file, record);
+  assert.equal(await interruptedProvider(f.root, record), true);
+  assert.equal(await interruptedProvider(f.root, { ...record, status: 'PASS' }), false);
   const events = [];
   const result = await runOnce(f.root, f.config, { onEvent: event => events.push(event.event) });
   assert.equal(result.status, 'PASS', JSON.stringify(result)); assert.equal(events[0], 'review-retry');

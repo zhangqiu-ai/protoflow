@@ -9,7 +9,7 @@ import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
-import { recordedVerdict, isRejectingVerdict, assertIndependentReview } from './delivery-review.js';
+import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interruptedProvider } from './delivery-review.js';
 import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
@@ -215,7 +215,7 @@ async function automateBlockedDelivery(root, config, stream, runner, { onEvent }
       const previous = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${attempt.id}.json`), null);
       if (previous?.processFile) ran += 1;
     }
-    retry = transientReviewBlock(record, verdict, ran);
+    retry = transientReviewBlock(record, verdict, ran) || (!verdict && ran < MAX_REVIEW_ATTEMPTS && await interruptedProvider(root, record));
   }
   if (!retry) return null;
   await onEvent({ event: 'review-retry', deliveryId: delivery.id, reviewId: record.id, reason: record.status === 'PASS' ? 'attestation lost on restart' : record.reason });

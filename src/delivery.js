@@ -1,7 +1,7 @@
 import { createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerStatePath, isMultiTarget } from './streams.js';
 import { projectPath, readJson, writeJson, id, hash, RUNTIME_DIRS } from './util.js';
-import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict } from './delivery-review.js';
+import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict, interruptedProvider } from './delivery-review.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
 import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient, transientFailure } from './delivery-scope.js';
 import { verificationRevocation } from './queue.js';
@@ -339,7 +339,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
     } else if (published) {
       // After approval or publication only an infrastructure failure outside the verdict can be retried.
       // Records written before a network signature was classified transient carry only their reason text.
-      const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!isRejectingVerdict(verdict) && transientFailure(record.reason));
+      const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!isRejectingVerdict(verdict) && transientFailure(record.reason)) || (!verdict && await interruptedProvider(root, record));
       if (!transient) return { status: 'BLOCKED', reason: 'After publication only a review attempt BLOCKED by a transient network failure can be retried' };
       revalidation = true;
     } else if (previous.approval) revalidation = true;

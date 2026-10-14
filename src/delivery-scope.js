@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { runCommand } from './util.js';
 
 const exec = promisify(execFile);
@@ -30,13 +31,31 @@ export async function deliveryGit(root, args, { encoding = 'utf8' } = {}) {
   try { await fs.lstat(path.resolve(root, graft)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   let result;
-  try { result = await exec('git', [...prefix, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 }); }
-  catch (error) { throw markTransient(error, String(error.stderr ?? '')); }
+  for (let attempt = 0; ; attempt++) {
+    try { result = await exec('git', [...prefix, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 }); break; }
+    catch (error) {
+      markTransient(error, String(error.stderr ?? ''));
+      if (!error.transient || !READ_GIT.includes(args[0]) || attempt >= networkRetries()) throw error;
+      await delay(1000 * 2 ** attempt);
+    }
+  }
   return encoding === 'buffer' ? result.stdout : result.stdout.trim();
 }
 
-function github(worktree, args) {
-  return runCommand(worktree, { argv: ['gh', ...args], timeoutMs: 120000 }, null, { env: { ...environment(), GH_HOST: 'github.com' } });
+/**
+ * A flaky proxy drops a share of requests; a delivery makes dozens. Reads are retried in place on a transient network
+ * failure (PROTOFLOW_NETWORK_RETRIES, default 2, 1 s then 2 s apart); pushes and GitHub writes never are, because a
+ * lost response may hide a completed write.
+ */
+const READ_GIT = ['ls-remote', 'fetch'];
+const networkRetries = () => { const value = Number(process.env.PROTOFLOW_NETWORK_RETRIES ?? 2); return Number.isInteger(value) && value >= 0 && value <= 5 ? value : 2; };
+const readOnlyGh = args => (args[0] === 'api' && !args.some(arg => ['-X', '--method', '-f', '-F', '--field', '--raw-field', '--input'].includes(arg))) || (args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]));
+async function github(worktree, args) {
+  for (let attempt = 0; ; attempt++) {
+    const result = await runCommand(worktree, { argv: ['gh', ...args], timeoutMs: 120000 }, null, { env: { ...environment(), GH_HOST: 'github.com' } });
+    if (result.status === 'PASS' || !readOnlyGh(args) || attempt >= networkRetries() || !transientFailure(`${result.stderr ?? ''}\n${result.error ?? ''}`)) return result;
+    await delay(1000 * 2 ** attempt);
+  }
 }
 export function deliveryGh(worktree, repository, args) {
   if (repository?.host !== 'github.com' || !/^[\w.-]+\/[\w.-]+$/.test(repository.nameWithOwner ?? '') || !Number.isSafeInteger(repository.id) || repository.id <= 0) throw blocked('Missing reviewed canonical GitHub repository identity');

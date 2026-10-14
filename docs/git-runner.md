@@ -97,7 +97,11 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 - **審查 FAIL → 自動拒收**：獨立審查回傳 FAIL 且有 findings 時，Runner 以 `ai:codex-independent-review:<session>`、`reviewerKind: "model"` 對被接受的 verification 記錄 `changes_requested`；證據檔為 `.protoflow/delivery/automated-rejections/<AIR>.json`，並發出 `auto-rejected` 事件。下一輪版本重開修復，findings 是要對照證據檢驗的主張。同一版本已重開 3 次時停止自動拒收，由人決定；NOT_RUN 也留給人。
 - **重新審查**：重啟後已保存的 PASS 失去進程內認證，或審查在得到判斷前因暫時性網路問題 BLOCKED（上限 6 次只計算 provider 實際執行過的審查，provider 執行前的網路失敗不計入，由 Runner 的循環間隔控制頻率；紀錄沒有 `retryable` 旗標時以原因文字判斷，例如 `gh` 的 `Get "…": EOF`）時，Runner 自動走明確重試路徑，執行新的 provider 審查並發出 `review-retry` 事件。審查判斷永不重擲。
 
+審查程序在回答前被停止或終止（例如 Runner 重啟；結束碼為 null、沒有輸出、沒有判斷）屬於基礎設施問題，標為可重試；這版之前的紀錄由 process 證據辨識。
+
 未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。
+
+交付對 GitHub 的只讀請求（`git ls-remote`、`git fetch`、`gh api` 讀取、`gh pr list/view/checks`）遇到暫時性網路錯誤時，原地重試 `PROTOFLOW_NETWORK_RETRIES` 次（預設 2，間隔 1 秒、2 秒）；推送、建立 PR、留言與合併不原地重試，因為遺失的回應可能掩蓋已完成的寫入，這些由上述的步驟層級恢復處理。實測中本機代理約有 8% 的請求失敗，一次交付需要數十個請求。
 
 被拒且從未發佈（沒有 push、沒有 PR）的 `REVOKED` 交付 commit 仍留在 Runner 分支上；修復後的新交付若以它為祖先，合併時會把被拒的內容（例如誤提交的工具快取）一起帶進共用分支。因此建立新交付 commit 前，若 `base..HEAD` 含這類 commit，引擎先 `git reset --soft` 到 HEAD 與 base 的分叉點再提交：檔案與驗收綁定的內容不變，只是歷史不再經過被拒的 commit；交付紀錄的 `discardedHistory` 保存原 HEAD、分叉點與被丟棄的交付。若仍有未結案的交付壓在這段歷史上則 BLOCKED。舊版引擎已在這類歷史上建立、但尚未發佈的交付，會在下一次 sync 被退役為 `REVOKED`（`revocation.revokedHistory`），版本重新排入交付並重新審查；遠端交付分支已含該 commit 時改為 BLOCKED，留待人工處理。實測中審查只看 `base..HEAD` 的淨 diff，看不出祖先中的 26,437 個快取檔，這條規則補上這個缺口。
 
