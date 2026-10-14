@@ -35,6 +35,7 @@ test('Codex bridge invokes the CLI with workspace-write and literal context stdi
   assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '-']);
   assert.ok(received.stdin.includes(JSON.stringify(context, null, 2)));
   assert.match(received.stdin, /untrusted prototype/);
+  assert.match(received.stdin, /never leave caches or downloads in the project/);
   assert.match(result.stdout, /providerRun.*false/);
 });
 test('Codex bridge preserves executor failure instead of reporting success', async t => {
@@ -70,4 +71,23 @@ test('Codex bridge isolates the executor from user config and memories when requ
   assert.equal((await run(root, { ...contextPackage, executor: { ignoreUserConfig: false } })).exitCode, 0);
   received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
   assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '-']);
+});
+
+test('Codex bridge adds explicit writable roots and network access only when configured (mock, no provider)', async t => {
+  const root = await fixture(t);
+  const context = { kind: 'implement', instructions: 'Preserve prototype', manifest: { id: 'test' } };
+  assert.equal((await run(root, context, 0, ['--add-dir', '/opt/flutter', '--add-dir', '/home/me/.dart-tool', '--network'])).exitCode, 0);
+  const received = JSON.parse(await readFile(path.join(root, 'received.json'), 'utf8'));
+  assert.deepEqual(received.args, ['exec', '--json', '--sandbox', 'workspace-write', '--add-dir', '/opt/flutter', '--add-dir', '/home/me/.dart-tool', '-c', 'sandbox_workspace_write.network_access=true', '-']);
+  await rm(path.join(root, 'received.json'));
+  assert.equal((await run(root, context, 0, ['--add-dir', 'relative/sdk'])).exitCode, 1);
+  await assert.rejects(readFile(path.join(root, 'received.json')));
+});
+
+test('Codex bridge refuses a prompt above the Codex input limit and names the largest fields (mock, no provider)', async t => {
+  const root = await fixture(t);
+  const result = await run(root, { kind: 'implement', instructions: 'Preserve prototype', manifest: { id: 'test' }, git: { status: 'x'.repeat(1100000) } });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /above the Codex input limit of 1048576; largest fields: git \(\d+\), instructions/);
+  await assert.rejects(readFile(path.join(root, 'received.json')));
 });

@@ -30,6 +30,15 @@ test('context requires mapped changes and remains dry without explicit execution
   assert.equal(context.mappings[0].component, 'app.html');
   const dry = await executeContext(root, unordered, context.id);
   assert.equal(dry.status, 'NOT_RUN');
+  // The executor request carries the application hash and size, never one hash per file.
+  assert.deepEqual(dry.request.project, { hash: context.project.hash, fileCount: Object.keys(context.project.files).length });
+  assert.deepEqual(dry.request.git, context.git);
+  const status = ' D cache/entry.bin\n'.repeat(10000);
+  const repairing = await executeContext(root, unordered, context.id, { repair: { attempt: 1, verification: { id: 'VER-x', status: 'FAIL', project: context.project, git: { head: 'abc', status, diff: '', available: true } } } });
+  const { git, ...rest } = repairing.request.repair.verification;
+  assert.deepEqual(rest, { id: 'VER-x', status: 'FAIL', project: dry.request.project });
+  assert.equal(git.head, 'abc'); assert.equal(git.diff, '');
+  assert.equal(git.status, `${status.slice(0, 64 * 1024)}\n[truncated: ${status.length} characters, 10001 lines]`);
   await writeFile(path.join(root, 'app.html'), 'User edited');
   await assert.rejects(executeContext(root, unordered, context.id, { execute: true }), /stale/);
   const next = await startSession(root, unordered);

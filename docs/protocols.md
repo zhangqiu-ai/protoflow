@@ -65,7 +65,9 @@ repair → READY_FOR_REVIEW | NEEDS_REVIEW
 
 ## Verification 與 Review
 
-verification 包含 manifestId/hash、prototypeHash、project（全檔 hash 集）、Git HEAD、build/functional exitCode/stdout/stderr、visual scene/mapping checks、artifactHashes，以及 changedDuringVerification。PASS 要求三種驗證全 PASS，mapped changes 全覆蓋，產品內容在 acceptance 期間穩定。
+verification 包含 manifestId/hash、prototypeHash、project（全檔 hash 集）、Git HEAD、build/functional exitCode/stdout/stderr、visual scene/mapping checks、artifactHashes、changedDuringVerification，以及 hygiene。PASS 要求三種驗證全 PASS，mapped changes 全覆蓋，產品內容在 acceptance 期間穩定，且 hygiene PASS。
+
+`hygiene` 檢查被綁定的應用內容是否像工具快取或下載：Git 尚未追蹤的應用檔超過 1000 個，或任何應用檔超過 25 MiB，即 FAIL，`reason` 依目錄列出數量與大檔。實測中執行代理因沙箱不能寫入 `~/.gradle`，把 `GRADLE_USER_HOME` 設在 worktree 內，26,437 個快取檔被驗收並寫進交付 commit；此檢查讓它在驗證階段 FAIL，並在修復時把原因交給執行代理。git 忽略的檔案不屬於應用內容，不計入。非 Git 專案只檢查檔案大小。
 
 Review 包含 status、reviewer、reviewedAt、notes、findings、manifestHash、verificationHash、projectHash。finding 範例：
 

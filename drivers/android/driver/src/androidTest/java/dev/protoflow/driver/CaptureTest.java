@@ -212,8 +212,24 @@ public class CaptureTest {
         return false;
     }
 
+    /** An IME window that stays on screen: the keyboard hides asynchronously after focus loss (Flutter takes a few frames). */
     private boolean keyboardVisible(UiAutomation automation) {
-        for (AccessibilityWindowInfo window : automation.getWindows()) if (window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
+        long deadline = SystemClock.uptimeMillis() + 3000;
+        while (imeOnScreen(automation)) {
+            if (SystemClock.uptimeMillis() >= deadline) return true;
+            SystemClock.sleep(100);
+        }
+        return false;
+    }
+
+    private boolean imeOnScreen(UiAutomation automation) {
+        if (android.os.Build.VERSION.SDK_INT >= 34) automation.clearCache();
+        Rect bounds = new Rect();
+        for (AccessibilityWindowInfo window : automation.getWindows()) {
+            if (window.getType() != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
+            window.getBoundsInScreen(bounds);
+            if (!bounds.isEmpty()) return true;
+        }
         return false;
     }
 

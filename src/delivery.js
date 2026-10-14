@@ -30,7 +30,7 @@ async function currentBase(worktree, options) {
 /**
  * Sibling targets merge their own deliveries into the shared base, so a target's HEAD falls behind it. Merge the
  * current base into this target's history only when the base changed nothing this target verified: files outside
- * its application (sibling roots, prototype, runtime output). The reviewed HEAD then contains the base it is
+ * its application (sibling roots, prototype, runtime output), or files this HEAD already has with identical content. The reviewed HEAD then contains the base it is
  * reviewed against. Single-target streams keep blocking on a moved base.
  */
 async function integrateBase(config, worktree, target, options, base) {
@@ -41,9 +41,12 @@ async function integrateBase(config, worktree, target, options, base) {
   const head = await git(worktree, ['rev-parse', 'HEAD']);
   const fork = await git(worktree, ['merge-base', head, base.sha]);
   const outside = [config.prototypeDir, ...siblingRoots(config, target)];
+  // A base change this HEAD already holds byte for byte (e.g. a config edit that runner configure synced) was verified here.
+  const differs = new Set((await git(worktree, ['diff', '--name-only', '-z', head, base.sha])).split('\0').filter(Boolean));
   const touched = (await git(worktree, ['diff', '--name-only', '-z', fork, base.sha])).split('\0').filter(Boolean)
-    .filter(file => !outside.some(prefix => under(file, prefix)) && !file.split('/').some(part => EXCLUDED.includes(part)));
-  if (touched.length) throw new Error(`Base ${options.baseBranch} changed files of target ${target} since its worktree forked (${touched.slice(0, 5).join(', ')}); reverify on the current base`);
+    .filter(file => differs.has(file) && !outside.some(prefix => under(file, prefix)) && !file.split('/').some(part => EXCLUDED.includes(part)));
+  const diverged = message => Object.assign(new Error(message), { code: 'BASE_DIVERGED', baseSha: base.sha });
+  if (touched.length) throw diverged(`Base ${options.baseBranch} changed files of target ${target} since its worktree forked (${touched.slice(0, 5).join(', ')}); reverify on the current base`);
   const before = await applicationFingerprint(worktree, config, target);
   try { await git(worktree, ['merge', '--no-ff', '--no-edit', '-m', `ProtoFlow: integrate ${options.baseBranch} ${base.sha.slice(0, 7)} into target ${target}`, base.sha]); }
   catch (error) {
@@ -53,7 +56,7 @@ async function integrateBase(config, worktree, target, options, base) {
   if ((await applicationFingerprint(worktree, config, target)).hash !== before.hash) {
     // --keep never discards local changes; it only undoes the merge commit.
     await git(worktree, ['reset', '-q', '--keep', head]);
-    throw new Error(`Integrating base ${base.sha} changed target ${target} application content; reverify on the current base`);
+    throw diverged(`Integrating base ${base.sha} changed target ${target} application content; reverify on the current base`);
   }
   return { baseSha: base.sha, previousHead: head, commit: await git(worktree, ['rev-parse', 'HEAD']) };
 }
@@ -110,6 +113,69 @@ async function reconcileReopenedDeliveries(root, config, target, source, state) 
     delivery.status = 'REVOKED'; changed = true;
   }
   if (changed) await saveDelivery(root, config, target, state);
+}
+
+const isAncestor = async (worktree, commit, of) => {
+  try { await git(worktree, ['merge-base', '--is-ancestor', commit, of]); return true; }
+  catch (error) { if (error.code === 1 || /Not a valid commit|bad object/.test(String(error.stderr ?? ''))) return false; throw error; }
+};
+const deliveryCommits = delivery => [delivery.commit, delivery.integration?.previousHead].filter(Boolean);
+const unpublished = delivery => !delivery.steps?.pushedAt && !delivery.pr;
+async function ensureCommit(worktree, base) {
+  try { await git(worktree, ['cat-file', '-e', `${base.sha}^{commit}`]); }
+  catch { await git(worktree, ['fetch', '--no-tags', '--no-write-fetch-head', base.url, base.sha]); }
+}
+/** Revoked deliveries that never left this checkout and whose commits `head` still carries above the base. */
+async function revokedHistory(worktree, state, head, base, except = null) {
+  const found = [];
+  for (const delivery of state.deliveries.filter(item => item.status === 'REVOKED' && item !== except && unpublished(item))) {
+    for (const commit of deliveryCommits(delivery)) {
+      if (await isAncestor(worktree, commit, head) && !await isAncestor(worktree, commit, base.sha)) { found.push(delivery.id); break; }
+    }
+  }
+  return found;
+}
+/**
+ * A rejected delivery's commits stay in the runner branch after its version is reopened. They were never published and
+ * must not reach the shared branch through a later delivery's ancestry (a rejected commit may hold caches or secrets the
+ * repair removed). Before committing, drop them: move HEAD back to its fork point with the base, keeping index and files.
+ */
+async function dropRevokedHistory(worktree, state, base) {
+  const head = await git(worktree, ['rev-parse', 'HEAD']);
+  await ensureCommit(worktree, base);
+  const revoked = await revokedHistory(worktree, state, head, base);
+  if (!revoked.length) return null;
+  for (const delivery of state.deliveries.filter(item => !settled(item))) {
+    for (const commit of deliveryCommits(delivery)) {
+      if (await isAncestor(worktree, commit, head) && !await isAncestor(worktree, commit, base.sha)) throw new Error(`Unsettled delivery ${delivery.id} sits on revoked history; resolve it before committing a new delivery`);
+    }
+  }
+  const anchor = await git(worktree, ['merge-base', head, base.sha]);
+  await git(worktree, ['reset', '-q', '--soft', anchor]);
+  return { from: head, to: anchor, revokedDeliveries: revoked };
+}
+/**
+ * A delivery committed on top of revoked history before that history was dropped cannot be published as is. If it never
+ * reached the remote branch, retire it and return its versions to the queue so the next commit is rebuilt cleanly.
+ */
+async function retireTaintedDeliveries(root, config, target, worktree, source, state, options) {
+  const tainted = [];
+  for (const delivery of state.deliveries.filter(item => !settled(item) && unpublished(item) && item.commit)) {
+    const base = await currentBase(worktree, options);
+    await ensureCommit(worktree, base);
+    const revoked = await revokedHistory(worktree, state, delivery.commit, base, delivery);
+    if (!revoked.length) continue;
+    const destination = await resolveDeliveryDestination(worktree, options.remote);
+    const remote = /^([a-f0-9]{40})\s/.exec(await git(worktree, ['ls-remote', destination.url, `refs/heads/${deliveryBranch(config, target)}`]))?.[1] ?? null;
+    if (remote) await ensureCommit(worktree, { sha: remote, url: destination.url });
+    if (remote && (remote === delivery.commit || await isAncestor(worktree, delivery.commit, remote))) throw new Error(`Delivery ${delivery.id} carries revoked history but may already be on the remote branch; resolve it externally`);
+    delivery.revocation = { at: new Date().toISOString(), previousStatus: delivery.status, reason: `Unpublished delivery carries the history of revoked deliveries ${revoked.join(', ')}`, revokedHistory: revoked };
+    delivery.status = 'REVOKED';
+    for (const entry of source.entries.filter(item => item.deliveryId === delivery.id)) delete entry.deliveryId;
+    tainted.push(delivery.id);
+  }
+  if (tainted.length) { await saveDelivery(root, config, target, state); await saveProgress(root, config, target, source); }
+  return tainted;
 }
 
 /** A repair may run locally, but updating the shared branch would also update an unresolved rejected PR. */
@@ -235,6 +301,8 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   const source = await loadProgress(root, config, target);
   const state = await deliveryStatus(root, config, target);
   await reconcileReopenedDeliveries(root, config, target, source, state);
+  try { await retireTaintedDeliveries(root, config, target, worktree, source, state, options); }
+  catch (error) { return { status: 'BLOCKED', reason: error.message, retryable: error.transient === true }; }
   // An explicit retry selects the current attempt; `revalidation` lets its fresh PASS replace an existing approval.
   let revalidation = false, previousReview = null;
   if (retryIndependentReview) {
@@ -277,6 +345,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         const previous = (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
         if (previous.some(file => !inScope(file, options.paths))) throw new Error('Existing Git index contains changes outside the delivery allowlist; preserve it for inspection');
       }
+      delivery.discardedHistory = await dropRevokedHistory(worktree, state, base) ?? undefined;
       // Stage, then unstage exclusions: naming a gitignored path in an add pathspec makes git exit non-zero.
       // `add -A` leaves Git-ignored files out, matching applicationFingerprint, which binds only committable content.
       await git(worktree, ['add', '-A', '--', ...(options.paths ?? ['.'])]);
@@ -313,7 +382,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       delivery.status = 'COMMITTED'; delivery.steps.committedAt = new Date().toISOString();
     } catch (error) {
       // Nothing is linked to the versions, so the next sync repeats this delivery from the same content.
-      return { status: 'BLOCKED', step: 'commit', reason: error.message, retryable: error.transient === true };
+      return { status: 'BLOCKED', step: 'commit', reason: error.message, retryable: error.transient === true, ...(error.code === 'BASE_DIVERGED' && { code: error.code, baseSha: error.baseSha }) };
     }
     for (const entry of pending) entry.deliveryId = delivery.id;
     state.deliveries.push(delivery);
@@ -436,6 +505,6 @@ export async function assertDelivered(root, config, target = null) {
   if (alignment) throw new Error(`Merged delivery ${alignment.id} requires alignment recovery: ${alignment.alignment.reason}`);
   if (source.entries.some(entry => entry.status === 'PASS' && !entry.deliveryId) || state.deliveries.some(delivery => !settled(delivery))) {
     const result = await syncDeliveries(root, config, { target });
-    if (['FAIL', 'BLOCKED'].includes(result.status)) throw new Error(`Delivery is blocked: ${result.reason ?? result.deliveries?.find(item => item.error)?.error}`);
+    if (['FAIL', 'BLOCKED'].includes(result.status)) throw Object.assign(new Error(`Delivery is blocked: ${result.reason ?? result.deliveries?.find(item => item.error)?.error}`), result.code === 'BASE_DIVERGED' ? { code: result.code, baseSha: result.baseSha } : {});
   }
 }

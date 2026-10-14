@@ -494,7 +494,7 @@ PASS verification 之後的審查結論也可能是不通過。三種決定分�
 - 只影響該 verification 的 target，其他 target 的游標與進度不變。拒收 FAIL verification 只是紀錄，不撤銷任何東西。
 - Runner 每輪先在專案與 worktree 間同步已決定的拒收，把被拒的 PASS 進度條目改回 PENDING，舊 PASS、verification、delivery 與完成時間保存在 `reopenings`；attempts 與所有紀錄不刪改。重新驗收後會像新版本一樣交付。
 - 直接 `delivery sync`、既有 approval 重試與重啟後重新審查也檢查專案及 worktree 兩側的拒收，不得繞過重新驗收；兄弟 target 維持獨立。
-- 修復 context 帶 `rejections`（審查決定、findings 與模型證據），指示執行者逐項處理。
+- 修復 context 帶 `rejections`（審查決定、findings 與模型證據），指示執行者逐項處理：每項 finding 都是要對照凍結原型與驗證證據檢查的主張，證據證實的才修；與原型或分層驗證（內容區域截圖、結構、token、版面）矛盾的不實作，在報告中說明，由下一次獨立審查判斷。實測中 reviewer 依含狀態列的整螢幕截圖誤判 iOS 畫面下移，執行者照做後兩次驗證都因標題列被狀態列遮住而 FAIL。
 
 測試：`tests/review-lifecycle.test.js`、`tests/git-runner.test.js`（拒收後 runner 重開同版本）、`tests/tiers.test.js`（單一根錨點的根幾何）。
 

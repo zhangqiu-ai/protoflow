@@ -112,7 +112,8 @@ test('repair contexts include only rejection findings for their selected target'
   assert.doesNotMatch(desktop.instructions, /rejected in review|address every finding in rejections/);
   const web = await createContext(root, multi, manifest.id, { target: 'web' });
   assert.deepEqual(web.rejections, [{ reviewId: review.id, manifestId: manifest.id, verificationId: review.verificationId, status: review.status,
-    reviewerKind: review.reviewerKind, reviewer: review.reviewer, notes: review.notes, findings: review.findings, model: review.model }]);
+    reviewerKind: review.reviewerKind, reviewer: review.reviewer, notes: review.notes, findings: review.findings, model: review.model,
+    rejectedVerification: { status: 'PASS', build: null, functional: null, visual: null, scenes: [], evidence: `.protoflow/artifacts/${review.verificationId}/ (per scene: prototype.png and application.png share the prototype viewport; driver/device.png is the whole device screen)` } }]);
   assert.match(web.instructions, /rejected in review and this version was reopened/);
   assert.deepEqual((await versionQueue(root, multi)).versions, before.versions);
 });
@@ -168,7 +169,12 @@ test('single-stream repair contexts preserve untargeted rejection findings', asy
   assert.equal(context.target, undefined);
   assert.deepEqual(context.rejections.map(item => item.reviewId), [review.id]);
   assert.deepEqual(context.rejections[0].findings, review.findings);
+  // The executor sees what the rejected verification measured, to weigh the findings against it.
+  const summary = context.rejections[0].rejectedVerification;
+  assert.equal(summary.status, 'PASS'); assert.match(summary.evidence, new RegExp(`\\.protoflow/artifacts/${review.verificationId}/`));
+  assert.ok(Array.isArray(summary.scenes));
   assert.match(context.instructions, /rejected in review and this version was reopened/);
+  assert.match(context.instructions, /do not implement a finding that the prototype or the tiered verification .* contradicts/);
 });
 
 test('an independent model review records a bound FAIL, reopens the version and cannot approve', async t => {
@@ -228,4 +234,13 @@ test('model review evidence may bind the verification by its file bytes', async 
   const decided = await decideReview(root, config, pending.id, { status: 'rejected', reviewer: 'ai:codex:session-1', reviewerKind: 'model', model: { evidence } });
   assert.equal(decided.model.verificationHashForm, 'file');
   assert.equal((await versionQueue(root, config)).current.id, manifest.id);
+});
+
+test('an independent review FAIL verdict with top-level findings becomes the rejection findings', async t => {
+  const { root, manifest, verification, evidence, result } = await reviewed(t);
+  const { modelResult, ...rest } = result;
+  await fs.writeFile(evidence, JSON.stringify({ ...rest, independentReviewId: 'AIR-fixture', findings: [{ severity: 'normal', file: 'flutter/lib/main.dart', line: 9, description: 'Old accent' }], summary: modelResult.summary }));
+  const pending = await createReview(root, config, manifest.id, verification.id);
+  const decided = await decideReview(root, config, pending.id, { reviewer: 'ai:codex:session-1', reviewerKind: 'model', model: { evidence, session: 'session-1' }, status: 'changes_requested' });
+  assert.deepEqual(decided.findings, [{ severity: 'normal', description: 'flutter/lib/main.dart:9: Old accent' }]);
 });

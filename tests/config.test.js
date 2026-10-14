@@ -99,3 +99,14 @@ test('a target configures either one driver or variants of one codebase', async 
   await write([{ ...mobile, variants: [{ id: 'ios', driver: external(['node', 'x.js']), functional: { argv: ['x'] } }] }]);
   await assert.rejects(loadConfig(root), /Invalid ProtoFlow config/);
 });
+
+test('transient executor retry policy is bounded', async t => {
+  const root = await target(t);
+  const original = await loadConfig(root);
+  await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...original, policy: { ...original.policy, transientRetries: 3, transientRetryDelayMs: 60000 } }));
+  assert.equal((await loadConfig(root)).policy.transientRetries, 3);
+  for (const policy of [{ transientRetries: 6 }, { transientRetries: -1 }, { transientRetryDelayMs: 600001 }]) {
+    await writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify({ ...original, policy: { ...original.policy, ...policy } }));
+    await assert.rejects(loadConfig(root));
+  }
+});
