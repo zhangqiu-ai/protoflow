@@ -339,7 +339,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
     } else if (published) {
       // After approval or publication only an infrastructure failure outside the verdict can be retried.
       // Records written before a network signature was classified transient carry only their reason text.
-      const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!verdict && transientFailure(record.reason));
+      const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!isRejectingVerdict(verdict) && transientFailure(record.reason));
       if (!transient) return { status: 'BLOCKED', reason: 'After publication only a review attempt BLOCKED by a transient network failure can be retried' };
       revalidation = true;
     } else if (previous.approval) revalidation = true;

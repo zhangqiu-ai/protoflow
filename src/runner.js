@@ -224,11 +224,12 @@ async function automateBlockedDelivery(root, config, stream, runner, { onEvent }
   return { status: result.status === 'PASS' ? 'PASS' : 'BLOCKED', reason: result.reason ?? result.deliveries?.find(item => item.error)?.error, delivery: result };
 }
 /**
- * A review attempt BLOCKED by the network before any verdict, within the budget of provider runs. Records written
+ * A review attempt BLOCKED by the network without a rejecting verdict, within the budget of provider runs. Records written
  * before a network signature was classified transient carry only their reason text, so that is checked as well.
  */
 export function transientReviewBlock(record, verdict, attempts) {
-  if (record?.status !== 'BLOCKED' || verdict) return false;
+  // A PASS without findings may be re-reviewed after a network failure; FAIL, NOT_RUN or a finding never is.
+  if (record?.status !== 'BLOCKED' || isRejectingVerdict(verdict)) return false;
   const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || transientFailure(record.reason);
   return transient && attempts < MAX_REVIEW_ATTEMPTS;
 }

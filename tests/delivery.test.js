@@ -12,7 +12,7 @@ import { writeJson, hash, fingerprint, readJson } from '../src/util.js';
 import { applicationFingerprint, createReview, decideReview } from '../src/workflow.js';
 import { snapshot } from '../src/sessions.js';
 import { freezeVersion } from '../src/versions.js';
-import { assertIndependentReview, requestIndependentReview } from '../src/delivery-review.js';
+import { assertIndependentReview, requestIndependentReview, recordedVerdict } from '../src/delivery-review.js';
 import { deliveryGit, transientFailure } from '../src/delivery-scope.js';
 import { fileURLToPath } from 'node:url';
 import { FAKE_GH } from './helpers/fake-gh.js';
@@ -1383,4 +1383,20 @@ test('multi-target FAKE transport: an unpublished delivery whose base moved is r
       assert.deepEqual(deliveries.map(item => item.status), ['BLOCKED'], 'a reviewer verdict is not discarded by rebuilding');
     }
   });
+});
+
+test('FAKE transport: a PASS lost to the network after the provider ran is re-reviewed automatically by the runner', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const trigger = path.join(f.base, 'outage-trigger');
+  // The fake reviewer arms a one-shot GitHub outage right after returning PASS; the post-review check then fails.
+  Object.assign(process.env, { FAKE_REVIEW_TRIGGER: trigger, FAKE_GH_UNAVAILABLE_AFTER: trigger });
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
+  delete process.env.FAKE_REVIEW_TRIGGER; delete process.env.FAKE_GH_UNAVAILABLE_AFTER;
+  const blocked = (await deliveryStatus(f.root)).deliveries[0], record = await reviewRecord(f, blocked.independentReviewId);
+  assert.equal(record.status, 'BLOCKED'); assert.ok(record.processFile, 'the provider ran');
+  assert.equal((await recordedVerdict(f.root, record)).status, 'PASS');
+  const events = [];
+  const result = await runOnce(f.root, f.config, { onEvent: event => events.push(event.event) });
+  assert.equal(result.status, 'PASS', JSON.stringify(result)); assert.equal(events[0], 'review-retry');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
 });
