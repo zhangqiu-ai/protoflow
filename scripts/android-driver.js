@@ -76,7 +76,9 @@ async function ensureDevice(avd) {
   if (found.error || found.serial) return found;
   const list = await run([emulatorPath, '-list-avds'], { timeoutMs: 60000 });
   if (!list.stdout.split('\n').map(line => line.trim()).includes(avd)) return { error: `AVD "${avd}" was not found; create it with avdmanager create avd -n "${avd}" -k <system image>` };
-  const child = spawn(emulatorPath, ['-avd', avd, '-no-window', '-no-audio', '-no-boot-anim', '-no-snapshot-save'], { env: { ...process.env, ...toolEnv }, detached: true, stdio: 'ignore' });
+  // The emulator outlives this capture: start it from the home directory, never from a runner worktree, so cleanup of
+  // processes left in a worktree cannot mistake the device for an executor leftover.
+  const child = spawn(emulatorPath, ['-avd', avd, '-no-window', '-no-audio', '-no-boot-anim', '-no-snapshot-save'], { cwd: homedir(), env: { ...process.env, ...toolEnv }, detached: true, stdio: 'ignore' });
   child.unref();
   const deadline = Date.now() + 300000;
   while (Date.now() < deadline) {

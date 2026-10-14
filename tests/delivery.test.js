@@ -86,7 +86,7 @@ async function fakeEnvironment(t, base, root, remote) {
   const transport = path.join(base, 'git-transport.json'), transportLog = path.join(base, 'git-calls.json');
   await writeJson(transport, { realGit, urls: { [fixtureUrl]: remote }, log: transportLog });
   await git(root, 'remote', 'set-url', 'origin', fixtureUrl);
-  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE'].map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(['PATH', 'FAKE_GH_DB', 'FAKE_GH_FAIL', 'FAKE_GH_DRIFT', 'FAKE_REVIEW_MODE', 'FAKE_DELIVERY_GIT', 'GH_REPO', 'GH_HOST', 'FAKE_GH_CANONICAL_NAME', 'FAKE_GH_REPOSITORY_ID', 'FAKE_GH_REAL_REMOTE', 'FAKE_GH_ROOT', 'FAKE_GH_TAMPER_REVIEW', 'FAKE_GH_TAMPER_RUNNER', 'FAKE_GH_FAIL_MESSAGE', 'FAKE_GH_UNAVAILABLE_AFTER', 'FAKE_REVIEW_TRIGGER', 'FAKE_DELIVERY_GIT_UNAVAILABLE', 'FAKE_DELIVERY_GIT_PUSH_REJECT'].map(key => [key, process.env[key]]));
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   process.env.FAKE_GH_DB = db;
   process.env.FAKE_DELIVERY_GIT = transport;
@@ -878,7 +878,7 @@ test('FAKE provider: explicit failed-review retry creates a fresh attempt withou
 });
 
 test('transient classification covers proxy, network and HTTP 5xx failures but not review or permission errors', () => {
-  for (const text of ['Canonical GitHub repository lookup failed: Get "https://api.github.com/repos/o/r": EOF', "fatal: unable to access 'https://github.com/o/r.git/': Recv failure: Connection reset by peer", "fatal: unable to access 'https://github.com/o/r.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443", "fatal: unable to access 'https://github.com/o/r.git/': CONNECT tunnel failed, response 503", 'CONNECT tunnel failed, response 0', 'Post "https://api.github.com/graphql": Service Unavailable', 'HTTP 502: Bad Gateway (https://api.github.com/repos/o/r)', 'error: RPC failed; HTTP 504 curl 22 The requested URL returned error: 504', 'fatal: unable to access: Could not resolve host: github.com', 'read tcp: connection reset by peer'])
+  for (const text of ['Canonical GitHub repository lookup failed: Get "https://api.github.com/repos/o/r": EOF', 'Get "https://api.github.com/repos/o/r": context deadline exceeded', 'Post "https://api.github.com/graphql": net/http: request canceled (Client.Timeout exceeded while awaiting headers)', "fatal: unable to access 'https://github.com/o/r.git/': Recv failure: Connection reset by peer", "fatal: unable to access 'https://github.com/o/r.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443", "fatal: unable to access 'https://github.com/o/r.git/': CONNECT tunnel failed, response 503", 'CONNECT tunnel failed, response 0', 'Post "https://api.github.com/graphql": Service Unavailable', 'HTTP 502: Bad Gateway (https://api.github.com/repos/o/r)', 'error: RPC failed; HTTP 504 curl 22 The requested URL returned error: 504', 'fatal: unable to access: Could not resolve host: github.com', 'read tcp: connection reset by peer'])
     assert.equal(transientFailure(text), true, text);
   for (const text of ['Independent review FAIL; bound verificationHash differs', 'HTTP 404: Not Found (https://api.github.com/repos/o/r)', 'HTTP 422: Validation Failed', 'remote: Permission to o/r.git denied', 'Current delivery base SHA is unavailable', '', undefined])
     assert.equal(transientFailure(text), false, String(text));
@@ -1305,4 +1305,82 @@ test('FAKE transport: a published delivery accepts a retry of a legacy transient
   const resumed = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram('await retry();'), f.root, JSON.stringify(f.config), trigger])).stdout);
   assert.equal(resumed.results[0].status, 'PASS', JSON.stringify(resumed.results[0]));
   assert.equal(resumed.state.deliveries[0].status, 'MERGED');
+});
+
+test('FAKE transport: an approved delivery that never left the checkout is re-reviewed once its checkout matches again', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const trigger = path.join(f.base, 'push-reject'); await fs.writeFile(trigger, 'armed');
+  process.env.FAKE_DELIVERY_GIT_PUSH_REJECT = trigger;
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_DELIVERY_GIT_PUSH_REJECT;
+  const approved = (await deliveryStatus(f.root)).deliveries[0];
+  assert.ok(approved.approval && !approved.steps.pushedAt && !approved.pr, JSON.stringify(approved.steps));
+  // After a restart the checkout drifted (as runner configure once rewrote a worktree config): the fresh review blocks.
+  const file = path.join(f.worktree, 'app/index.html'), original = await fs.readFile(file, 'utf8');
+  await fs.writeFile(file, `${original}<!-- drift -->\n`);
+  const drifted = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram('await retry();'), f.root, JSON.stringify(f.config), trigger])).stdout);
+  assert.equal(drifted.results[0].status, 'BLOCKED');
+  const record = await reviewRecord(f, drifted.state.deliveries[0].independentReviewId);
+  assert.match(record.reason, /do not match the committed tree/); assert.notEqual(record.retryable, true);
+  // Restored bytes: nothing was published, so a fresh review may replace the local approval.
+  await fs.writeFile(file, original);
+  const resumed = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram('await retry();'), f.root, JSON.stringify(f.config), trigger])).stdout);
+  assert.equal(resumed.results[0].status, 'PASS', JSON.stringify(resumed.results[0]));
+  const delivery = resumed.state.deliveries[0];
+  assert.equal(delivery.status, 'MERGED'); assert.deepEqual(delivery.approvalHistory, [approved.approval]);
+  assert.notEqual(delivery.approval.independentReviewId, approved.approval.independentReviewId);
+});
+
+test('FAKE transport: network failures before the provider runs do not use up the automatic review retries', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const trigger = path.join(f.base, 'outage-trigger'); await fs.writeFile(trigger, 'armed');
+  // A restarted engine revalidates; the proxy fails before the provider runs.
+  const blocked = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', restartProgram(`
+    process.env.FAKE_DELIVERY_GIT_UNAVAILABLE = trigger; await retry();`), f.root, JSON.stringify(f.config), trigger])).stdout);
+  const state = blocked.state, delivery = state.deliveries[0], latest = await reviewRecord(f, delivery.independentReviewId);
+  assert.equal(latest.processFile, undefined); assert.equal(latest.retryable, true);
+  // Seven earlier pre-provider failures of the same kind: none ran the provider, so none counts.
+  const extra = [];
+  for (let index = 0; index < 7; index++) {
+    const id = `AIR-preprovider-${index}`;
+    await writeJson(path.join(f.root, `.protoflow/delivery/independent-reviews/${id}.json`), { ...latest, id });
+    extra.push({ id, status: 'BLOCKED', createdAt: latest.createdAt, supersedes: null });
+  }
+  delivery.independentReviewAttempts = [...extra, ...delivery.independentReviewAttempts];
+  await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state);
+  const program = `import { runOnce } from ${JSON.stringify(new URL('../src/runner.js', import.meta.url).href)}; const events = []; const result = await runOnce(process.argv[1], JSON.parse(process.argv[2]), { onEvent: event => events.push(event.event) }); console.log(JSON.stringify({ status: result.status, events }));`;
+  const resumed = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', program, f.root, JSON.stringify(f.config)])).stdout.trim().split('\n').at(-1));
+  assert.deepEqual(resumed.events.slice(0, 1), ['review-retry']);
+  assert.equal(resumed.status, 'PASS', JSON.stringify(resumed));
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
+});
+
+test('multi-target FAKE transport: an unpublished delivery whose base moved is rebuilt on the current base, unless a reviewer rejected it', async t => {
+  for (const mode of ['approved', 'rejected']) await t.test(mode, async t => {
+    const f = await multiFixture(t); f.config.policy.autoApprove = true;
+    if (mode === 'approved') {
+      const trigger = path.join(path.dirname(f.root), 'push-reject'); await fs.writeFile(trigger, 'armed');
+      process.env.FAKE_DELIVERY_GIT_PUSH_REJECT = trigger;
+      assert.equal((await syncDeliveries(f.root, f.config, { target: 'desktop' })).status, 'FAIL'); delete process.env.FAKE_DELIVERY_GIT_PUSH_REJECT;
+    } else {
+      process.env.FAKE_REVIEW_MODE = 'fail';
+      assert.equal((await syncDeliveries(f.root, f.config, { target: 'desktop' })).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+    }
+    const old = (await deliveryStatus(f.root, f.config, 'desktop')).deliveries[0];
+    assert.equal(old.steps.pushedAt, undefined);
+    // The sibling target merges first, so the base moves under the unpublished desktop delivery.
+    assert.equal((await syncDeliveries(f.root, f.config, { target: 'web' })).status, 'PASS');
+    const moved = await git(f.remote, 'rev-parse', 'main');
+    const result = await syncDeliveries(f.root, f.config, { target: 'desktop' });
+    const deliveries = (await deliveryStatus(f.root, f.config, 'desktop')).deliveries;
+    if (mode === 'approved') {
+      assert.equal(result.status, 'PASS', JSON.stringify(result));
+      assert.deepEqual(deliveries.map(item => item.status), ['REVOKED', 'MERGED']);
+      assert.deepEqual(deliveries[0].revocation.staleBase, { from: old.baseSha, to: moved });
+      assert.equal(deliveries[1].baseSha, moved);
+    } else {
+      assert.equal(result.status, 'BLOCKED');
+      assert.deepEqual(deliveries.map(item => item.status), ['BLOCKED'], 'a reviewer verdict is not discarded by rebuilding');
+    }
+  });
 });

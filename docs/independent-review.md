@@ -92,6 +92,7 @@ v1 與單一 target 的 v2 專案沿用上述路徑與分支。`targets` 有多�
 - 原生 target 的證據說明也寫進 reviewer 提示：`driver/device.png` 是含狀態列與 home indicator 的整個螢幕，`application.png`／`driver/screen.png` 才是裁到內容區域、對應原型 viewport 的圖；位置與版面以 `application.png` 對 `prototype.png` 及 T3 判斷，T4 在原生端為 advisory，主要反映平台字型渲染。缺少這項說明時，reviewer 曾依 `device.png` 判定 iOS 畫面「整體下移」而回報 FAIL，實際裁切後的畫面與原型一致。
 - application hash 與該 target 驗收相同：排除 prototype 與其他 target 的 root；完整 workspace content hash 仍涵蓋全部內容。committed tree 中兄弟 target root 的檔案不視為本 target 的 application。
 - remote binding 與 push、PR、merge 使用該 target 的交付分支 `<runner.delivery.branch>/<id>`，交付紀錄在 `.protoflow/delivery/<id>.json`；review 紀錄仍集中於 `.protoflow/delivery/independent-reviews/`，以唯一 AIR ID 區分。
+- 已 commit 但尚未推送、也沒有 PR 的交付（包括只有本機批准者），若在發布前兄弟 target 合併使 base 前進，下一次 sync 會把它退役為 `REVOKED`（`revocation.staleBase` 記錄前後 base），版本在目前 base 上重新提交、整合或 reverify，並重新審查；遠端分支已含該 commit 時改為 BLOCKED。若該交付最近一次審查回傳 FAIL、NOT_RUN 或 finding，則不退役，避免藉重建重擲審查判斷。單一 target 維持 base 前進即 BLOCKED。
 - 交付 commit 只能包含該 target root 與共享的頂層檔案；staged 內容落在兄弟 target root 時，在 review 前 BLOCKED。
 - 兄弟 target 合併後 base 會前進，使本 target HEAD 不再以 current base 為祖先。此時交付先在 commit 後檢查：base 自分叉點以來變更的檔案若只在兄弟 target root、prototype 或 runtime 目錄內，或與本 target HEAD 的內容逐位元相同（例如 `runner configure` 已同步進 worktree、並以此驗收過的配置變更），才以 `--no-ff` 將精確 base SHA merge 進本 target worktree，且合併前後本 target 的 application hash 必須相同；否則交付以 `code: "BASE_DIVERGED"` BLOCKED；若 base 以不同內容改了共享頂層檔案或本 target root，也是如此。Runner 收到後自動在新 base 上重新驗收：把該 base merge 進本 target worktree（衝突則 BLOCKED，人工解決後 `runner retry`），以 reverify 模式（允許已驗收版本）重新驗證（attempt 帶 `reverify.baseSha` 與先前的 verificationId），PASS 才以新 verification 交付並重新做獨立審查；不通過則 BLOCKED，等待修復。合併結果記錄於 delivery `integration`，PR 留言標示，review 針對包含該 base 的 HEAD 與 `base..HEAD` diff 執行。單一 target 不做此整合，base 前進仍 BLOCKED。
 - merge 後的 Runner 對齊只作用於該 target 自身的 `.protoflow/runner/<id>/state.json` 與 worktree。
@@ -111,8 +112,8 @@ await syncDeliveries(projectRoot, config, {
 明確重試只接受指定 delivery 的當前 attempt（`reviewId` 必須等於 `delivery.independentReviewId`），並依該 attempt 分三種情況：
 
 1. **程序重啟後的已保存 PASS**：必須沒有 live attestation，才建立新的 AIR 並實際執行 provider；既有 live attestation 有漂移時不能以此重試。
-2. **尚未 approval／push／PR 的 BLOCKED attempt**：例如 provider 未完成或 binding 核對失敗。
-3. **已 approval 或已 push 後、因暫時性基礎設施故障 BLOCKED 的 attempt**：只限 AIR 紀錄帶 `retryable: true` 與 `reasonCode: "TRANSIENT_INFRASTRUCTURE"`，即 Git transport、`gh api`／`gh pr` 的網路錯誤、HTTP 5xx 或代理 `CONNECT tunnel failed`，發生在 provider 之前，或 provider 回傳無 finding 的 PASS 之後。其他 BLOCKED（例如 HEAD／base／VER 漂移）在 approval／發布後不能以此重試。
+2. **尚未 push／PR 的 BLOCKED attempt**：例如 provider 未完成或 binding 核對失敗。只有本機 automated approval 而尚未推送時也屬此類：新的 provider PASS 建立新批准，原批准存入 `approvalHistory`。
+3. **已 push 或已開 PR 後、因暫時性基礎設施故障 BLOCKED 的 attempt**：只限 AIR 紀錄帶 `retryable: true` 與 `reasonCode: "TRANSIENT_INFRASTRUCTURE"`，即 Git transport、`gh api`／`gh pr` 的網路錯誤、HTTP 5xx 或代理 `CONNECT tunnel failed`，發生在 provider 之前，或 provider 回傳無 finding 的 PASS 之後。其他 BLOCKED（例如 HEAD／base／VER 漂移）在 approval／發布後不能以此重試。
 
 任何情況下，只要該 attempt 的 provider 曾回傳 FAIL、NOT_RUN 或任何 finding（從 run 讀取；adapter 拒收的輸出則掃描 raw trace 中每則 agent message），重試一律 BLOCKED：reviewer 的判斷是該 delivery 的最終結果，不能換一個 session 重抽。即使有人把該 AIR 紀錄改成 retryable 也一樣，因為判斷依據是 verdict 證據本身；verdict 證據與紀錄 hash 不符時同樣 BLOCKED。需要修正時記錄拒收、修復並以新 verification 交付。
 

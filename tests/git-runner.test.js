@@ -1382,3 +1382,42 @@ test('automatic review retries cover transient blocks, including legacy records 
   assert.equal(transientReviewBlock({ status: 'BLOCKED', reason: 'Application HEAD differs from the delivery commit' }, null, 1), false);
   assert.equal(transientReviewBlock({ status: 'PASS', reason: legacy.reason }, null, 1), false);
 });
+
+test('processes an executor leaves in the worktree are stopped and recorded; device services are kept', async t => {
+  const { root, config } = await fixture(t);
+  const pids = path.join(root, '..', 'leftover-pids');
+  // The executor starts two detached processes in its own directory (the runner worktree), then fails.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const {spawn}=require('node:child_process');const a=spawn(process.execPath,['-e','setInterval(()=>{},1000)','gradle-like'],{detached:true,stdio:'ignore'});const b=spawn(process.execPath,['-e','setInterval(()=>{},1000)','qemu-system-aarch64-fake'],{detached:true,stdio:'ignore'});require('node:fs').writeFileSync(process.argv[1],a.pid+' '+b.pid);a.unref();b.unref();process.exit(9)`, pids];
+  config.policy = { ...config.policy, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  const [leftover, device] = (await fs.readFile(pids, 'utf8')).split(' ').map(Number);
+  t.after(() => { for (const pid of [leftover, device]) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } } });
+  assert.equal(result.status, 'BLOCKED');
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert.equal(alive(leftover), false, 'the stray process was stopped'); assert.equal(alive(device), true, 'a device service is kept');
+  const attempt = (await sourceStatus(root)).entries[0].attempts[0];
+  assert.deepEqual(attempt.leftoverProcesses.map(item => [item.pid, item.phase]), [[leftover, 'execute']]);
+  assert.match(attempt.leftoverProcesses[0].command, /gradle-like/);
+  assert.deepEqual(events.find(event => event.event === 'leftover-processes').processes.map(item => item.pid), [leftover]);
+});
+
+test('configuration recovery leaves a worktree with an unsettled delivery untouched until it settles', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config); await runOnce(root, config);
+  const worktreeConfig = async () => JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, 'protoflow.config.json'), 'utf8'));
+  const before = await worktreeConfig();
+  const deliveries = path.join(root, '.protoflow/delivery/state.json');
+  await fs.mkdir(path.dirname(deliveries), { recursive: true });
+  await fs.writeFile(deliveries, JSON.stringify({ schemaVersion: 1, deliveries: [{ id: 'DLV-pending', status: 'COMMITTED', commit: 'a'.repeat(40), versions: [], steps: {} }] }));
+  const updated = { ...config, adapters: { codex: { command: { argv: [process.execPath, '-e', 'process.exit(8)'] } } } };
+  const deferred = await configureRunner(root, updated);
+  assert.equal(deferred.configSync, 'deferred'); assert.equal(deferred.configHash, hash(updated));
+  assert.deepEqual(await worktreeConfig(), before, 'the reviewed checkout keeps its committed bytes');
+  assert.equal((await runnerStatus(root)).runner.configurationHistory.at(-1).configSync, 'deferred');
+  await fs.writeFile(deliveries, JSON.stringify({ schemaVersion: 1, deliveries: [{ id: 'DLV-pending', status: 'MERGED', commit: 'a'.repeat(40), versions: [], steps: {} }] }));
+  assert.equal((await configureRunner(root, updated)).configSync, 'written');
+  assert.deepEqual(await worktreeConfig(), updated);
+});

@@ -158,18 +158,31 @@ async function dropRevokedHistory(worktree, state, base) {
  * A delivery committed on top of revoked history before that history was dropped cannot be published as is. If it never
  * reached the remote branch, retire it and return its versions to the queue so the next commit is rebuilt cleanly.
  */
+/** Whether the delivery's latest independent review returned a rejecting verdict (FAIL, NOT_RUN or a finding). */
+async function rejectedByReviewer(root, delivery) {
+  if (!delivery.independentReviewId) return false;
+  const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}.json`), null);
+  if (!record) return false;
+  try { return isRejectingVerdict(await recordedVerdict(root, record)); } catch { return true; }
+}
 async function retireTaintedDeliveries(root, config, target, worktree, source, state, options) {
   const tainted = [];
   for (const delivery of state.deliveries.filter(item => !settled(item) && unpublished(item) && item.commit)) {
     const base = await currentBase(worktree, options);
     await ensureCommit(worktree, base);
     const revoked = await revokedHistory(worktree, state, delivery.commit, base, delivery);
-    if (!revoked.length) continue;
+    // With several targets, a sibling's merge moving the base before this delivery was published rebuilds it on the
+    // current base (integration or reverification follows); a single stream keeps blocking on a moved base. A reviewer
+    // verdict is never discarded this way.
+    const stale = !revoked.length && isMultiTarget(config) && delivery.baseSha && delivery.baseSha !== base.sha && !await rejectedByReviewer(root, delivery);
+    if (!revoked.length && !stale) continue;
     const destination = await resolveDeliveryDestination(worktree, options.remote);
     const remote = /^([a-f0-9]{40})\s/.exec(await git(worktree, ['ls-remote', destination.url, `refs/heads/${deliveryBranch(config, target)}`]))?.[1] ?? null;
     if (remote) await ensureCommit(worktree, { sha: remote, url: destination.url });
-    if (remote && (remote === delivery.commit || await isAncestor(worktree, delivery.commit, remote))) throw new Error(`Delivery ${delivery.id} carries revoked history but may already be on the remote branch; resolve it externally`);
-    delivery.revocation = { at: new Date().toISOString(), previousStatus: delivery.status, reason: `Unpublished delivery carries the history of revoked deliveries ${revoked.join(', ')}`, revokedHistory: revoked };
+    if (remote && (remote === delivery.commit || await isAncestor(worktree, delivery.commit, remote))) throw new Error(`Delivery ${delivery.id} ${stale ? 'has a moved base' : 'carries revoked history'} but may already be on the remote branch; resolve it externally`);
+    delivery.revocation = stale
+      ? { at: new Date().toISOString(), previousStatus: delivery.status, reason: `Base moved from ${delivery.baseSha} to ${base.sha} before publication; the versions are delivered again on the current base`, staleBase: { from: delivery.baseSha, to: base.sha } }
+      : { at: new Date().toISOString(), previousStatus: delivery.status, reason: `Unpublished delivery carries the history of revoked deliveries ${revoked.join(', ')}`, revokedHistory: revoked };
     delivery.status = 'REVOKED';
     for (const entry of source.entries.filter(item => item.deliveryId === delivery.id)) delete entry.deliveryId;
     tainted.push(delivery.id);
@@ -316,7 +329,8 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
     catch (error) { return { status: 'BLOCKED', reason: `Review retry cannot read the recorded verdict: ${error.message}` }; }
     // The reviewer's judgment is final for this delivery: reject and repair instead of asking another session.
     if (isRejectingVerdict(verdict)) return { status: 'BLOCKED', reason: `Independent review ${reviewId} returned ${verdict.status}${verdict.findings?.length ? ` with ${verdict.findings.length} finding(s)` : ''}; a reviewer verdict is never retried. Record a rejection and repair the version` };
-    const published = Boolean(previous.approval || previous.steps?.pushedAt || previous.pr);
+    // Published means it left this checkout; an approval alone is local and a fresh review replaces it.
+    const published = Boolean(previous.steps?.pushedAt || previous.pr);
     if (record.status === 'PASS') {
       if (!verdict) return { status: 'BLOCKED', reason: 'Recorded PASS has no provider verdict' };
       try { await assertIndependentReview(root, config, reviewId); }
@@ -326,9 +340,9 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       // After approval or publication only an infrastructure failure outside the verdict can be retried.
       // Records written before a network signature was classified transient carry only their reason text.
       const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || (!verdict && transientFailure(record.reason));
-      if (!transient) return { status: 'BLOCKED', reason: 'After approval or publication only a review attempt BLOCKED by a transient network failure can be retried' };
+      if (!transient) return { status: 'BLOCKED', reason: 'After publication only a review attempt BLOCKED by a transient network failure can be retried' };
       revalidation = true;
-    }
+    } else if (previous.approval) revalidation = true;
     if (previous.approval && !config.policy?.autoApprove) return { status: 'BLOCKED', reason: 'Revalidating an automated approval requires the current autoApprove policy' };
     previousReview = record;
   }

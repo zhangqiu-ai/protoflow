@@ -11,7 +11,7 @@ const TRANSIENT = [
   /CONNECT tunnel failed/i, /\b(?:HTTP(?:\/[\d.]+)?|status(?: code)?|response|returned error:?)\s+5\d\d\b/i,
   /Service Unavailable|Bad Gateway|Gateway Time-?out|Internal Server Error/i,
   // Go's net/http (gh) reports a connection the server or proxy dropped mid-response as `Get "<url>": EOF`.
-  /\b(?:Get|Post|Put|Patch|Delete|Head) "https?:\/\/[^"]+": (?:EOF|read: connection reset by peer)/i, /Recv failure|LibreSSL SSL_connect/i,
+  /\b(?:Get|Post|Put|Patch|Delete|Head) "https?:\/\/[^"]+": (?:EOF|read: connection reset by peer)/i, /Recv failure|LibreSSL SSL_connect|context deadline exceeded|Client\.Timeout exceeded/i,
   /Could not resolve host|Failed to connect to|Connection (?:timed out|refused|reset)|Operation timed out|i\/o timeout|TLS handshake timeout|unexpected EOF|early EOF|RPC failed|remote end hung up unexpectedly|SSL_ERROR_SYSCALL|Temporary failure in name resolution|network is unreachable|\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND)\b/i,
 ];
 export const transientFailure = text => typeof text === 'string' && TRANSIENT.some(pattern => pattern.test(text));
