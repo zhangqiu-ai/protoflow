@@ -3,12 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { createContext, executeContext, verify, loadArtifact, applicationFingerprint } from './workflow.js';
+import { createContext, executeContext, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
-import { assertDelivered, syncDeliveries } from './delivery.js';
+import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
+import { recordedVerdict, isRejectingVerdict, assertIndependentReview } from './delivery-review.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
@@ -181,6 +182,60 @@ function executionDiagnostic(execution) {
   }
   return String(diagnostic || execution.result.stderr || '');
 }
+export const MAX_AUTOMATED_REOPENINGS = 3;
+const MAX_REVIEW_ATTEMPTS = 6;
+/**
+ * Under policy.autoApprove the runner settles a blocked delivery the way an operator would, without weakening a gate:
+ * a reviewer FAIL with findings becomes the decided model rejection of the accepted verification, so the version reopens
+ * for repair (its findings are claims the executor checks against evidence); a review that lost its in-process
+ * attestation on a restart, or was BLOCKED by a transient failure, gets a fresh provider review. A verdict is never
+ * re-rolled; NOT_RUN, a version rejected MAX_AUTOMATED_REOPENINGS times and every other block stay for a person.
+ */
+async function automateBlockedDelivery(root, config, stream, runner, { onEvent }) {
+  if (!config.policy?.autoApprove || !config.runner?.delivery || !runner?.worktree) return null;
+  const state = await deliveryStatus(root, config, stream);
+  const delivery = state.deliveries.filter(item => !['MERGED', 'PR_OPEN_MANUAL', 'REVOKED'].includes(item.status) && item.independentReviewId).at(-1);
+  if (!delivery) return null;
+  const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}.json`), null);
+  if (!record) return null;
+  let verdict;
+  try { verdict = await recordedVerdict(root, record); } catch { return null; }
+  if (verdict?.status === 'FAIL' && verdict.findings?.length) return rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent });
+  if (isRejectingVerdict(verdict)) return null;
+  let retry = false;
+  if (record.status === 'PASS') {
+    try { await assertIndependentReview(root, config, record.id); }
+    catch (error) { retry = error.reasonCode === 'ENGINE_ATTESTATION_MISSING'; }
+  } else if (record.status === 'BLOCKED' && record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') {
+    retry = (delivery.independentReviewAttempts?.length ?? 1) < MAX_REVIEW_ATTEMPTS;
+  }
+  if (!retry) return null;
+  await onEvent({ event: 'review-retry', deliveryId: delivery.id, reviewId: record.id, reason: record.status === 'PASS' ? 'attestation lost on restart' : record.reason });
+  const result = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream, retryIndependentReview: { deliveryId: delivery.id, reviewId: record.id } });
+  await onEvent({ event: 'delivered', automated: 'review-retry', ...result });
+  return { status: result.status === 'PASS' ? 'PASS' : 'BLOCKED', reason: result.reason ?? result.deliveries?.find(item => item.error)?.error, delivery: result };
+}
+async function rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent }) {
+  const progress = await loadProgress(root, config, stream);
+  const entry = progress.entries.find(item => item.manifestId === delivery.versions.at(-1));
+  if (!entry?.verificationId) return null;
+  const reopened = entry.reopenings?.length ?? 0;
+  if (reopened >= MAX_AUTOMATED_REOPENINGS) return { status: 'BLOCKED', reason: `Independent review ${record.id} FAIL; version ${entry.manifestId} was already reopened ${reopened} times, so a person decides on further rejections` };
+  const verification = await loadArtifact(runner.worktree, 'verifications', entry.verificationId);
+  const evidence = `.protoflow/delivery/automated-rejections/${record.id}.json`;
+  await writeJson(await projectPath(runner.worktree, evidence), {
+    kind: 'independent-model-review', status: 'FAIL', reviewExecuted: true, sessionId: record.sessionId, independentReviewId: record.id, traceHash: record.traceHash ?? null,
+    verificationId: entry.verificationId, verificationHash: hash(verification), manifestId: entry.manifestId, ...(verification.target && { target: verification.target }),
+    applicationHash: verification.project.hash, findings: verdict.findings, summary: verdict.summary, completedAt: record.completedAt ?? record.createdAt
+  });
+  const review = await createReview(runner.worktree, config, entry.manifestId, entry.verificationId);
+  const decided = await decideReview(runner.worktree, config, review.id, {
+    status: 'changes_requested', reviewer: `${AUTOMATED_REVIEWER}:${record.sessionId}`, reviewerKind: 'model', model: { evidence, session: record.sessionId },
+    notes: `Automated rejection of independent AI review ${record.id} under policy.autoApprove; findings are claims to check against the evidence.`
+  });
+  await onEvent({ event: 'auto-rejected', deliveryId: delivery.id, reviewId: record.id, rejection: decided.id, findings: verdict.findings.length });
+  return { status: 'BLOCKED', reason: `Independent review ${record.id} FAIL; recorded automated rejection ${decided.id}, the version reopens for repair`, rejection: decided.id };
+}
 /** Durable launch intent, PID and completion of each child process of an attempt. */
 function processHooks(root, config, stream, state, record) {
   const processStarting = async phase => {
@@ -254,7 +309,11 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   let diverged = null;
   try { await assertDelivered(root, config, stream); }
   catch (error) {
-    if (error.code !== 'BASE_DIVERGED') return { status: 'BLOCKED', reason: error.message };
+    if (error.code !== 'BASE_DIVERGED') {
+      const automated = await automateBlockedDelivery(root, config, stream, await readJson(await projectPath(root, statePath), null), { onEvent })
+        .catch(failure => ({ status: 'BLOCKED', reason: `${error.message}; automated recovery failed: ${failure.message}` }));
+      return automated ?? { status: 'BLOCKED', reason: error.message };
+    }
     diverged = { code: error.code, baseSha: error.baseSha, reason: error.message };
   }
   const state = await loadProgress(root, config, stream);
