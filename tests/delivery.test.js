@@ -1245,3 +1245,48 @@ test('multi-target: a failing reverification on the merged base blocks the targe
   assert.deepEqual((await deliveryStatus(f.root, f.config, 'desktop')).deliveries, []);
   await assert.rejects(git(f.remote, 'rev-parse', '--verify', 'refs/heads/protoflow/delivery/desktop'));
 });
+
+test('FAKE provider: under autoApprove the runner turns a reviewer FAIL into an automated rejection that reopens the version', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const old = (await deliveryStatus(f.root)).deliveries[0], events = [];
+  const result = await runOnce(f.root, f.config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /recorded automated rejection REV-.*reopens for repair/);
+  assert.deepEqual(events.map(event => event.event), ['auto-rejected']);
+  const review = await readJson(path.join(f.worktree, `.protoflow/reviews/${result.rejection}.json`));
+  assert.equal(review.status, 'changes_requested'); assert.equal(review.reviewerKind, 'model'); assert.equal(review.verificationId, 'VER-1');
+  assert.match(review.reviewer, /^ai:codex-independent-review:/); assert.match(review.findings[0].description, /Synthetic fixture finding/);
+  assert.equal(review.model.sessionId, (await reviewRecord(f, old.independentReviewId)).sessionId);
+  // The next cycle reopens the version and retires the rejected delivery; nothing was published.
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'REVOKED');
+  assert.equal((await sourceStatus(f.root)).entries[0].status, 'PENDING');
+  await assertNoPublication(f);
+});
+
+test('FAKE provider: automated rejection stops after repeated reopenings and without autoApprove', async t => {
+  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const manual = await runOnce(f.root, f.config);
+  assert.equal(manual.status, 'BLOCKED'); assert.equal(manual.rejection, undefined);
+  f.config.policy.autoApprove = true;
+  const source = await sourceStatus(f.root);
+  source.entries[0].reopenings = [1, 2, 3].map(index => ({ verificationId: `VER-old-${index}`, rejections: [] }));
+  await saveSourceState(f.root, source);
+  const capped = await runOnce(f.root, f.config);
+  assert.equal(capped.status, 'BLOCKED'); assert.match(capped.reason, /already reopened 3 times, so a person decides/);
+  await assert.rejects(fs.readdir(path.join(f.worktree, '.protoflow/reviews')), { code: 'ENOENT' });
+});
+
+test('FAKE provider: after a restart the runner revalidates an unattested PASS with a fresh review and finishes the delivery', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_GH_FAIL = 'merge';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'FAIL'); delete process.env.FAKE_GH_FAIL;
+  const old = (await deliveryStatus(f.root)).deliveries[0];
+  const program = `import { runOnce } from ${JSON.stringify(new URL('../src/runner.js', import.meta.url).href)}; const events = []; const result = await runOnce(process.argv[1], JSON.parse(process.argv[2]), { onEvent: event => events.push(event.event) }); console.log(JSON.stringify({ status: result.status, events }));`;
+  const restarted = JSON.parse((await exec(process.execPath, ['--input-type=module', '-e', program, f.root, JSON.stringify(f.config)])).stdout.trim().split('\n').at(-1));
+  assert.equal(restarted.status, 'PASS', JSON.stringify(restarted)); assert.deepEqual(restarted.events, ['review-retry', 'delivered']);
+  const delivery = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(delivery.status, 'MERGED'); assert.notEqual(delivery.independentReviewId, old.independentReviewId);
+  assert.deepEqual(delivery.independentReviewAttempts.map(attempt => attempt.status), ['PASS', 'PASS']);
+  assert.deepEqual(delivery.approvalHistory, [old.approval]);
+});

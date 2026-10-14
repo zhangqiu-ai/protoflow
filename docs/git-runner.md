@@ -92,6 +92,13 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 
 重開版本原有的未完成交付會保留為 `REVOKED` 歷史，讓 Runner 能產生新的驗收證據；舊 commit、審查及 PR 記錄不刪除。若舊交付已發佈且 PR 仍開啟，可以先在本機修復，但新的交付不會更新共用遠端分支；須先在外部處理舊 PR，再以新 verification 及獨立審查交付。引擎不會自行關閉被拒的 PR。
 
+`policy.autoApprove` 下，Runner 在交付被擋時自動做原本由操作者執行的兩件事，閘門本身不放寬：
+
+- **審查 FAIL → 自動拒收**：獨立審查回傳 FAIL 且有 findings 時，Runner 以 `ai:codex-independent-review:<session>`、`reviewerKind: "model"` 對被接受的 verification 記錄 `changes_requested`；證據檔為 `.protoflow/delivery/automated-rejections/<AIR>.json`，並發出 `auto-rejected` 事件。下一輪版本重開修復，findings 是要對照證據檢驗的主張。同一版本已重開 3 次時停止自動拒收，由人決定；NOT_RUN 也留給人。
+- **重新審查**：重啟後已保存的 PASS 失去進程內認證，或審查因暫時性網路問題 BLOCKED（最多 6 次）時，Runner 自動走明確重試路徑，執行新的 provider 審查並發出 `review-retry` 事件。審查判斷永不重擲。
+
+未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。
+
 被拒且從未發佈（沒有 push、沒有 PR）的 `REVOKED` 交付 commit 仍留在 Runner 分支上；修復後的新交付若以它為祖先，合併時會把被拒的內容（例如誤提交的工具快取）一起帶進共用分支。因此建立新交付 commit 前，若 `base..HEAD` 含這類 commit，引擎先 `git reset --soft` 到 HEAD 與 base 的分叉點再提交：檔案與驗收綁定的內容不變，只是歷史不再經過被拒的 commit；交付紀錄的 `discardedHistory` 保存原 HEAD、分叉點與被丟棄的交付。若仍有未結案的交付壓在這段歷史上則 BLOCKED。舊版引擎已在這類歷史上建立、但尚未發佈的交付，會在下一次 sync 被退役為 `REVOKED`（`revocation.revokedHistory`），版本重新排入交付並重新審查；遠端交付分支已含該 commit 時改為 BLOCKED，留待人工處理。實測中審查只看 `base..HEAD` 的淨 diff，看不出祖先中的 26,437 個快取檔，這條規則補上這個缺口。
 
 ## 自動交付（commit → PR → 合併）
