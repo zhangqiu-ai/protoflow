@@ -474,7 +474,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
 }
 /** Live processes whose working directory is inside, or whose command line names, the runner worktree. */
 /** Device services may have been started from a worktree by an older driver; they are shared, never leftovers. */
-const DEVICE_SERVICE = /qemu-system|\/emulator\/emulator|Simulator\.app|CoreSimulator|launchd_sim/;
+// Everything under the Android SDK emulator directory belongs to the device: qemu, netsimd, crashpad_handler.
+const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const SDK_EMULATOR = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+const DEVICE_SERVICE = new RegExp(`qemu-system|${SDK_EMULATOR ? escape(path.join(SDK_EMULATOR, 'emulator')) : '/Android/sdk/emulator'}/|Simulator\\.app|CoreSimulator|launchd_sim`);
 /**
  * An executor's sandbox can start commands in their own process groups that outlive it (a Gradle build of a killed
  * Codex run kept downloading for 40 minutes), and Xcode helpers keep a worktree as their directory. After each phase,
