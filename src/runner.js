@@ -368,7 +368,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   entry.status = 'RUNNING'; entry.startedAt = new Date().toISOString();
   runner.status = 'RUNNING'; runner.current = entry.manifestId;
   await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
-  let report = null, currentAttempt = null;
+  let report = null, currentAttempt = null, executionFailure = null;
   try {
     const maximum = config.policy?.maxRepairAttempts ?? 3;
     for (let attempt = 0; attempt <= maximum; attempt++) {
@@ -386,7 +386,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       let execution, diagnostic = '', executionContext = context;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          execute: true, repair: attempt ? { attempt, verification: report } : null, signal,
+          execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -411,7 +411,17 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
         record.contextId = executionContext.id;
       }
-      if (execution.status !== 'PASS') throw new Error(`Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}): ${(diagnostic || 'see execution evidence').slice(-1000)}`);
+      if (execution.status !== 'PASS') {
+        const reason = `Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;
+        if (attempt >= maximum) throw new Error(reason);
+        // A failed or timed-out run is one bounded attempt; the next one is told why, like a failed verification.
+        record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = reason;
+        executionFailure = { attempt, executionId: execution.id, exitCode: execution.result.exitCode, timedOut: execution.result.timedOut === true, reason };
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'execute-failed', sha: entry.sha, manifestId: entry.manifestId, attempt, reason: reason.slice(0, 300) });
+        continue;
+      }
+      executionFailure = null;
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
       await saveProgress(root, config, stream, state);
