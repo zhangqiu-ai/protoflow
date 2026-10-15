@@ -50,9 +50,9 @@ export async function deliveryGit(root, args, { encoding = 'utf8' } = {}) {
 const READ_GIT = ['ls-remote', 'fetch'];
 const networkRetries = () => { const value = Number(process.env.PROTOFLOW_NETWORK_RETRIES ?? 2); return Number.isInteger(value) && value >= 0 && value <= 5 ? value : 2; };
 const readOnlyGh = args => (args[0] === 'api' && !args.some(arg => ['-X', '--method', '-f', '-F', '--field', '--raw-field', '--input'].includes(arg))) || (args[0] === 'pr' && ['list', 'view', 'checks'].includes(args[1]));
-async function github(worktree, args) {
+async function github(worktree, args, input = null) {
   for (let attempt = 0; ; attempt++) {
-    const result = await runCommand(worktree, { argv: ['gh', ...args], timeoutMs: 120000 }, null, { env: { ...environment(), GH_HOST: 'github.com' } });
+    const result = await runCommand(worktree, { argv: ['gh', ...args], timeoutMs: 120000 }, input, { env: { ...environment(), GH_HOST: 'github.com' } });
     if (result.status === 'PASS' || !readOnlyGh(args) || attempt >= networkRetries() || !transientFailure(`${result.stderr ?? ''}\n${result.error ?? ''}`)) return result;
     await delay(1000 * 2 ** attempt);
   }
@@ -60,6 +60,24 @@ async function github(worktree, args) {
 export function deliveryGh(worktree, repository, args) {
   if (repository?.host !== 'github.com' || !/^[\w.-]+\/[\w.-]+$/.test(repository.nameWithOwner ?? '') || !Number.isSafeInteger(repository.id) || repository.id <= 0) throw blocked('Missing reviewed canonical GitHub repository identity');
   return github(worktree, [...args, '--repo', `github.com/${repository.nameWithOwner}`]);
+}
+
+/**
+ * One GitHub REST call scoped to the resolved canonical repository: the literal endpoint must start with
+ * repos/<owner>/<name>/. Writes send their JSON body on stdin and are never retried; reads retry like other reads.
+ */
+export async function githubApi(root, repository, endpoint, { method = 'GET', body = null } = {}) {
+  if (repository?.host !== 'github.com' || !/^[\w.-]+\/[\w.-]+$/.test(repository.nameWithOwner ?? '')) throw blocked('Missing canonical GitHub repository identity');
+  if (typeof endpoint !== 'string' || !endpoint.startsWith(`repos/${repository.nameWithOwner}/`) || /\.\.|\s/.test(endpoint)) throw blocked(`GitHub endpoint outside ${repository.nameWithOwner}: ${endpoint}`);
+  if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) throw blocked(`Unsupported GitHub method ${method}`);
+  const args = ['api', endpoint, '--hostname', 'github.com', ...(method === 'GET' ? [] : ['--method', method]), ...(body ? ['--input', '-'] : [])];
+  const result = await github(root, args, body);
+  if (result.status !== 'PASS') {
+    const detail = (result.stderr || result.error || '').trim();
+    throw Object.assign(markTransient(new Error(`GitHub ${method} ${endpoint} failed: ${detail.slice(0, 500)}`), detail), { status: /HTTP (\d{3})/.exec(detail)?.[1] ? Number(/HTTP (\d{3})/.exec(detail)[1]) : null });
+  }
+  if (!result.stdout.trim()) return null;
+  try { return JSON.parse(result.stdout); } catch { throw new Error(`Malformed GitHub response for ${method} ${endpoint}`); }
 }
 
 /** Read REST repository IDs; GraphQL repository IDs and branch names alone are insufficient. */

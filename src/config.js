@@ -18,10 +18,10 @@ export const configSchema = {
       id: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$' }, prototypeFiles: { type: 'array', minItems: 1, items: { type: 'string' } }, prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 }, component: { type: 'string', minLength: 1 }, priority: { enum: ['critical', 'high', 'normal', 'low'] }, geometryTolerance: { type: 'number', minimum: 0 }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }
     } } },
     classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
-    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, transientRetries: { type: 'integer', minimum: 0, maximum: 5 }, transientRetryDelayMs: { type: 'integer', minimum: 0, maximum: 600000 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' } } },
+    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, transientRetries: { type: 'integer', minimum: 0, maximum: 5 }, transientRetryDelayMs: { type: 'integer', minimum: 0, maximum: 600000 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' }, executor: { type: 'object', additionalProperties: false, required: ['primary'], properties: { primary: { enum: ['claude', 'codex'] }, fallback: { enum: ['claude', 'codex'] } } } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
     verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: functionalCommand } },
-    adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command, ignoreUserConfig: { type: 'boolean' } } : key === 'independentReview' ? { command } : { command, install: command } }])) },
+    adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'claude', 'planner', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command, ignoreUserConfig: { type: 'boolean' } } : key === 'independentReview' ? { provider: { enum: ['claude', 'codex'] }, command } : ['claude', 'planner'].includes(key) ? { command } : { command, install: command } }])) },
     visual: { type: 'object', additionalProperties: false, properties: {
       mode: { enum: ['browser', 'native', 'adapter'] },
       prototypeBaseUrl: { type: 'string', pattern: '^https?://' },
@@ -56,6 +56,13 @@ export const configSchemaV2 = {
   properties: {
     schemaVersion: { const: 2 }, prototypeDir: shared.prototypeDir, source: shared.source, runner: shared.runner,
     classification: shared.classification, policy: shared.policy, watch: shared.watch, adapters: shared.adapters,
+    // Proposal 0003 §6: GitHub Issues intake, triage and (P5) implementation.
+    issues: { type: 'object', additionalProperties: false, required: ['enabled'], properties: {
+      enabled: { type: 'boolean' }, label: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$' },
+      authors: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] } },
+      targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
+      maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
+    } },
     anchors: { type: 'object', additionalProperties: false, properties: {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
       tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }

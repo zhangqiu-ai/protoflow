@@ -56,6 +56,12 @@ else if (group === 'pr' && verb === 'merge') {
       const runner = JSON.parse(fs.readFileSync(file)); runner.worktree = process.env.FAKE_GH_ROOT; fs.writeFileSync(file, JSON.stringify(runner));
     }
   }
+} else if (group === 'api' && process.env.FAKE_GH_ISSUES && /^repos\/[^/]+\/[^/]+\/(?:issues|labels|collaborators)\b/.test(verb)) {
+  // Issue endpoints are served by the issue fixture with its own database (tests/fixtures/fake-gh-issues.cjs).
+  save();
+  const input = args.includes('--input') ? fs.readFileSync(0) : undefined;
+  try { process.stdout.write(execFileSync(process.execPath, [process.env.FAKE_GH_ISSUES, ...args], { input, env: { ...process.env, FAKE_GH_DB: process.env.FAKE_GH_ISSUES_DB } })); process.exit(0); }
+  catch (error) { process.stderr.write(error.stderr ?? ''); process.exit(error.status ?? 1); }
 } else { save(); console.error('unsupported ' + args.join(' ')); process.exit(2); }
 // 'lookup' is the pr list that finds a just-created PR; 'list' is the first discovery.
 const phase = group === 'api' && verb.includes('/pulls/') ? 'pull-api' : verb === 'list' && state.calls.filter(call => call[1] === 'list').length > 1 ? 'lookup' : verb;

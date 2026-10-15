@@ -288,3 +288,12 @@ Android 每個場景約 5–10 秒；整個 Compose target（build、functional�
 | 模型滿載等供應端暫時錯誤讓版本 BLOCKED | 同一 attempt 有界退避重試 |
 
 reviewer 的真實發現也在過程中被修正：Android 開關未勾選時沿用 Material 3 預設色（`layout` deviation 不豁免顏色），重開後由執行代理修正並重新驗收。所有 automated approval 都標示為 AI 證據，遠端分支不含任何被拒內容（以 `git log -- '*gradle-user-home*'` 驗證）。證據摘要保存在驗收專案的 `evidence/mobile-real-acceptance-20261014.json`。
+
+### 2026-10-14／15：第三、四個版本與首次零介入
+
+| 版本 | iOS | Android | Flutter | 人工介入 |
+|---|---|---|---|---|
+| v(c) `7a40653` | PR #21 | PR #22 | PR #23 | 11 次 |
+| v(d) `25da01f`：About 顯示版本號、詳情可收合 | PR #24 | PR #25 | PR #26 | **0** |
+
+v(c) 的每次介入都對應一個引擎缺口，在 v0.3.6–v0.3.8 修正：執行代理逾時與孤兒 Gradle 程序、`~/.gradle` 沙箱權限、已發布交付的保護、過期基底重建、PASS 後網路失敗的重審、審查被中斷、`runner configure` 改寫有未結交付的 worktree 配置、Android 模擬器輔助程序被誤清理。v(d) 在 v0.3.8 上從推送原型到最後一個 target 合併共 32 分 43 秒，每個 target 各一次審查、零修復、零阻擋，`release.version` 自動前進；唯一的自動處置是執行與驗證後停止殘留的 Xcode `DTServiceHub`。證據摘要：驗收專案的 `evidence/zero-intervention-20261015.json`。

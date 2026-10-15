@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { createContext, executeContext, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
+import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, scanSource, sourceStatus, validateSource } from './source.js';
@@ -15,6 +15,9 @@ import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
+import { planVersion } from './planner.js';
+import { syncIssues } from './issues.js';
+import { runIssues } from './issue-runner.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -116,7 +119,7 @@ async function syncCheckpoints(root, worktree, state, config) {
     }
   }
 }
-async function exportEvidence(root, worktree, report) {
+export async function exportEvidence(root, worktree, report) {
   for (const [relative, expected] of Object.entries(report.artifactHashes)) {
     const source = await projectPath(worktree, relative);
     if (hash(await fs.readFile(source)) !== expected) throw new Error(`Verification artifact changed: ${relative}`);
@@ -175,11 +178,18 @@ async function reopenRejected(root, config, stream) {
 }
 
 /** Provider-side failures that say nothing about the version: capacity, rate limits, 5xx, a dropped connection. */
+/** The executor provider has no capacity for us right now; with a fallback configured, the other executor takes over. */
+export const EXECUTOR_QUOTA = /usage limit|rate.?limit|quota|credit balance|overloaded|\b(?:429|529)\b|too many requests|model is at capacity/i;
 export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
-function executionDiagnostic(execution) {
+export function executionDiagnostic(execution) {
   let diagnostic = execution.result.error;
   for (const line of execution.result.stdout.split('\n')) {
-    try { const event = JSON.parse(line); if (event.type === 'turn.failed' || event.type === 'error') diagnostic = event.error?.message ?? event.message; } catch { /* retain execution evidence */ }
+    try {
+      const event = JSON.parse(line);
+      if (event.type === 'turn.failed' || event.type === 'error') diagnostic = event.error?.message ?? event.message;
+      // Claude stream-json ends with one result event; a failed one carries the reason.
+      if (event.type === 'result' && (event.is_error || event.subtype !== 'success')) diagnostic = String(event.result ?? event.subtype);
+    } catch { /* retain execution evidence */ }
   }
   return String(diagnostic || execution.result.stderr || '');
 }
@@ -361,7 +371,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     return { status: 'IDLE', completedSha: state.completedSha, ...(delivery && { delivery }) };
   }
   if (['BLOCKED', 'STOPPED', 'RUNNING'].includes(entry.status)) return { status: 'BLOCKED', manifestId: entry.manifestId, reason: entry.status === 'RUNNING' ? 'Interrupted execution; inspect evidence and run runner retry' : entry.error };
-  if (!config.adapters?.codex?.command) return { status: 'NOT_RUN', reason: 'Codex adapter is not configured' };
+  if (!executorCommand(config, executorPlan(config).primary)) return { status: 'NOT_RUN', reason: `The ${executorPlan(config).primary} executor adapter is not configured` };
   let runner;
   try { runner = await ensureWorktree(root, config, { signal, stream }); }
   catch (error) { if (signal?.aborted) return { status: 'STOPPED', reason: error.message }; throw error; }
@@ -389,10 +399,30 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   let report = null, currentAttempt = null, executionFailure = null;
   try {
     const maximum = config.policy?.maxRepairAttempts ?? 3;
+    // Proposal 0003: Claude plans the version first; a planner that cannot answer leaves the version unplanned.
+    let plan = null;
+    if (config.adapters?.planner?.command) {
+      const planning = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+      // A version that runs again (blocked, reopened by a rejection) is replanned with its earlier plan as evidence.
+      const earlier = entry.planId && /^PLN-[A-Za-z0-9-]+$/.test(entry.planId) ? await readJson(await projectPath(runner.worktree, `.protoflow/plans/${entry.planId}.json`), null) : null;
+      const previous = earlier ? { id: earlier.id, summary: earlier.plan.summary, steps: earlier.plan.steps, acceptanceCriteria: earlier.plan.acceptanceCriteria, attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null } : null;
+      try { plan = await planVersion(runner.worktree, config, planning, { previous, signal }); }
+      catch (error) {
+        if (!error.planner) throw error;
+        entry.planError = { reason: error.message.slice(0, 500), reasonCode: error.reasonCode, at: new Date().toISOString() };
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'plan-failed', sha: entry.sha, manifestId: entry.manifestId, reason: error.message.slice(0, 200) });
+      }
+      if (plan) {
+        entry.planId = plan.id; await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'planned', sha: entry.sha, manifestId: entry.manifestId, planId: plan.id, decision: plan.plan.decision, criteria: plan.plan.acceptanceCriteria.length, costUsd: plan.costUsd });
+        if (plan.plan.decision === 'needs-human') throw new Error(`Planner ${plan.id} needs a person: ${plan.plan.summary}${plan.plan.questions.length ? ` Questions: ${plan.plan.questions.join(' ')}` : ''}`);
+      }
+    }
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
-      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
       const record = { attempt, contextId: context.id, startedAt: new Date().toISOString(), status: 'RUNNING', processes: [] };
       currentAttempt = record;
       entry.attempts.push(record); await saveProgress(root, config, stream, state);
@@ -402,9 +432,11 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
       const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
       let execution, diagnostic = '', executionContext = context;
+      const executors = executorPlan(config);
+      let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }) } : null, signal,
+          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -418,8 +450,19 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         }
         await saveProgress(root, config, stream, state);
         if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
+        record.executor = provider;
         if (execution.status === 'PASS') break;
         diagnostic = executionDiagnostic(execution);
+        // The primary executor has no capacity for us (quota, rate limit): the fallback redoes this attempt, once.
+        if (provider === executors.primary && executors.fallback && executorCommand(config, executors.fallback) && EXECUTOR_QUOTA.test(diagnostic)) {
+          record.executorFallback = { from: provider, to: executors.fallback, executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() };
+          provider = executors.fallback;
+          await saveProgress(root, config, stream, state);
+          await onEvent({ event: 'executor-fallback', sha: entry.sha, manifestId: entry.manifestId, attempt, from: record.executorFallback.from, to: provider, reason: diagnostic.slice(-200) });
+          executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
+          record.contextId = executionContext.id; retry -= 1;
+          continue;
+        }
         if (retry >= retries || !TRANSIENT_PROVIDER.test(diagnostic)) break;
         record.transientRetries = [...(record.transientRetries ?? []), { executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() }];
         await saveProgress(root, config, stream, state);
@@ -427,11 +470,11 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         try { await delay(retryDelayMs * 2 ** retry, undefined, { signal }); }
         catch { throw new Error('STOPPED: runner was interrupted'); }
         // The failed run may have edited files; a fresh context binds the current application content.
-        executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+        executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
       }
       if (execution.status !== 'PASS') {
-        const reason = `Codex execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;
+        const reason = `${provider === 'claude' ? 'Claude' : 'Codex'} execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;
         if (attempt >= maximum) throw new Error(reason);
         // A failed or timed-out run is one bounded attempt; the next one is told why, like a failed verification.
         record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = reason;
@@ -483,7 +526,7 @@ const DEVICE_SERVICE = new RegExp(`qemu-system|${SDK_EMULATOR ? escape(path.join
  * Codex run kept downloading for 40 minutes), and Xcode helpers keep a worktree as their directory. After each phase,
  * whatever still works in the runner worktree belongs to that phase: stop it and record it in the attempt.
  */
-async function reapLeftovers(root, worktree, record, phase, onEvent) {
+export async function reapLeftovers(root, worktree, record, phase, onEvent) {
   let leftovers;
   try { leftovers = await processesUsing(root, worktree, { commandLines: false }); }
   catch (error) { record.leftoverCheck = { phase, error: error.message }; return []; }
@@ -623,9 +666,19 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         let result;
         do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
         while (result.status === 'PASS' && !signal?.aborted);
+        // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
+        if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
+          try { const issue = await runIssues(root, config, stream, { signal, onEvent: events }); if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue }); }
+          catch (error) { await events({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+        }
         results[stream ?? ''] = result;
       }
       last = streams[0] === null ? results[''] : aggregate(results);
+      // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
+      if (config.issues?.enabled && !signal?.aborted) {
+        try { await syncIssues(root, config, { onEvent, signal }); }
+        catch (error) { await onEvent({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+      }
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
       if (once || stuck) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
@@ -640,7 +693,7 @@ export async function doctor(root, config) {
   await check('source', () => { validateSource(config.source); return `${config.source.repository}#${config.source.branch}:${config.source.path}`; });
   await check('git', () => git(root, ['rev-parse', 'HEAD']));
   await check('codex', async () => {
-    if (!config.adapters?.codex?.command) throw new Error('Configure adapters.codex.command argv; built-in adapter: scripts/codex-adapter.js');
+    if (!executorCommand(config, executorPlan(config).primary)) throw new Error(`Configure adapters.${executorPlan(config).primary}.command argv; built-in adapters: scripts/codex-adapter.js, scripts/claude-exec-adapter.js`);
     const result = await runCommand(root, { argv: ['codex', '--version'] });
     if (result.status !== 'PASS') throw new Error(result.stderr || 'Codex unavailable'); return result.stdout.trim();
   });

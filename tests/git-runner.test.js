@@ -1423,3 +1423,92 @@ test('configuration recovery leaves a worktree with an unsettled delivery untouc
   assert.equal((await configureRunner(root, updated)).configSync, 'written');
   assert.deepEqual(await worktreeConfig(), updated);
 });
+
+test('a primary executor without capacity hands the same attempt to the fallback executor once', async t => {
+  const { root, config } = await fixture(t);
+  const log = path.join(root, '..', 'executors.log');
+  const quota = JSON.stringify({ type: 'result', subtype: 'success', is_error: true, session_id: 'fake-session-a', result: 'Claude usage limit reached; resets at 5pm' });
+  config.adapters.claude = { command: { argv: [process.execPath, '-e', `require('node:fs').appendFileSync(process.argv[1],'claude\\n');process.stdin.resume();process.stdin.on('end',()=>{console.log(process.argv[2]);process.exit(1)})`, log, quota] } };
+  config.adapters.codex.command.argv = [process.execPath, '-e', `require('node:fs').appendFileSync(process.argv[1],'codex\\n');process.stdin.resume();process.stdin.on('end',()=>{console.error('TypeError: executor crashed');process.exit(1)})`, log];
+  config.policy = { ...config.policy, executor: { primary: 'claude', fallback: 'codex' }, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /^Codex execution FAIL .*executor crashed/);
+  assert.equal(await fs.readFile(log, 'utf8'), 'claude\ncodex\n');
+  const fallback = events.find(event => event.event === 'executor-fallback');
+  assert.deepEqual([fallback.from, fallback.to], ['claude', 'codex']); assert.match(fallback.reason, /usage limit/);
+  const attempt = (await sourceStatus(root)).entries[0].attempts[0];
+  assert.equal(attempt.executor, 'codex'); assert.equal(attempt.executorFallback.from, 'claude');
+  assert.equal(attempt.processes.filter(child => child.phase === 'execute').length, 2);
+  const executions = (await fs.readdir(path.join((await runnerStatus(root)).runner.worktree, '.protoflow/contexts'))).filter(name => name.startsWith('EXEC-'));
+  const providers = await Promise.all(executions.map(async name => JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, '.protoflow/contexts', name), 'utf8')).executor));
+  assert.deepEqual(providers.sort(), ['claude', 'codex']);
+});
+
+test('without a policy the executor stays Codex, and a missing executor adapter is NOT_RUN', async t => {
+  const { root, config } = await fixture(t);
+  config.policy = { ...config.policy, executor: { primary: 'claude' } };
+  await scanSource(root, config);
+  assert.deepEqual(await runOnce(root, config), { status: 'NOT_RUN', reason: 'The claude executor adapter is not configured' });
+});
+
+test('FAKE CLI only: a configured planner plans the version first; its plan reaches the executor, needs-human blocks, a failure proceeds unplanned', async t => {
+  const bridge = new URL('../scripts/claude-adapter.js', import.meta.url).pathname;
+  const plan = decision => JSON.stringify({ decision, level: 'L1', summary: 'FAKE FIXTURE PLAN', steps: ['Change the button label'], acceptanceCriteria: [{ id: 'AC1', text: 'The button reads Save', anchors: [], evidence: 'tier' }], tests: [], risks: [], questions: decision === 'implement' ? [] : ['Which backend?'] });
+  const saved = { mode: process.env.FAKE_CLAUDE_MODE, output: process.env.FAKE_CLAUDE_OUTPUT };
+  t.after(() => { for (const [key, value] of [['FAKE_CLAUDE_MODE', saved.mode], ['FAKE_CLAUDE_OUTPUT', saved.output]]) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  process.env.FAKE_CLAUDE_MODE = 'pass';
+  for (const [name, planner, output] of [
+    ['planned', 'claude', plan('implement')],
+    ['needs-human', 'claude', plan('needs-human')],
+    ['failed', null, null]
+  ]) {
+    const { root, config } = await fixture(t);
+    const fakeClaude = path.join(root, '..', 'claude');
+    await fs.copyFile(new URL('./fixtures/fake-claude.cjs', import.meta.url), fakeClaude); await fs.chmod(fakeClaude, 0o755);
+    const received = path.join(root, '..', 'executor-input.json');
+    config.adapters.codex.command.argv = [process.execPath, '-e', `let i='';process.stdin.on('data',c=>i+=c).on('end',()=>{require('node:fs').writeFileSync(process.argv[1],i);console.error('TypeError: executor crashed');process.exit(1)})`, received];
+    config.adapters.planner = { command: { argv: planner ? [process.execPath, bridge, '--claude', fakeClaude] : [process.execPath, '-e', 'process.exit(3)'], timeoutMs: 30000 } };
+    if (output) process.env.FAKE_CLAUDE_OUTPUT = output;
+    await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+    await scanSource(root, config);
+    const events = [];
+    const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+    const entry = (await sourceStatus(root)).entries[0];
+    assert.equal(result.status, 'BLOCKED', name);
+    if (name === 'planned') {
+      const planned = events.find(event => event.event === 'planned')
+      assert.equal(planned.decision, 'implement'); assert.equal(planned.criteria, 1); assert.equal(entry.planId, planned.planId);
+      const input = await fs.readFile(received, 'utf8');
+      assert.match(input, new RegExp(`"id":"${planned.planId}"`)); assert.match(input, /"acceptanceCriteria":\[\{"id":"AC1"/); assert.match(input, /A planner \(proposal 0003\) prepared `plan`/);
+      // Running the blocked version again replans it with the earlier plan and its outcome as evidence.
+      const again = [];
+      await retryRunner(root, config); await runOnce(root, config, { onEvent: event => again.push(event) });
+      const replanned = again.find(event => event.event === 'planned');
+      assert.notEqual(replanned.planId, planned.planId);
+      const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${replanned.planId}/request.json`), 'utf8'));
+      assert.equal(request.data.previous.id, planned.planId); assert.equal(request.data.previous.attempts, 1); assert.match(request.data.previous.lastError, /executor crashed/);
+    } else if (name === 'needs-human') {
+      assert.match(result.reason, /^Planner PLN-\S+ needs a person: FAKE FIXTURE PLAN Questions: Which backend\?/);
+      await assert.rejects(fs.access(received), { code: 'ENOENT' }); assert.equal(entry.attempts.length, 0);
+    } else {
+      assert.match(events.find(event => event.event === 'plan-failed').reason, /did not return a plan run \(FAIL, exit 3\)/);
+      assert.match(entry.planError.reason, /exit 3/); assert.equal(entry.planId, undefined);
+      assert.doesNotMatch(await fs.readFile(received, 'utf8'), /"plan":|A planner \(proposal 0003\)/);
+    }
+  }
+});
+
+test('issue triage runs after the prototype streams and its failure never stops the runner', async t => {
+  const { root, config } = await fixture(t);
+  // Without a GitHub remote the issue pass fails; it is reported and the version still ran.
+  await scanSource(root, config);
+  const events = [];
+  const result = await startRunner(root, { ...config, issues: { enabled: true } }, { once: true, onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED');
+  const names = events.map(event => event.event);
+  assert.ok(names.indexOf('execute') < names.indexOf('issues-failed'), names.join(','));
+  assert.match(events.find(event => event.event === 'issues-failed').error, /No such remote 'origin'/);
+});

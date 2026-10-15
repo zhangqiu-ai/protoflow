@@ -19,12 +19,30 @@ const inScope = (file, paths) => !paths || paths.some(prefix => file === prefix 
 const under = (file, prefix) => file === prefix || file.startsWith(`${prefix}/`);
 // With several targets, each target delivers only its own root and shared top-level files, never a sibling's root.
 const siblingRoots = (config, target) => isMultiTarget(config) ? config.targets.filter(item => item.id !== target).map(item => item.root.replace(/\/+$/, '')) : [];
-async function currentBase(worktree, options) {
+export async function currentBase(worktree, options) {
   const destination = await resolveDeliveryDestination(worktree, options.remote);
   const output = await git(worktree, ['ls-remote', destination.url, `refs/heads/${options.baseBranch}`]);
   const match = /^([a-f0-9]{40})\s+refs\/heads\/(.+)$/.exec(output);
   if (!match || match[2] !== options.baseBranch) throw new Error('Current delivery base SHA is unavailable');
   return { sha: match[1], url: destination.url };
+}
+
+/**
+ * Stage the application change for a delivery commit: everything Git can commit inside the allowlist, without runtime
+ * output, and never a sibling target's root or (with an allowlist) a protected path. Returns the staged files.
+ */
+export async function stageApplication(worktree, config, target) {
+  const options = config.runner.delivery;
+  // Stage, then unstage exclusions: naming a gitignored path in an add pathspec makes git exit non-zero.
+  // `add -A` leaves Git-ignored files out, matching applicationFingerprint, which binds only committable content.
+  await git(worktree, ['add', '-A', '--', ...(options.paths ?? ['.'])]);
+  await git(worktree, ['reset', '-q', '--', ...EXCLUDED]);
+  const included = (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
+  const runtime = included.filter(file => file.split('/').some(part => EXCLUDED.includes(part)));
+  if (runtime.length) await git(worktree, ['reset', '-q', '--', ...runtime]);
+  const siblings = siblingRoots(config, target);
+  for (const file of included.filter(file => !runtime.includes(file))) if (!inScope(file, options.paths) || (options.paths && protectedPath.test(file)) || siblings.some(prefix => under(file, prefix))) throw new Error(`Staged delivery file is outside safe scope: ${file}`);
+  return (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
 }
 
 /**
@@ -248,11 +266,11 @@ async function approve(root, config, worktree, entry, independent) {
   return { reviewId: decided.id, baselineId: baseline.id, independentReviewId: independent.id, reviewer: decided.reviewer };
 }
 
-function ghFailure(label, result) {
+export function ghFailure(label, result) {
   const detail = (result.stderr || result.error || '').trim();
   return markTransient(new Error(`${label} failed: ${detail}`), detail);
 }
-async function ghJson(worktree, repository, args) {
+export async function ghJson(worktree, repository, args) {
   const result = await gh(worktree, repository, args);
   if (result.status !== 'PASS') throw ghFailure(`gh ${args[0]} ${args[1]}`, result);
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
@@ -362,18 +380,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         if (previous.some(file => !inScope(file, options.paths))) throw new Error('Existing Git index contains changes outside the delivery allowlist; preserve it for inspection');
       }
       delivery.discardedHistory = await dropRevokedHistory(worktree, state, base) ?? undefined;
-      // Stage, then unstage exclusions: naming a gitignored path in an add pathspec makes git exit non-zero.
-      // `add -A` leaves Git-ignored files out, matching applicationFingerprint, which binds only committable content.
-      await git(worktree, ['add', '-A', '--', ...(options.paths ?? ['.'])]);
-      await git(worktree, ['reset', '-q', '--', ...EXCLUDED]);
-      const included = (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
-      const runtime = included.filter(file => file.split('/').some(part => EXCLUDED.includes(part)));
-      if (runtime.length) await git(worktree, ['reset', '-q', '--', ...runtime]);
-      const siblings = siblingRoots(config, target);
-      for (const file of included.filter(file => !runtime.includes(file))) if (!inScope(file, options.paths) || (options.paths && protectedPath.test(file)) || siblings.some(prefix => under(file, prefix))) throw new Error(`Staged delivery file is outside safe scope: ${file}`);
-      let changed = false;
-      try { await git(worktree, ['diff', '--cached', '--quiet']); }
-      catch (error) { if (error.code !== 1) throw error; changed = true; }
+      const changed = (await stageApplication(worktree, config, target)).length > 0;
       if (changed) {
         const subject = pending.length === 1 ? `ProtoFlow: implement prototype ${last.sha.slice(0, 7)}` : `ProtoFlow: implement prototypes ${pending[0].sha.slice(0, 7)}..${last.sha.slice(0, 7)}`;
         const trailers = [
