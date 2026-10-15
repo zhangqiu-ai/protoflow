@@ -1389,7 +1389,7 @@ test('processes an executor leaves in the worktree are stopped and recorded; dev
   const { root, config } = await fixture(t);
   const pids = path.join(root, '..', 'leftover-pids');
   // The executor starts two detached processes in its own directory (the runner worktree), then fails.
-  config.adapters.codex.command.argv = [process.execPath, '-e', `const {spawn}=require('node:child_process');const a=spawn(process.execPath,['-e','setInterval(()=>{},1000)','gradle-like','app/emulator/notes.js'],{detached:true,stdio:'ignore'});const b=spawn(process.execPath,['-e','setInterval(()=>{},1000)','/Users/fixture/Library/Android/sdk/emulator/netsimd'],{detached:true,stdio:'ignore'});require('node:fs').writeFileSync(process.argv[1],a.pid+' '+b.pid);a.unref();b.unref();process.exit(9)`, pids];
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const {spawn}=require('node:child_process');const a=spawn(process.execPath,['-e','setInterval(()=>{},1000)','gradle-like','app/emulator/notes.js'],{detached:true,stdio:'ignore'});const b=spawn(process.execPath,['-e','setInterval(()=>{},1000)','${path.join(process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? '/Users/fixture/Library/Android/sdk', 'emulator', 'netsimd')}'],{detached:true,stdio:'ignore'});require('node:fs').writeFileSync(process.argv[1],a.pid+' '+b.pid);a.unref();b.unref();process.exit(9)`, pids];
   config.policy = { ...config.policy, transientRetries: 0 };
   await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
   await scanSource(root, config);
