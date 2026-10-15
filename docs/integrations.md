@@ -117,7 +117,9 @@
   3. 提交 `Fix #n: <標題>`（trailer 含 `Fixes #n`、快照、方案、驗證與 base），獨立審查的 binding 改為 `issue`（快照、方案驗收條件與測試、規劃者 session）加上一筆 `regression: true` 的版本驗證；驗收者不得是規劃者或執行者 session。審查 FAIL 不重審。
   4. 自動批准（標示為 AI）、推送到 `protoflow/issue-<n>`（多 target 為 `protoflow/issue-<n>/<target>`）、開 PR（內文 `Fixes #n`；尚有其他 target 未合併時為 `Part of #n`）、以 `--match-head-commit` 合併，再把 runner worktree 對齊到合併 commit。
   5. 方案的所有 target 都合併後，Issue 加上 `done`、AI 結案留言並關閉（非預設分支不會因 `Fixes #n` 自動關閉，因此由引擎關閉）。
-  - 修復用盡、審查 FAIL、base 在審查後移動或其他阻擋時，該 target 的修改被丟棄、worktree 回到開始時的 base，Issue 標 `blocked` 並附原因與 findings，原型串流繼續。網路暫時錯誤保留進度，下一輪續做；重啟後失去引擎見證的審查會重新審查（最多 3 次）。
+  - 修復用盡、審查 FAIL 或其他阻擋時，該 target 的修改被丟棄、worktree 回到開始時的 base，Issue 標 `blocked` 並附原因與 findings，原型串流繼續。有寫入權限的維護者移除 `blocked` 標籤後，Issue 重新分流，已合併的 target 保留。
+  - base 在發布前前進（例如同一個 Issue 的其他 target 先合併）時，已提交的修正被丟棄、從新的 base 重做（最多 3 次，記在 `restarts` 與 `history`）；尚未提交的工作每次接續都先丟棄未完成的修改並快轉到目前的 base。
+  - Runner 停止不算阻塞：被中止的工作保持 RUNNING，下一輪重做。網路暫時錯誤保留進度，下一輪續做；重啟後失去引擎見證的審查會重新審查（最多 3 次）。每個 Issue 只發一則「開始實作」留言。
 
 ### 專案工具鏈的沙箱權限（`--add-dir`、`--network`）
 

@@ -176,3 +176,25 @@ test('test sources are recognised on every platform the plan may name', async ()
   for (const file of ['flutter/test/widget_test.dart', 'ios/AppTests/CounterTests.swift', 'ios/AppUITests/LaunchTest.swift', 'android/app/src/test/java/CounterTest.kt', 'android/app/src/androidTest/java/Flow.kt', 'web/src/counter.test.ts', 'web/e2e/login.spec.js', 'web/__tests__/a.js', 'flutter/integration_test/app.dart', 'go/counter_test.go']) assert.ok(TEST_FILE.test(file), file);
   for (const file of ['flutter/lib/main.dart', 'ios/App/ContentView.swift', 'android/app/src/main/java/Testament.kt', 'web/src/latest.ts', 'docs/testing.md']) assert.equal(TEST_FILE.test(file), false, file);
 });
+
+test('FAKE gh and CLI only: stopped work from 0.3.9-0.3.10 resumes unpublished, and a maintainer re-opens a blocked fix by removing its label', async t => {
+  const { root, config, gh, edit } = await fixture(t, [issue(5, { labels: ['protoflow', 'protoflow:in-progress'] }), issue(6, { labels: ['protoflow', 'protoflow:blocked'] })]);
+  const repository = { id: 101, nameWithOwner: 'protoflow-fixture/application' };
+  await fs.mkdir(path.join(root, '.protoflow/issues'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/issues/state.json'), JSON.stringify({ schemaVersion: 1, repository, issues: {
+    5: { number: 5, status: 'in-progress', planId: 'PLN-old-5', history: [], targets: { ios: { status: 'BLOCKED', error: 'Stopped', completedAt: 'x', attempts: [], reviews: [] } }, pending: { status: 'blocked', reason: 'Stopped', marker: '<!-- protoflow:issue-blocked 5 ios x -->', body: 'stopped' } },
+    6: { number: 6, status: 'blocked', planId: 'PLN-old-6', history: [], commentCount: 0, targets: { ios: { status: 'BLOCKED', error: 'Repair attempts exhausted' }, flutter: { status: 'MERGED' } } }
+  } }));
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ targets: ['ios', 'flutter'] });
+  await syncIssues(root, config);
+  let state = await issuesStatus(root);
+  assert.equal(state.issues[5].pending, undefined); assert.equal(state.issues[5].targets.ios.status, 'RUNNING'); assert.equal(state.issues[5].targets.ios.error, undefined);
+  assert.equal((await gh()).issues[0].comments.length, 0, 'the block of a stopped runner is never published');
+  assert.equal(state.issues[6].status, 'blocked', 'the blocked label is still there');
+  await edit(db => { const item = db.issues.find(entry => entry.number === 6); item.labels = ['protoflow']; item.events = [{ event: 'unlabeled', label: { name: 'protoflow:blocked' }, actor: { login: 'maintainer' } }]; db.permissions = { maintainer: 'maintain' }; });
+  await syncIssues(root, config);
+  state = await issuesStatus(root);
+  assert.equal(state.issues[6].status, 'planned'); assert.equal(state.issues[6].confirmedBy, 'maintainer');
+  assert.deepEqual(state.issues[6].targets, { flutter: { status: 'MERGED' } });
+  assert.deepEqual((await gh()).issues[1].labels, ['protoflow', 'protoflow:planned']);
+});

@@ -1604,7 +1604,7 @@ test('FAKE providers only: a planned issue waits for the delivered prototype str
   // The issue is closed with an AI-labelled record of what merged.
   const issue = await issues();
   assert.equal(issue.state, 'closed'); assert.deepEqual(issue.labels, ['protoflow', 'protoflow:done']);
-  assert.deepEqual(issue.comments.map(comment => comment.body.split('\n')[0]), ['<!-- protoflow:issue-started 12 ' + work.startedAt + ' -->', '<!-- protoflow:issue-done 12 -->']);
+  assert.deepEqual(issue.comments.map(comment => comment.body.split('\n')[0]), ['<!-- protoflow:issue-started 12 -->', '<!-- protoflow:issue-done 12 -->']);
   assert.match(issue.comments[1].body, /Closed automatically after every planned target merged[\s\S]*not a human approval/);
   assert.deepEqual(await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify() }), { status: 'IDLE' });
 });
@@ -1630,4 +1630,45 @@ test('FAKE providers only: an issue fix without the planned tests is repaired, a
   assert.deepEqual(issue.labels, ['protoflow', 'protoflow:blocked']);
   assert.match(issue.comments.at(-1).body, /status `protoflow:blocked`[\s\S]*returned FAIL[\s\S]*- high app\/index.html:1: Synthetic fixture finding/);
   assert.deepEqual(await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify() }), { status: 'IDLE' });
+});
+
+test('FAKE providers only: a stopped runner never blocks an issue fix, and a base that moves before review makes it start over', async t => {
+  const f = await fixture(t);
+  const { issues } = await plannedIssue(f);
+  const { runIssues } = await import('../src/issue-runner.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await idleRunner(f);
+  const issueState = async () => (await readJson(path.join(f.root, '.protoflow/issues/state.json'))).issues[12];
+  // Stopped while the first attempt is verified: the work stays RUNNING and nothing is published as blocked.
+  const controller = new AbortController(), first = fakeVerify();
+  const stopped = await runIssues(f.root, f.config, null, { signal: controller.signal, verifyVersion: async (...args) => { const report = await first(...args); controller.abort(); return report; } });
+  assert.deepEqual(stopped, { status: 'STOPPED', number: 12, target: 'application' });
+  assert.equal((await issueState()).targets.application.status, 'RUNNING');
+  assert.equal((await issues()).labels.includes('protoflow:blocked'), false);
+  // Another change lands on the base while the fix is verified: the committed fix is dropped and done again.
+  const startBase = await git(f.remote, 'rev-parse', 'main'), clone = path.join(f.base, 'other-change');
+  const verify = fakeVerify();
+  let moved = false;
+  const moving = async (...args) => {
+    if (!moved) {
+      moved = true;
+      await git(f.base, 'clone', '-q', f.remote, clone); await git(clone, 'config', 'user.email', 'fixture@protoflow.test'); await git(clone, 'config', 'user.name', 'Fixture');
+      await fs.writeFile(path.join(clone, 'OTHER.md'), 'FAKE FIXTURE: another target merged\n'); await git(clone, 'add', 'OTHER.md'); await git(clone, 'commit', '-q', '-m', 'other change'); await git(clone, 'push', '-q', 'origin', 'HEAD:main');
+    }
+    return verify(...args);
+  };
+  const retry = await runIssues(f.root, f.config, null, { verifyVersion: moving });
+  assert.equal(retry.status, 'RETRY'); assert.match(retry.reason, /^Starting over: the base moved before review/);
+  let work = (await issueState()).targets.application;
+  assert.equal(work.restarts, 1); assert.equal(work.commit, undefined); assert.equal(work.history[0].reason, 'the base moved before review');
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), startBase);
+  const result = await runIssues(f.root, f.config, null, { verifyVersion: verify });
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  work = (await issueState()).targets.application;
+  assert.deepEqual(work.baseMoves.map(move => move.from), [startBase]);
+  assert.equal(await git(f.remote, 'show', 'main:OTHER.md'), 'FAKE FIXTURE: another target merged');
+  assert.equal(await git(f.remote, 'show', 'main:app/index.html'), '<main>v1 fixed</main>');
+  // One "started" comment for the issue, however often its work resumed.
+  assert.equal((await issues()).comments.filter(comment => comment.body.startsWith('<!-- protoflow:issue-started 12 -->')).length, 1);
+  assert.equal((await issues()).state, 'closed');
 });
