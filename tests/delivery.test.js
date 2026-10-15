@@ -1575,6 +1575,10 @@ test('FAKE providers only: a planned issue waits for the delivered prototype str
   // Prototype work comes first: the accepted version is not delivered yet.
   assert.match((await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify() })).reason, /Issue #12 waits: the prototype stream has work/);
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  // A rejected, retired delivery is settled too: it must not keep the target busy.
+  const deliveries = await readJson(path.join(f.root, '.protoflow/delivery/state.json'));
+  deliveries.deliveries.unshift({ id: 'DLV-retired-fixture', status: 'REVOKED', versions: [] });
+  await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), deliveries);
   await idleRunner(f);
   const events = [];
   const result = await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify(), onEvent: event => events.push(event.event) });

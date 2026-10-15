@@ -652,6 +652,7 @@ function aggregate(results) {
 }
 export async function startRunner(root, config, { once = false, signal, onEvent = () => {} } = {}) {
   const streams = streamTargets(config);
+  const waiting = new Map();
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
     while (!signal?.aborted) {
@@ -668,7 +669,12 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         while (result.status === 'PASS' && !signal?.aborted);
         // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
         if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
-          try { const issue = await runIssues(root, config, stream, { signal, onEvent: events }); if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue }); }
+          try {
+            const issue = await runIssues(root, config, stream, { signal, onEvent: events });
+            if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue });
+            // Report why a planned issue waits once per change, so a waiting issue is never silent.
+            if (waiting.get(stream) !== (issue.reason ?? null)) { waiting.set(stream, issue.reason ?? null); if (issue.status === 'IDLE' && issue.reason) await events({ event: 'issue-waiting', reason: issue.reason }); }
+          }
           catch (error) { await events({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
         }
         results[stream ?? ''] = result;

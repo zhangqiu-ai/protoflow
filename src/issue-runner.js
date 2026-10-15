@@ -35,7 +35,8 @@ async function busy(root, config, stream, runner) {
   if (!runner || runner.status !== 'IDLE' || runner.configHash !== hash(config)) return 'the runner is not idle';
   const progress = await loadProgress(root, config, stream);
   if (!progress.entries.length || progress.entries.some(entry => entry.status !== 'PASS' || !entry.deliveryId)) return 'the prototype stream has work';
-  if ((await deliveryStatus(root, config, stream)).deliveries.some(delivery => delivery.status !== 'MERGED')) return 'a prototype delivery is not merged';
+  // A rejected delivery that was retired (REVOKED) is settled as well; anything else is still on its way.
+  if ((await deliveryStatus(root, config, stream)).deliveries.some(delivery => !['MERGED', 'REVOKED'].includes(delivery.status))) return 'a prototype delivery is not merged';
   return null;
 }
 
