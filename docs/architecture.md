@@ -1,4 +1,4 @@
-# ProtoFlow v0.1 架構
+# ProtoFlow 架構
 
 ## 邊界與所有權
 

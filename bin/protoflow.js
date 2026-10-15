@@ -3,6 +3,7 @@
 import { flushDiagnostics } from '../src/cli-diagnostics.js';
 import path from 'node:path';
 import { mkdir } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { initProject, installSkill } from '../src/install.js';
 import { loadConfig } from '../src/config.js';
@@ -19,7 +20,8 @@ import { versionQueue } from '../src/queue.js';
 import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
 
-const help = `ProtoFlow 0.1 — shared prototype-driven engineering engine
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const help = `ProtoFlow ${version} — shared prototype-driven engineering engine
 Usage: protoflow <command> [action] --project <path> [options]
   init [--prototype-dir prototype]       Create project config + AGENTS convention
        [--repository url --branch name --path dir [--start-sha sha]]
