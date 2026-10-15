@@ -111,7 +111,7 @@
 - **分流**：唯讀 Claude 規劃者（與原型流程同一套 trace 驗證）回答 `implement`、`needs-info`、`needs-human` 或 `reject`，並給出 targets、步驟、驗收條件、需新增的測試、風險與問題。引擎規則：L3、缺 targets／步驟／驗收條件／測試的 `implement`、沒有問題的 `needs-info`，一律改為 `needs-human`。每輪最多規劃 `maxTriagePerSync` 個 Issue；規劃失敗下一輪重試，連續 3 次失敗轉 `needs-human`。
 - **發布**：決定以標示為 AI 的留言發布（含規劃者模型、方案 id、session、快照 id），並把 Issue 的狀態標籤換成 `<label>:planned`、`needs-info`、`needs-human` 或 `rejected`（首次執行時自動建立 7 個狀態標籤）。決定先寫入 `.protoflow/issues/state.json` 再發布；中途中斷時下一輪依留言開頭的標記續做，不會重複留言。`rejected` 不會自動關閉 Issue。
 - **再分流**：`needs-info` 的 Issue 有新的非 ProtoFlow 留言時重新規劃，資料帶上一份方案；`needs-human`、`rejected` 在維護者移除狀態標籤後重新分流。
-- **實作（P5）**：需要 `policy.autoApprove` 與 `runner.delivery.merge: "auto"`。原型優先：某個 target 的 runner 閒置、所有已接受版本都已交付且合併、worktree 沒有未提交修改時，runner 每輪替該 target 處理一個 `planned` Issue（已開始的優先，其次編號最小者）。
+- **實作（P5）**：需要 `policy.autoApprove` 與 `runner.delivery.merge: "auto"`。原型優先：某個 target 的 runner 閒置、所有已接受版本都已交付且合併（被拒收而退役的交付 `REVOKED` 也算已結案）、worktree 沒有未提交修改時，runner 每輪替該 target 處理一個 `planned` Issue（已開始的優先，其次編號最小者）。Issue 等待的原因每次改變時發出一筆 `issue-waiting` 事件。
   1. 把該 target 的 runner worktree 快轉到目前的 base，Issue 轉為 `in-progress`（AI 留言）。
   2. 執行者依方案修改（context 帶 `issue` 與 `plan`；Issue 內容標為不受信任資料），再以 `reverify` 對該 target **最新已接受的原型版本**跑完整驗證（build、functional、分層），確保修 Issue 不破壞原型一致性。方案列出測試時，修改必須新增或修改測試檔，否則視為失敗並進入修復；修復上限沿用 `policy.maxRepairAttempts`，執行者額度與暫時性錯誤的處理與原型流程相同。
   3. 提交 `Fix #n: <標題>`（trailer 含 `Fixes #n`、快照、方案、驗證與 base），獨立審查的 binding 改為 `issue`（快照、方案驗收條件與測試、規劃者 session）加上一筆 `regression: true` 的版本驗證；驗收者不得是規劃者或執行者 session。審查 FAIL 不重審。
