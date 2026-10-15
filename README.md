@@ -196,6 +196,17 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 **沒有配置 `runner.delivery` 時，引擎不會 add、commit、push、合併或部署任何東西。**
 
+## Claude 規劃與驗收、GitHub Issues（提案 0003）
+
+角色分開，原型對齊與 GitHub Issues 走同一條鏈：Claude 規劃 → 執行者實作 → 引擎分層驗證 → Claude 驗收 → 交付。
+
+- **規劃者**（`adapters.planner`，`scripts/claude-adapter.js`，建議 `claude-opus-5-5`）：唯讀 session，為每個原型版本產出步驟、逐條驗收條件、需新增的測試與風險；L3 一律交給人。
+- **執行者**（`policy.executor`）：預設 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），額度不足時同一個 attempt 改由 Codex 重做；未配置時維持 Codex。
+- **驗收者**（`adapters.independentReview.provider: "claude"`）：唯讀、全新 session，逐條檢查方案的驗收條件；不得與規劃者或執行者是同一 session。
+- **GitHub Issues**（`issues.enabled`）：帶 `protoflow` 標籤、作者為 OWNER／MEMBER／COLLABORATOR 的 Issue 由規劃者分流（`planned`、`needs-info`、`needs-human`、`rejected`，決定以標示為 AI 的留言發布）。原型優先：target 閒置且原型都已交付時，`planned` 的 Issue 才在該 target 實作，並重新驗證最新已接受的原型版本，再審查、以 `Fixes #n` 的 PR 合併並結案。
+
+所有 Claude 呼叫都只經明確配置的 argv 與 stdin JSON，引擎自行重驗 raw trace。細節見 [integrations](docs/integrations.md#claude-規劃者提案-0003) 與 [提案 0003](docs/proposals/0003-claude-plans-codex-builds.md)。
+
 ## 人工 Review 與 Baseline
 
 ```sh
@@ -218,6 +229,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `source scan` / `source status` | 掃描並凍結 Git 提交／來源進度 |
 | `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、綁定新設定、回收 worktree |
 | `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |
+| `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |
 | `queue` / `status` | 版本佇列（含 `release`）／會話、Baseline、佇列與整合狀態 |
 | `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
 | `contract show --manifest ID` | 凍結版本的靜態 UI 合約與變更範圍（v2） |
@@ -277,9 +289,9 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/git-runner.md](docs/git-runner.md) | Git 來源、Runner、多目標、自動交付與恢復 |
 | [docs/independent-review.md](docs/independent-review.md) | 獨立 AI 審查閘門與重用接口 |
 | [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Flutter 的需求、配置與約定 |
-| [docs/integrations.md](docs/integrations.md) | Codex、Spec Kit、BMad adapter 與沙箱權限 |
+| [docs/integrations.md](docs/integrations.md) | Codex、Claude（規劃、執行、驗收）、GitHub Issues、Spec Kit、BMad adapter 與沙箱權限 |
 | [docs/acceptance-adapters.md](docs/acceptance-adapters.md) | 專案驗收 adapter 協定（v1） |
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
-| [docs/proposals/](docs/proposals/) | 語意錨點（0001）與 Android／Flutter（0002）提案及實作紀錄 |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter（0002）、Claude 規劃與驗收及 GitHub Issues（0003）提案與實作紀錄 |
