@@ -19,7 +19,7 @@ import { exportEvidence, reapLeftovers, executionDiagnostic, EXECUTOR_QUOTA, TRA
  */
 // Test sources in the platforms ProtoFlow targets: test directories and *_test, *.test, *.spec, *Test(s) files.
 export const TEST_FILE = /(?:^|\/)(?:tests?|__tests__|spec|androidTest|integration_test|test_driver|[A-Za-z0-9]*Tests)\/|(?:_test|\.test|\.spec|Tests?)\.[A-Za-z]+$/;
-const MAX_REVIEW_ATTEMPTS = 3;
+const MAX_REVIEW_ATTEMPTS = 3, MAX_RESTARTS = 3;
 
 export async function runIssues(root, config, stream, { signal, onEvent = () => {}, verifyVersion = verify } = {}) {
   const settings = issueSettings(config);
@@ -68,12 +68,24 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
     work = entry.targets[targetId] = { status: 'RUNNING', startedAt: new Date().toISOString(), attempts: [], reviews: [] };
     await save();
   }
+  /** Drop the commit and its evidence and do the fix again from the current base on the next pass (bounded). */
+  const restart = async reason => {
+    if ((work.restarts ?? 0) >= MAX_RESTARTS) return blockWork(`The fix had to start over ${MAX_RESTARTS} times because ${reason}`);
+    await git(worktree, ['reset', '-q', '--hard', work.baseSha]); await git(worktree, ['clean', '-fdq', '-e', '.protoflow', '-e', 'node_modules']);
+    work.history = [...(work.history ?? []), { restartedAt: new Date().toISOString(), reason, commit: work.commit, reviewId: work.reviewId ?? null, pr: work.pr?.url ?? null }];
+    work.restarts = (work.restarts ?? 0) + 1;
+    for (const key of ['commit', 'manifestId', 'verificationId', 'executionIds', 'committedAt', 'reviewId', 'approval', 'pushedAt', 'pr']) delete work[key];
+    work.previousReviews = [...(work.previousReviews ?? []), ...work.reviews]; work.reviews = [];
+    await save();
+    await events({ event: 'issue-restart', reason });
+    return { status: 'RETRY', number: n, target: targetId, reason: `Starting over: ${reason}` };
+  };
   const blockWork = async (message, findings = []) => {
     work.status = 'BLOCKED'; work.error = message; work.completedAt = new Date().toISOString(); await save();
     // Give the worktree back to the prototype stream exactly at the base this fix started from.
     if (work.baseSha) { await git(worktree, ['reset', '-q', '--hard', work.baseSha]); await git(worktree, ['clean', '-fdq', '-e', '.protoflow', '-e', 'node_modules']); }
     await events({ event: 'issue-blocked', reason: message.slice(0, 300) });
-    const lines = [`<!-- protoflow:issue-blocked ${n} ${targetId} ${work.startedAt} -->`, `**ProtoFlow issue fix (AI, automated)** · target \`${targetId}\` · status \`${session.settings.label}:blocked\``, '', message, ...findings.map(finding => `- ${finding.severity} ${finding.file}:${finding.line}: ${finding.description}`), '', 'The prototype stream continues. A maintainer decides how to proceed; nothing was merged for this target.'];
+    const lines = [`<!-- protoflow:issue-blocked ${n} ${targetId} ${work.startedAt} -->`, `**ProtoFlow issue fix (AI, automated)** · target \`${targetId}\` · status \`${session.settings.label}:blocked\``, '', message, ...findings.map(finding => `- ${finding.severity} ${finding.file}:${finding.line}: ${finding.description}`), '', `The prototype stream continues and nothing was merged for this target. A maintainer decides how to proceed; removing the \`${session.settings.label}:blocked\` label has ProtoFlow triage the issue again (targets that already merged are kept).`];
     await transition(entry, { status: 'blocked', reason: message.slice(0, 500), marker: lines[0], body: lines.join('\n').slice(0, 60000) });
     return { status: 'BLOCKED', number: n, target: targetId, reason: message };
   };
@@ -84,16 +96,19 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
       const { sha: baseSha, url } = await currentBase(worktree, options);
       try { await git(worktree, ['cat-file', '-e', `${baseSha}^{commit}`]); }
       catch { await git(worktree, ['fetch', '--no-tags', '--no-write-fetch-head', url, baseSha]); }
+      // An interrupted attempt starts over: its partial changes are discarded, then the work moves to the current base,
+      // which other targets' merges of this issue (or anything else) may have advanced meanwhile.
       if (work.baseSha) { await git(worktree, ['reset', '-q', '--hard', work.baseSha]); await git(worktree, ['clean', '-fdq', '-e', '.protoflow', '-e', 'node_modules']); }
-      else {
-        try { await git(worktree, ['merge-base', '--is-ancestor', 'HEAD', baseSha]); }
-        catch { return blockWork(`The runner worktree of ${targetId} has history that is not on ${options.baseBranch}; deliver or inspect it first`); }
+      try { await git(worktree, ['merge-base', '--is-ancestor', 'HEAD', baseSha]); }
+      catch { return blockWork(`The runner worktree of ${targetId} has history that is not on ${options.baseBranch}; deliver or inspect it first`); }
+      if (work.baseSha !== baseSha) {
         await git(worktree, ['merge', '-q', '--ff-only', baseSha]);
         runner.base = baseSha; await writeJson(runnerFile, runner);
+        if (work.baseSha) work.baseMoves = [...(work.baseMoves ?? []), { from: work.baseSha, to: baseSha, at: new Date().toISOString() }];
         work.baseSha = baseSha; await save();
       }
       if (entry.status !== 'in-progress') {
-        const lines = [`<!-- protoflow:issue-started ${n} ${work.startedAt} -->`, `**ProtoFlow issue fix (AI, automated)** · status \`${session.settings.label}:in-progress\``, '', `Implementing plan \`${plan.id}\` for ${plan.plan.targets.join(', ')}, starting with ${targetId}. Each target is verified against its latest accepted prototype version and independently reviewed before its PR is merged.`];
+        const lines = [`<!-- protoflow:issue-started ${n} -->`, `**ProtoFlow issue fix (AI, automated)** · status \`${session.settings.label}:in-progress\``, '', `Implementing plan \`${plan.id}\` for ${plan.plan.targets.join(', ')}, starting with ${targetId}. Each target is verified against its latest accepted prototype version and independently reviewed before its PR is merged.`];
         await transition(entry, { status: 'in-progress', marker: lines[0], body: lines.join('\n') });
       }
       await events({ event: 'issue-started', baseSha: work.baseSha, planId: plan.id });
@@ -104,6 +119,8 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
       const progress = await loadProgress(root, config, stream);
       const manifestId = progress.entries.at(-1).manifestId;
       const result = await implement(root, config, stream, worktree, { snapshot, plan, manifestId, work, save, signal, onEvent: events, verifyVersion });
+      // A stopped runner is not a verdict on the fix: the work stays RUNNING and starts over on the next pass.
+      if (signal?.aborted) return { status: 'STOPPED', number: n, target: targetId };
       if (result.status !== 'PASS') return blockWork(result.reason);
       await exportEvidence(root, worktree, result.report);
       const staged = await stageApplication(worktree, config, stream);
@@ -113,6 +130,9 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
       await save();
     }
     if (await git(worktree, ['rev-parse', 'HEAD']) !== work.commit) return blockWork(`The runner worktree moved away from the issue commit ${work.commit}`);
+    // The fix is reviewed and merged against the base it was verified on; a base that moved before publication
+    // (another target merged this issue, or anything else) means doing the fix again on the new base.
+    if (!work.pushedAt && (await currentBase(worktree, options)).sha !== work.baseSha) return restart('the base moved before review');
     const reference = { number: n, snapshotId: entry.snapshotId, planId: plan.id, manifestId: work.manifestId, verificationId: work.verificationId, executionIds: work.executionIds };
     const gate = { worktree, target: stream, commit: work.commit, issue: reference, expectedBaseSha: work.baseSha };
     let independent = null;
@@ -160,7 +180,7 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
       const view = await ghJson(worktree, repository, ['pr', 'view', String(work.pr.number), '--json', 'state,mergeCommit,headRefOid,baseRefOid,baseRefName,headRefName,isDraft']);
       if (view.state === 'OPEN') {
         if (view.headRefOid !== work.commit || view.baseRefName !== options.baseBranch || view.headRefName !== branch) throw new Error(`PR #${work.pr.number} head or base differs from the reviewed issue fix`);
-        if (view.baseRefOid !== independent.binding.remote.baseSha) return blockWork(`${options.baseBranch} moved to ${view.baseRefOid} after the review of ${independent.binding.remote.baseSha}; the fix must be verified again on the new base`);
+        if (view.baseRefOid !== independent.binding.remote.baseSha) return restart(`${options.baseBranch} moved to ${view.baseRefOid} after the review of ${independent.binding.remote.baseSha}`);
         const merged = await gh(worktree, repository, ['pr', 'merge', String(work.pr.number), '--merge', '--match-head-commit', work.commit]);
         if (merged.status !== 'PASS') throw ghFailure('gh pr merge', merged);
       }
@@ -180,6 +200,7 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
     }
     return { status: 'PASS', number: n, target: targetId, pr: work.pr.url, mergeCommit: work.mergeCommit };
   } catch (error) {
+    if (signal?.aborted) return { status: 'STOPPED', number: n, target: targetId };
     // Network failures keep the work for the next pass; everything else is a block a person resolves.
     work.error = error.message.slice(0, 500); await save();
     if (error.transient) return { status: 'RETRY', number: n, target: targetId, reason: error.message };
@@ -193,7 +214,7 @@ async function implement(root, config, stream, worktree, { snapshot, plan, manif
   const executionIds = [];
   let report = null, failure = null;
   for (let attempt = 0; attempt <= maximum; attempt++) {
-    if (signal?.aborted) return { status: 'BLOCKED', reason: 'Stopped' };
+    if (signal?.aborted) return { status: 'STOPPED', reason: 'Stopped' };
     const context = await createContext(worktree, config, manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target: stream ?? undefined, plan, issue: snapshot });
     const record = { attempt, contextId: context.id, startedAt: new Date().toISOString() };
     work.attempts.push(record); await save();

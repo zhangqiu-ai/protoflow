@@ -58,6 +58,13 @@ export async function openIssues(root, config) {
   const state = await readJson(file, null) ?? { schemaVersion: 1, repository: { id: repository.id, nameWithOwner: repository.nameWithOwner }, issues: {} };
   if (state.repository.id !== repository.id) throw new Error(`Issue state belongs to ${state.repository.nameWithOwner}, not ${repository.nameWithOwner}`);
   const save = () => writeJson(file, state);
+  // ProtoFlow 0.3.9-0.3.10 recorded a stopped runner as a blocked fix; such work resumes and its block is never published.
+  let repaired = false;
+  for (const entry of Object.values(state.issues)) {
+    if (entry.pending?.status === 'blocked' && entry.pending.reason === 'Stopped') { delete entry.pending; repaired = true; }
+    for (const work of Object.values(entry.targets ?? {})) if (work.status === 'BLOCKED' && work.error === 'Stopped') { work.status = 'RUNNING'; delete work.error; delete work.completedAt; repaired = true; }
+  }
+  if (repaired) await save();
   const api = (endpoint, options) => githubApi(root, repository, endpoint, options);
   const base = `repos/${repository.nameWithOwner}`;
   async function publish(entry, pending) {
@@ -104,7 +111,7 @@ async function sync(root, config, settings, { onEvent, signal }) {
     const labels = labelNames(issue);
     let confirmedBy = null;
     if (entry.pending) { await publish(entry, entry.pending); results.push({ number: issue.number, status: entry.status, resumed: true }); continue; }
-    if (['needs-human', 'rejected'].includes(entry.status)) {
+    if (['needs-human', 'rejected', 'blocked'].includes(entry.status)) {
       // A maintainer re-opens triage by removing the status label; only people with write access count.
       if (labels.includes(statusLabel(settings, entry.status))) continue;
       confirmedBy = await labelRemover(issue.number, statusLabel(settings, entry.status));
@@ -117,6 +124,8 @@ async function sync(root, config, settings, { onEvent, signal }) {
     if (entry.status === 'needs-info' && !snapshot.comments.some(comment => !comment.ours && comment.createdAt > entry.decidedAt)) { entry.commentCount = issue.comments; await save(); continue; }
     const authorized = settings.authors.includes(snapshot.authorAssociation) || Boolean(confirmedBy) || entry.confirmedBy;
     if (confirmedBy) { entry.confirmedBy = confirmedBy; delete entry.unconfirmedRemoval; }
+    // A blocked fix a maintainer re-opened is triaged again; targets that already merged keep their delivery.
+    if (confirmedBy && entry.status === 'blocked') entry.targets = Object.fromEntries(Object.entries(entry.targets ?? {}).filter(([, work]) => work.status === 'MERGED'));
     if (!authorized) {
       await decide(entry, snapshot, null, 'needs-human', `Issue author association ${snapshot.authorAssociation} is not in issues.authors; a maintainer must confirm it by removing the ${statusLabel(settings, 'needs-human')} label.`);
       results.push({ number: issue.number, status: entry.status, reason: 'unauthorized-author' });
