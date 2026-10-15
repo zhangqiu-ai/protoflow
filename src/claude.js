@@ -49,7 +49,8 @@ export function readClaudeTrace(trace, { executor = false } = {}) {
   try { events = trace.trim().split(/\r?\n/).map(line => JSON.parse(line)); }
   catch { throw claudeBlocked('Malformed raw Claude stream-json trace'); }
   const inits = events.filter(event => event.type === 'system' && event.subtype === 'init');
-  if (inits.length !== 1 || events[0] !== inits[0]) throw claudeBlocked('Claude trace has no single session start');
+  // Only informational system events (e.g. dev_intent from the CLI's project scan) may precede the session start.
+  if (inits.length !== 1 || events.slice(0, events.indexOf(inits[0])).some(event => event.type !== 'system')) throw claudeBlocked('Claude trace has no single session start');
   const init = inits[0];
   if (!SESSION.test(init.session_id ?? '')) throw claudeBlocked('Claude trace has no valid session id');
   if (events.some(event => event.session_id !== undefined && event.session_id !== init.session_id)) throw claudeBlocked('Claude trace mixes sessions');

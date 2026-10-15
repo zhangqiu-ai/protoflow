@@ -79,7 +79,8 @@ claude -p --output-format stream-json --verbose --json-schema <schema>
 - **原型流程**：決定只能是 `implement` 或 `needs-human`。原型版本是權威，方案不能刪減錨點契約；驗收條件至少涵蓋版本中每個變更的錨點與狀態。
 - **L3** 一律 `needs-human`：沿用提案 0001，架構決策仍需人類 ADR。
 - 方案進入 Codex context 的 `plan` 欄位，指示文字說明：方案是規劃者的建議，原型與分層驗收才是權威；與兩者矛盾的步驟不實作，在報告中說明。
-- **重新規劃**：修復次數用盡、或同一版本被驗收者拒收時，下一輪先重新規劃，並帶上失敗證據。
+- **重新規劃**：修復次數用盡、或同一版本被驗收者拒收時，下一輪先重新規劃，並帶上失敗證據。實作上版本每次開始執行都會重新規劃：資料帶 `rejections` 與 `previous`（上一份方案、嘗試次數、最後的失敗原因）。
+- 原型流程的方案每條驗收條件另帶 `anchors`（涉及的錨點 id）；`targets`、`needs-info`、`reject` 留給 Issues 流程（P4）。
 
 ## 5. 驗收者（獨立審查改為可插拔，預設 Claude）
 
@@ -131,8 +132,8 @@ claude -p --output-format stream-json --verbose --json-schema <schema>
 {
   "adapters": {
     "codex": { "command": { "argv": ["node", "/abs/protoflow/scripts/codex-adapter.js", "--model", "…"] } },
-    "planner": { "provider": "claude", "command": { "argv": ["node", "/abs/protoflow/scripts/claude-adapter.js", "--mode", "plan", "--model", "claude-opus-5-5", "--max-budget-usd", "5"] } },
-    "independentReview": { "provider": "claude", "command": { "argv": ["node", "/abs/protoflow/scripts/claude-adapter.js", "--mode", "review", "--model", "claude-opus-5-5", "--max-budget-usd", "5"] } }
+    "planner": { "command": { "argv": ["node", "/abs/protoflow/scripts/claude-adapter.js", "--model", "claude-opus-5-5", "--max-budget-usd", "5"] } },
+    "independentReview": { "provider": "claude", "command": { "argv": ["node", "/abs/protoflow/scripts/claude-review-adapter.js", "--model", "claude-opus-5-5", "--max-budget-usd", "5"] } }
   },
   "issues": { "enabled": true, "label": "protoflow", "authors": ["OWNER", "MEMBER", "COLLABORATOR"], "targets": ["ios", "android", "flutter"] }
 }
@@ -146,7 +147,7 @@ claude -p --output-format stream-json --verbose --json-schema <schema>
 |---|---|---|
 | P1 Claude adapter | `scripts/claude-adapter.js`、可執行檔解析、trace 驗證器、假 CLI fixture | 單元測試：唯讀工具驗證、結構化輸出、NOT_RUN／BLOCKED 分類 |
 | P2 Claude 驗收者 | 閘門可插拔供應者、`criteria` verdict、cross-provider 記錄 | 既有交付測試全過；Claude 供應者的假 CLI 測試 |
-| P3 規劃者（原型流程） | `PLN` 紀錄、context `plan`、重新規劃 | 單元與 E2E；未配置時行為不變 |
+| P3 規劃者（原型流程） | `PLN` 紀錄、context `plan`、重新規劃 | 單元與 E2E；未配置時行為不變。**已實作**：`src/planner.js`、runner 規劃步驟、交付綁定 `versions[].plan`（見 [integrations](../integrations.md#claude-規劃者提案-0003)） |
 | P4 Issues 收件與分流 | 輪詢、授權、快照、標籤、留言 | 假 `gh` 測試涵蓋每個標籤轉換 |
 | P5 Issues 執行與交付 | Issue worktree、驗證、PR `Fixes #n`、結案 | 本機 Git fixture 走完一次 Issue 交付 |
 | P6 真實驗收 | protoflow-test：一個新原型版本與 3 個 Issue（UI 修正、邏輯修正、需補充資訊）全程零介入 | 全部合併或正確停在 `needs-info`；證據紀錄 |

@@ -1500,3 +1500,35 @@ test('FAKE provider: the Claude acceptor must be the shared adapter with known o
     await assertNoPublication(f);
   }
 });
+
+test('FAKE provider: a planned version binds its plan criteria for the acceptor, who must not be the planner session', async t => {
+  const claudeReview = fileURLToPath(new URL('../scripts/claude-review-adapter.js', import.meta.url));
+  const criteria = [{ id: 'AC1', text: 'FAKE FIXTURE CRITERION: index shows v1', anchors: [], evidence: 'code' }];
+  for (const [name, sessionId, tamper, expected, pattern] of [
+    ['bound', 'planner-session-1', false, 'PASS', null],
+    ['planner reviews', 'fake-session-a', false, 'BLOCKED', /separate fresh session from every planner, executor and author/],
+    ['changed plan', 'planner-session-1', true, 'BLOCKED', /Plan PLN-fixture-1 is missing, changed or belongs to another version/]
+  ]) {
+    const f = await fixture(t); delete process.env.PROTOFLOW_CLAUDE;
+    f.config.adapters.independentReview = { provider: 'claude', command: { argv: [process.execPath, claudeReview, '--model', 'claude-opus-5-5'], timeoutMs: 10000 } };
+    const plan = { decision: 'implement', level: 'L1', summary: 'FAKE FIXTURE PLAN', steps: ['edit index'], acceptanceCriteria: criteria, tests: [], risks: [], questions: [] };
+    await writeJson(path.join(f.worktree, '.protoflow/plans/PLN-fixture-1.json'), { id: 'PLN-fixture-1', manifestId: `git-${f.shas[0]}`, sessionId, plan: tamper ? { ...plan, summary: 'edited later' } : plan, planHash: hash(plan) });
+    const stateFile = path.join(f.root, '.protoflow/source/state.json'), state = await readJson(stateFile);
+    state.entries[0].planId = 'PLN-fixture-1'; await saveSourceState(f.root, state);
+    process.env.FAKE_CLAUDE_MODE = 'review-pass'; process.env.FAKE_CLAUDE_RECORD = path.join(f.base, 'claude-input.json');
+    const result = await syncDeliveries(f.root, f.config); delete process.env.FAKE_CLAUDE_MODE; delete process.env.FAKE_CLAUDE_RECORD;
+    assert.equal(result.status, expected, `${name}: ${JSON.stringify(result)}`);
+    if (expected === 'PASS') {
+      const record = await reviewRecord(f, (await deliveryStatus(f.root)).deliveries[0].independentReviewId);
+      const { binding } = await readJson(path.join(f.root, record.requestFile));
+      assert.deepEqual(binding.versions[0].plan, { id: 'PLN-fixture-1', planHash: hash(plan), sessionId: 'planner-session-1', acceptanceCriteria: criteria });
+      const { input } = await readJson(path.join(f.base, 'claude-input.json'));
+      assert.match(input, /acceptanceCriteria come from an independent planner/); assert.match(input, /FAKE FIXTURE CRITERION: index shows v1/);
+    } else {
+      const delivery = (await deliveryStatus(f.root)).deliveries[0];
+      const reason = delivery?.independentReviewId ? (await reviewRecord(f, delivery.independentReviewId)).reason : JSON.stringify(result);
+      assert.match(reason, pattern, name);
+      await assertNoPublication(f);
+    }
+  }
+});

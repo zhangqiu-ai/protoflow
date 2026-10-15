@@ -216,7 +216,7 @@ async function capture(root, config, options, ownedMerge = null) {
     if (!Object.keys(report.artifactHashes ?? {}).length) throw blocked('Missing hashed acceptance artifacts');
     for (const [file, expected] of Object.entries(report.artifactHashes)) if (hash(await fs.readFile(await projectPath(worktree, file))) !== expected) throw blocked('Acceptance artifact changed');
     // verificationHash binds the authoritative main-root VER; the reviewer reads verificationFile in this checkout.
-    versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), verificationFile: `.protoflow/verifications/${report.id}.json`, verificationFileHash: hash(localReport), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes) });
+    versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), verificationFile: `.protoflow/verifications/${report.id}.json`, verificationFileHash: hash(localReport), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes), ...(entry.planId && { plan: await boundPlan(worktree, entry.planId, manifest.id) }) });
   }
   if (application.hash !== versions.at(-1).applicationHash) throw blocked('Full application content drifted since the newest PASS verification');
   const executors = await executorRecords(root, worktree, entries, options.executorEvidence);
@@ -243,6 +243,13 @@ async function capture(root, config, options, ownedMerge = null) {
     versions, executors, ambientAuthorIds, remote, ...(reviewProvider(config) !== 'codex' && { provider: reviewProvider(config) }), providerExecutable: reviewProvider(config) === 'claude' ? await resolveClaudeExecutable() : await resolveCodexExecutable()
   };
 }
+/** The planner's acceptance criteria for a version (proposal 0003), bound by hash so the acceptor checks exactly them. */
+async function boundPlan(worktree, planId, manifestId) {
+  if (!/^PLN-[A-Za-z0-9-]+$/.test(planId)) throw blocked('Invalid plan id');
+  const record = await readJson(await projectPath(worktree, `.protoflow/plans/${planId}.json`), null);
+  if (!record || record.id !== planId || record.manifestId !== manifestId || record.planHash !== hash(record.plan)) throw blocked(`Plan ${planId} is missing, changed or belongs to another version`);
+  return { id: record.id, planHash: record.planHash, sessionId: record.sessionId, acceptanceCriteria: record.plan.acceptanceCriteria };
+}
 /** A Claude acceptor trace as the gate binds it: the session, the trace hash and the structured verdict. */
 function claudeReview(trace) {
   try { const parsed = readClaudeTrace(trace); return { sessionId: parsed.sessionId, traceHash: parsed.traceHash, verdict: parsed.output }; }
@@ -251,7 +258,7 @@ function claudeReview(trace) {
 function checkRun(run, request) {
   if (!run || Object.keys(run).sort().join(',') !== ['protocol', 'requestId', 'bindingHash', 'provider', 'providerExecutable', 'sandbox', 'freshSession', 'sessionId', 'trace', 'traceHash', 'verdict'].sort().join(',') || run.protocol !== 'protoflow.independent-review-run/1' || run.provider !== providerOf(request.binding) || hash(run.providerExecutable) !== hash(request.binding.providerExecutable) || run.sandbox !== 'read-only' || run.freshSession !== true || run.requestId !== request.id || run.bindingHash !== request.bindingHash || hash(run.trace) !== run.traceHash) throw blocked('Missing genuine structured Codex review run evidence');
   const parsed = providerOf(request.binding) === 'claude' ? claudeReview(run.trace) : readCodexTrace(run.trace, { finalVerdict: true });
-  if (parsed.sessionId !== run.sessionId || hash(parsed.verdict) !== hash(run.verdict) || request.binding.executors.some(record => record.sessionId === run.sessionId) || [...request.binding.ambientAuthorIds, process.env.CODEX_THREAD_ID].includes(run.sessionId)) throw blocked('Review must be a separate fresh session from every executor and author');
+  if (parsed.sessionId !== run.sessionId || hash(parsed.verdict) !== hash(run.verdict) || request.binding.executors.some(record => record.sessionId === run.sessionId) || request.binding.versions.some(version => version.plan?.sessionId === run.sessionId) || [...request.binding.ambientAuthorIds, process.env.CODEX_THREAD_ID].includes(run.sessionId)) throw blocked('Review must be a separate fresh session from every planner, executor and author');
   checkVerdict(run.verdict, request);
 }
 function recordPath(reviewId) {

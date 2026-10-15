@@ -14,7 +14,7 @@ const validId = value => {
   return value;
 };
 export async function loadArtifact(root, kind, artifactId) {
-  if (!['manifests', 'contexts', 'verifications', 'reviews', 'baselines', 'repairs'].includes(kind)) throw new Error('Invalid artifact kind');
+  if (!['manifests', 'contexts', 'verifications', 'reviews', 'baselines', 'repairs', 'plans'].includes(kind)) throw new Error('Invalid artifact kind');
   return readJson(await projectPath(root, `.protoflow/${kind}/${validId(artifactId)}.json`));
 }
 async function persist(root, kind, data) {
@@ -137,7 +137,7 @@ async function assertPlanningFresh(root, manifest, planning) {
     if ((await evidenceFile(root, evidence.path)).hash !== evidence.hash) throw new Error('Planning evidence changed; regenerate context and verification');
   }
 }
-export async function createContext(root, config, manifestId, { spec, adr, target } = {}) {
+export async function createContext(root, config, manifestId, { spec, adr, target, plan = null } = {}) {
   const queue = await assertCurrentVersion(root, config, manifestId, { target });
   const { manifest, version } = await manifestVersion(root, config, manifestId);
   const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
@@ -162,7 +162,8 @@ export async function createContext(root, config, manifestId, { spec, adr, targe
     ...(anchors && { anchors }),
     spec: specEvidence, adr: adrEvidence,
     ...(rejections.length && { rejections }),
-    instructions: `${versionInstructions(version)} ${scopeInstruction}${rejections.length ? ' An earlier accepted implementation was rejected in review and this version was reopened; address every finding in rejections. Treat each finding as a claim to check against the frozen prototype and the verification evidence: fix what the evidence confirms, but do not implement a finding that the prototype or the tiered verification (content-area screenshots, structure, tokens, layout) contradicts; explain that in your report instead, and the next independent review decides.' : ''} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
+    ...(plan && { plan: { id: plan.id, hash: plan.planHash, summary: plan.plan.summary, steps: plan.plan.steps, acceptanceCriteria: plan.plan.acceptanceCriteria, tests: plan.plan.tests, risks: plan.plan.risks } }),
+    instructions: `${versionInstructions(version)} ${scopeInstruction}${plan ? ' A planner (proposal 0003) prepared `plan`: follow its steps, satisfy every acceptance criterion and add its tests; the frozen prototype and the tiered verification stay authoritative, so a plan step that contradicts them is not implemented and is explained in your report.' : ''}${rejections.length ? ' An earlier accepted implementation was rejected in review and this version was reopened; address every finding in rejections. Treat each finding as a claim to check against the frozen prototype and the verification evidence: fix what the evidence confirms, but do not implement a finding that the prototype or the tiered verification (content-area screenshots, structure, tokens, layout) contradicts; explain that in your report instead, and the next independent review decides.' : ''} Preserve prototype and unrelated user changes. Maintain and run repeatable regression tests for the platform. Return execution evidence; ProtoFlow performs independent verification. Do not commit, push or deploy.`,
     verification: isV2(config) ? { build: checkCommands(config, target).build ?? null, functional: checkCommands(config, target).functional ?? null } : config.verification ?? {},
     visual: isV2(config) ? targetSettings(selectTarget(config, target)) : config.visual ?? {}
   });

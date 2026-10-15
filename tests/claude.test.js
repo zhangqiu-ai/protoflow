@@ -26,6 +26,8 @@ test('traces that are not one read-only, completed session are blocked', () => {
     ['', /Missing raw Claude trace/],
     ['not json', /Malformed/],
     [jsonl([read, done()]), /no single session start/],
+    [jsonl([read, init(), done()]), /no single session start/],
+    [jsonl([{ type: 'result', session_id: 'session-0001' }, init(), done()]), /no single session start/],
     [jsonl([init(), init(), done()]), /no single session start/],
     [jsonl([init({ tools: ['Read', 'Bash', 'Edit'] }), done()]), /offered tools beyond read-only: Bash, Edit/],
     [jsonl([init({ permissionMode: 'bypassPermissions' }), done()]), /permission mode bypassPermissions/],
@@ -41,8 +43,8 @@ test('traces that are not one read-only, completed session are blocked', () => {
 });
 
 test('informational events from a real CLI around the result are accepted', () => {
-  // Recorded shape of claude 2.1.299: rate_limit_event mid-session and system task_summary after the result.
-  const trace = jsonl([init(), read, { type: 'rate_limit_event', session_id: 'session-0001' }, { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }, done(), { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }]);
+  // Recorded shape of claude 2.1.299: dev_intent from its project scan before init, thinking_tokens and rate_limit_event mid-session, task_summary after the result.
+  const trace = jsonl([{ type: 'system', subtype: 'dev_intent', kind: 'ios_app', trigger: 'project_scan', session_id: 'session-0001' }, init(), read, { type: 'system', subtype: 'thinking_tokens', session_id: 'session-0001' }, { type: 'rate_limit_event', session_id: 'session-0001' }, { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }, done(), { type: 'system', subtype: 'task_summary', session_id: 'session-0001' }]);
   assert.deepEqual(readClaudeTrace(trace).output, { status: 'PASS' });
 });
 

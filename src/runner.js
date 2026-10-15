@@ -15,6 +15,7 @@ import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
+import { planVersion } from './planner.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -396,10 +397,30 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   let report = null, currentAttempt = null, executionFailure = null;
   try {
     const maximum = config.policy?.maxRepairAttempts ?? 3;
+    // Proposal 0003: Claude plans the version first; a planner that cannot answer leaves the version unplanned.
+    let plan = null;
+    if (config.adapters?.planner?.command) {
+      const planning = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+      // A version that runs again (blocked, reopened by a rejection) is replanned with its earlier plan as evidence.
+      const earlier = entry.planId && /^PLN-[A-Za-z0-9-]+$/.test(entry.planId) ? await readJson(await projectPath(runner.worktree, `.protoflow/plans/${entry.planId}.json`), null) : null;
+      const previous = earlier ? { id: earlier.id, summary: earlier.plan.summary, steps: earlier.plan.steps, acceptanceCriteria: earlier.plan.acceptanceCriteria, attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null } : null;
+      try { plan = await planVersion(runner.worktree, config, planning, { previous, signal }); }
+      catch (error) {
+        if (!error.planner) throw error;
+        entry.planError = { reason: error.message.slice(0, 500), reasonCode: error.reasonCode, at: new Date().toISOString() };
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'plan-failed', sha: entry.sha, manifestId: entry.manifestId, reason: error.message.slice(0, 200) });
+      }
+      if (plan) {
+        entry.planId = plan.id; await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'planned', sha: entry.sha, manifestId: entry.manifestId, planId: plan.id, decision: plan.plan.decision, criteria: plan.plan.acceptanceCriteria.length, costUsd: plan.costUsd });
+        if (plan.plan.decision === 'needs-human') throw new Error(`Planner ${plan.id} needs a person: ${plan.plan.summary}${plan.plan.questions.length ? ` Questions: ${plan.plan.questions.join(' ')}` : ''}`);
+      }
+    }
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
-      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+      const context = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
       const record = { attempt, contextId: context.id, startedAt: new Date().toISOString(), status: 'RUNNING', processes: [] };
       currentAttempt = record;
       entry.attempts.push(record); await saveProgress(root, config, stream, state);
@@ -409,8 +430,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
       const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
       let execution, diagnostic = '', executionContext = context;
-      const plan = executorPlan(config);
-      let provider = plan.primary;
+      const executors = executorPlan(config);
+      let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
           provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }) } : null, signal,
@@ -431,12 +452,12 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         if (execution.status === 'PASS') break;
         diagnostic = executionDiagnostic(execution);
         // The primary executor has no capacity for us (quota, rate limit): the fallback redoes this attempt, once.
-        if (provider === plan.primary && plan.fallback && executorCommand(config, plan.fallback) && EXECUTOR_QUOTA.test(diagnostic)) {
-          record.executorFallback = { from: provider, to: plan.fallback, executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() };
-          provider = plan.fallback;
+        if (provider === executors.primary && executors.fallback && executorCommand(config, executors.fallback) && EXECUTOR_QUOTA.test(diagnostic)) {
+          record.executorFallback = { from: provider, to: executors.fallback, executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() };
+          provider = executors.fallback;
           await saveProgress(root, config, stream, state);
           await onEvent({ event: 'executor-fallback', sha: entry.sha, manifestId: entry.manifestId, attempt, from: record.executorFallback.from, to: provider, reason: diagnostic.slice(-200) });
-          executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+          executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
           record.contextId = executionContext.id; retry -= 1;
           continue;
         }
@@ -447,7 +468,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         try { await delay(retryDelayMs * 2 ** retry, undefined, { signal }); }
         catch { throw new Error('STOPPED: runner was interrupted'); }
         // The failed run may have edited files; a fresh context binds the current application content.
-        executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+        executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
       }
       if (execution.status !== 'PASS') {

@@ -1453,3 +1453,50 @@ test('without a policy the executor stays Codex, and a missing executor adapter 
   await scanSource(root, config);
   assert.deepEqual(await runOnce(root, config), { status: 'NOT_RUN', reason: 'The claude executor adapter is not configured' });
 });
+
+test('FAKE CLI only: a configured planner plans the version first; its plan reaches the executor, needs-human blocks, a failure proceeds unplanned', async t => {
+  const bridge = new URL('../scripts/claude-adapter.js', import.meta.url).pathname;
+  const plan = decision => JSON.stringify({ decision, level: 'L1', summary: 'FAKE FIXTURE PLAN', steps: ['Change the button label'], acceptanceCriteria: [{ id: 'AC1', text: 'The button reads Save', anchors: [], evidence: 'tier' }], tests: [], risks: [], questions: decision === 'implement' ? [] : ['Which backend?'] });
+  const saved = { mode: process.env.FAKE_CLAUDE_MODE, output: process.env.FAKE_CLAUDE_OUTPUT };
+  t.after(() => { for (const [key, value] of [['FAKE_CLAUDE_MODE', saved.mode], ['FAKE_CLAUDE_OUTPUT', saved.output]]) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  process.env.FAKE_CLAUDE_MODE = 'pass';
+  for (const [name, planner, output] of [
+    ['planned', 'claude', plan('implement')],
+    ['needs-human', 'claude', plan('needs-human')],
+    ['failed', null, null]
+  ]) {
+    const { root, config } = await fixture(t);
+    const fakeClaude = path.join(root, '..', 'claude');
+    await fs.copyFile(new URL('./fixtures/fake-claude.cjs', import.meta.url), fakeClaude); await fs.chmod(fakeClaude, 0o755);
+    const received = path.join(root, '..', 'executor-input.json');
+    config.adapters.codex.command.argv = [process.execPath, '-e', `let i='';process.stdin.on('data',c=>i+=c).on('end',()=>{require('node:fs').writeFileSync(process.argv[1],i);console.error('TypeError: executor crashed');process.exit(1)})`, received];
+    config.adapters.planner = { command: { argv: planner ? [process.execPath, bridge, '--claude', fakeClaude] : [process.execPath, '-e', 'process.exit(3)'], timeoutMs: 30000 } };
+    if (output) process.env.FAKE_CLAUDE_OUTPUT = output;
+    await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+    await scanSource(root, config);
+    const events = [];
+    const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+    const entry = (await sourceStatus(root)).entries[0];
+    assert.equal(result.status, 'BLOCKED', name);
+    if (name === 'planned') {
+      const planned = events.find(event => event.event === 'planned')
+      assert.equal(planned.decision, 'implement'); assert.equal(planned.criteria, 1); assert.equal(entry.planId, planned.planId);
+      const input = await fs.readFile(received, 'utf8');
+      assert.match(input, new RegExp(`"id":"${planned.planId}"`)); assert.match(input, /"acceptanceCriteria":\[\{"id":"AC1"/); assert.match(input, /A planner \(proposal 0003\) prepared `plan`/);
+      // Running the blocked version again replans it with the earlier plan and its outcome as evidence.
+      const again = [];
+      await retryRunner(root, config); await runOnce(root, config, { onEvent: event => again.push(event) });
+      const replanned = again.find(event => event.event === 'planned');
+      assert.notEqual(replanned.planId, planned.planId);
+      const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${replanned.planId}/request.json`), 'utf8'));
+      assert.equal(request.data.previous.id, planned.planId); assert.equal(request.data.previous.attempts, 1); assert.match(request.data.previous.lastError, /executor crashed/);
+    } else if (name === 'needs-human') {
+      assert.match(result.reason, /^Planner PLN-\S+ needs a person: FAKE FIXTURE PLAN Questions: Which backend\?/);
+      await assert.rejects(fs.access(received), { code: 'ENOENT' }); assert.equal(entry.attempts.length, 0);
+    } else {
+      assert.match(events.find(event => event.event === 'plan-failed').reason, /did not return a plan run \(FAIL, exit 3\)/);
+      assert.match(entry.planError.reason, /exit 3/); assert.equal(entry.planId, undefined);
+      assert.doesNotMatch(await fs.readFile(received, 'utf8'), /"plan":|A planner \(proposal 0003\)/);
+    }
+  }
+});
