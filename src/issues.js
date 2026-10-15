@@ -15,16 +15,20 @@ const WRITERS = ['admin', 'maintain', 'write'];
 const MAX_TRIAGE_FAILURES = 3;
 const statePath = '.protoflow/issues/state.json';
 
+/** schemaVersion 1 projects have one implicit application target. */
+const issueTargets = config => config.schemaVersion === 2 ? config.targets.map(target => ({ id: target.id, platform: target.platform, root: target.root ?? '.' })) : [{ id: 'application', platform: 'web', root: '.' }];
+/** The target id of a project's single stream (stream null). */
+export const defaultIssueTarget = config => issueTargets(config)[0].id;
+
 export function issueSettings(config) {
   const issues = config.issues;
   if (!issues?.enabled) return null;
-  if (config.schemaVersion !== 2) throw new Error('GitHub Issues automation needs a schemaVersion 2 project with targets');
-  const ids = issues.targets ?? config.targets.map(target => target.id);
-  const unknown = ids.filter(id => !config.targets.some(target => target.id === id));
+  const all = issueTargets(config), ids = issues.targets ?? all.map(target => target.id);
+  const unknown = ids.filter(id => !all.some(target => target.id === id));
   if (unknown.length) throw new Error(`issues.targets names unknown targets: ${unknown.join(', ')}`);
   return {
     label: issues.label ?? 'protoflow', authors: issues.authors ?? ['OWNER', 'MEMBER', 'COLLABORATOR'],
-    targets: config.targets.filter(target => ids.includes(target.id)).map(target => ({ id: target.id, platform: target.platform, root: target.root ?? '.' })),
+    targets: all.filter(target => ids.includes(target.id)),
     maxTriagePerSync: issues.maxTriagePerSync ?? 3, remote: issues.remote ?? config.runner?.delivery?.remote ?? 'origin'
   };
 }
@@ -43,7 +47,12 @@ export async function syncIssues(root, config, { onEvent = () => {}, signal } = 
   return withLock(root, () => sync(root, config, settings, { onEvent, signal }), 'issues');
 }
 
-async function sync(root, config, settings, { onEvent, signal }) {
+/**
+ * The shared issue session: canonical repository, durable state and the publication step. Each published status is
+ * recorded as `pending` first and finished by publish(); a crash in between resumes the same comment by its marker.
+ */
+export async function openIssues(root, config) {
+  const settings = issueSettings(config);
   const { repository } = await resolveDeliveryDestination(root, settings.remote);
   const file = await projectPath(root, statePath);
   const state = await readJson(file, null) ?? { schemaVersion: 1, repository: { id: repository.id, nameWithOwner: repository.nameWithOwner }, issues: {} };
@@ -51,6 +60,29 @@ async function sync(root, config, settings, { onEvent, signal }) {
   const save = () => writeJson(file, state);
   const api = (endpoint, options) => githubApi(root, repository, endpoint, options);
   const base = `repos/${repository.nameWithOwner}`;
+  async function publish(entry, pending) {
+    const comments = await api(`${base}/issues/${entry.number}/comments?per_page=100`);
+    let comment = comments.find(item => (item.body ?? '').startsWith(pending.marker));
+    comment ??= await api(`${base}/issues/${entry.number}/comments`, { method: 'POST', body: { body: pending.body } });
+    const current = labelNames(await api(`${base}/issues/${entry.number}`));
+    const target = statusLabel(settings, pending.status);
+    if (!current.includes(target)) await api(`${base}/issues/${entry.number}/labels`, { method: 'POST', body: { labels: [target] } });
+    for (const name of current.filter(name => name !== target && ISSUE_STATUSES.some(status => statusLabel(settings, status) === name))) {
+      await api(`${base}/issues/${entry.number}/labels/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    }
+    if (pending.close) await api(`${base}/issues/${entry.number}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
+    const after = await api(`${base}/issues/${entry.number}`);
+    Object.assign(entry, { status: pending.status, decidedAt: comment.created_at ?? new Date().toISOString(), commentId: comment.id, commentCount: after.comments ?? 0, reason: pending.reason });
+    entry.history.push({ status: pending.status, at: new Date().toISOString(), ...(pending.snapshotId && { snapshotId: pending.snapshotId }), ...(pending.planId && { planId: pending.planId }), commentId: comment.id, ...(pending.reason && { reason: pending.reason }) });
+    delete entry.pending; await save();
+  }
+  /** Record a new status durably, then publish its AI-labelled comment and label. */
+  async function transition(entry, pending) { entry.pending = pending; await save(); await publish(entry, pending); }
+  return { settings, repository, state, save, api, base, publish, transition };
+}
+
+async function sync(root, config, settings, { onEvent, signal }) {
+  const { repository, state, save, api, base, publish, transition } = await openIssues(root, config);
 
   const wanted = ISSUE_STATUSES.map(status => statusLabel(settings, status));
   if (state.labels !== hash(wanted)) {
@@ -117,7 +149,7 @@ async function sync(root, config, settings, { onEvent, signal }) {
     const content = {
       number, repository: { id: repository.id, nameWithOwner: repository.nameWithOwner }, title: issue.title, body: issue.body ?? '', author: issue.user?.login ?? null,
       authorAssociation: issue.author_association, labels: labelNames(issue), updatedAt: issue.updated_at,
-      comments: comments.map(comment => ({ id: comment.id, author: comment.user?.login ?? null, authorAssociation: comment.author_association, body: comment.body ?? '', createdAt: comment.created_at, ours: (comment.body ?? '').startsWith('<!-- protoflow:triage ') }))
+      comments: comments.map(comment => ({ id: comment.id, author: comment.user?.login ?? null, authorAssociation: comment.author_association, body: comment.body ?? '', createdAt: comment.created_at, ours: (comment.body ?? '').startsWith('<!-- protoflow:') }))
     };
     const snapshot = { schemaVersion: 1, id: `ISS-${number}-${hash(content).slice(0, 12)}`, capturedAt: new Date().toISOString(), ...content, hash: hash(content) };
     await writeJson(await projectPath(root, `.protoflow/issues/snapshots/${snapshot.id}.json`), snapshot);
@@ -134,28 +166,9 @@ async function sync(root, config, settings, { onEvent, signal }) {
     const record = await readJson(await projectPath(root, `.protoflow/plans/${entry.planId}.json`), null);
     return record ? { id: record.id, decision: record.plan.decision, summary: record.plan.summary, questions: record.plan.questions } : null;
   }
-  /** Record the decision durably first, then publish it; a crash in between resumes the same publication. */
   async function decide(entry, snapshot, plan, status, reason = null) {
-    entry.pending = { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, body: commentBody(settings, snapshot, plan, status, reason) };
     entry.snapshotId = snapshot.id; if (plan) { entry.planId = plan.id; delete entry.error; }
-    await save();
-    await publish(entry, entry.pending);
-  }
-  async function publish(entry, pending) {
-    const comments = await api(`${base}/issues/${entry.number}/comments?per_page=100`);
-    const tag = marker(pending.snapshotId, pending.planId);
-    let comment = comments.find(item => (item.body ?? '').startsWith(tag));
-    comment ??= await api(`${base}/issues/${entry.number}/comments`, { method: 'POST', body: { body: pending.body } });
-    const current = labelNames(await api(`${base}/issues/${entry.number}`));
-    const target = statusLabel(settings, pending.status);
-    if (!current.includes(target)) await api(`${base}/issues/${entry.number}/labels`, { method: 'POST', body: { labels: [target] } });
-    for (const name of current.filter(name => name !== target && ISSUE_STATUSES.some(status => statusLabel(settings, status) === name))) {
-      await api(`${base}/issues/${entry.number}/labels/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    }
-    const after = await api(`${base}/issues/${entry.number}`);
-    Object.assign(entry, { status: pending.status, decidedAt: comment.created_at ?? new Date().toISOString(), commentId: comment.id, commentCount: after.comments ?? 0, reason: pending.reason });
-    entry.history.push({ status: pending.status, at: new Date().toISOString(), snapshotId: pending.snapshotId, planId: pending.planId, commentId: comment.id, ...(pending.reason && { reason: pending.reason }) });
-    delete entry.pending; await save();
+    await transition(entry, { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, marker: marker(snapshot.id, plan?.id), body: commentBody(settings, snapshot, plan, status, reason) });
   }
 }
 

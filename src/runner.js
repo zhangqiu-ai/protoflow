@@ -17,6 +17,7 @@ import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLo
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { planVersion } from './planner.js';
 import { syncIssues } from './issues.js';
+import { runIssues } from './issue-runner.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -118,7 +119,7 @@ async function syncCheckpoints(root, worktree, state, config) {
     }
   }
 }
-async function exportEvidence(root, worktree, report) {
+export async function exportEvidence(root, worktree, report) {
   for (const [relative, expected] of Object.entries(report.artifactHashes)) {
     const source = await projectPath(worktree, relative);
     if (hash(await fs.readFile(source)) !== expected) throw new Error(`Verification artifact changed: ${relative}`);
@@ -180,7 +181,7 @@ async function reopenRejected(root, config, stream) {
 /** The executor provider has no capacity for us right now; with a fallback configured, the other executor takes over. */
 export const EXECUTOR_QUOTA = /usage limit|rate.?limit|quota|credit balance|overloaded|\b(?:429|529)\b|too many requests|model is at capacity/i;
 export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
-function executionDiagnostic(execution) {
+export function executionDiagnostic(execution) {
   let diagnostic = execution.result.error;
   for (const line of execution.result.stdout.split('\n')) {
     try {
@@ -525,7 +526,7 @@ const DEVICE_SERVICE = new RegExp(`qemu-system|${SDK_EMULATOR ? escape(path.join
  * Codex run kept downloading for 40 minutes), and Xcode helpers keep a worktree as their directory. After each phase,
  * whatever still works in the runner worktree belongs to that phase: stop it and record it in the attempt.
  */
-async function reapLeftovers(root, worktree, record, phase, onEvent) {
+export async function reapLeftovers(root, worktree, record, phase, onEvent) {
   let leftovers;
   try { leftovers = await processesUsing(root, worktree, { commandLines: false }); }
   catch (error) { record.leftoverCheck = { phase, error: error.message }; return []; }
@@ -665,6 +666,11 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         let result;
         do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
         while (result.status === 'PASS' && !signal?.aborted);
+        // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
+        if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
+          try { const issue = await runIssues(root, config, stream, { signal, onEvent: events }); if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue }); }
+          catch (error) { await events({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+        }
         results[stream ?? ''] = result;
       }
       last = streams[0] === null ? results[''] : aggregate(results);

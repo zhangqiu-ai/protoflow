@@ -30,6 +30,7 @@ if (kind === 'issues' && !number && method === 'GET') {
   out(state.issues.filter(item => (item.state ?? 'open') === 'open' && item.labels.includes(label)).map(view));
 }
 if (kind === 'issues' && number && !sub && method === 'GET') out(view(issue()));
+if (kind === 'issues' && number && !sub && method === 'PATCH') { const item = issue(); item.state = body.state; item.stateReason = body.state_reason; out(view(item)); }
 if (kind === 'issues' && sub === 'comments') {
   const item = issue();
   if (method === 'GET') out(item.comments.map(comment => ({ id: comment.id, user: { login: comment.author }, author_association: comment.association ?? 'OWNER', body: comment.body, created_at: comment.createdAt })));

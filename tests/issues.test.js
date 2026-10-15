@@ -43,7 +43,7 @@ async function fixture(t, issues) {
 test('settings: disabled projects do nothing; issues need targets that exist', async t => {
   const { root, config } = await fixture(t, []);
   assert.deepEqual(await syncIssues(root, { ...config, issues: { enabled: false } }), { status: 'DISABLED' });
-  assert.throws(() => issueSettings({ schemaVersion: 1, issues: { enabled: true } }), /schemaVersion 2/);
+  assert.deepEqual(issueSettings({ schemaVersion: 1, issues: { enabled: true } }).targets, [{ id: 'application', platform: 'web', root: '.' }]);
   assert.throws(() => issueSettings({ ...config, issues: { enabled: true, targets: ['web'] } }), /unknown targets: web/);
   assert.deepEqual(issueSettings(config), { label: 'protoflow', authors: ['OWNER', 'MEMBER', 'COLLABORATOR'], targets: [{ id: 'ios', platform: 'ios', root: 'ios' }, { id: 'flutter', platform: 'flutter', root: 'flutter' }], maxTriagePerSync: 3, remote: 'origin' });
 });
@@ -169,4 +169,10 @@ test('the v2 config schema accepts the issues block and rejects unknown authors 
     assert.equal(validate({ ...base, issues: { enabled: true, label: 'protoflow', authors: ['OWNER', 'MEMBER'], targets: ['flutter'], maxTriagePerSync: 2, remote: 'origin' } }), true, JSON.stringify(validate.errors));
     for (const issues of [{ enabled: true, authors: ['ANYONE'] }, { enabled: true, label: 'proto flow' }, { label: 'protoflow' }, { enabled: true, extra: 1 }]) assert.equal(validate({ ...base, issues }), false, JSON.stringify(issues));
   }
+});
+
+test('test sources are recognised on every platform the plan may name', async () => {
+  const { TEST_FILE } = await import('../src/issue-runner.js');
+  for (const file of ['flutter/test/widget_test.dart', 'ios/AppTests/CounterTests.swift', 'ios/AppUITests/LaunchTest.swift', 'android/app/src/test/java/CounterTest.kt', 'android/app/src/androidTest/java/Flow.kt', 'web/src/counter.test.ts', 'web/e2e/login.spec.js', 'web/__tests__/a.js', 'flutter/integration_test/app.dart', 'go/counter_test.go']) assert.ok(TEST_FILE.test(file), file);
+  for (const file of ['flutter/lib/main.dart', 'ios/App/ContentView.swift', 'android/app/src/main/java/Testament.kt', 'web/src/latest.ts', 'docs/testing.md']) assert.equal(TEST_FILE.test(file), false, file);
 });
