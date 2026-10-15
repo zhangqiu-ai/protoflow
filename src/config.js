@@ -56,6 +56,13 @@ export const configSchemaV2 = {
   properties: {
     schemaVersion: { const: 2 }, prototypeDir: shared.prototypeDir, source: shared.source, runner: shared.runner,
     classification: shared.classification, policy: shared.policy, watch: shared.watch, adapters: shared.adapters,
+    // Proposal 0003 §6: GitHub Issues intake, triage and (P5) implementation.
+    issues: { type: 'object', additionalProperties: false, required: ['enabled'], properties: {
+      enabled: { type: 'boolean' }, label: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$' },
+      authors: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] } },
+      targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
+      maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
+    } },
     anchors: { type: 'object', additionalProperties: false, properties: {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
       tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }

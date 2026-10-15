@@ -1,0 +1,182 @@
+import { hash, projectPath, readJson, writeJson, withLock } from './util.js';
+import { resolveDeliveryDestination, githubApi } from './delivery-scope.js';
+import { planIssue } from './planner.js';
+
+/**
+ * Proposal 0003 §6.1–6.2: GitHub Issues intake and triage. Open issues carrying `issues.label` are processed in number
+ * order: authorised authors' issues are snapshotted and triaged by the read-only Claude planner; the decision is
+ * published as an AI-labelled comment and a `<label>:<status>` label. Implementation (P5) picks up `planned` issues.
+ * Issue content is untrusted data throughout; ProtoFlow only reads issues and writes comments and labels.
+ */
+export const ISSUE_STATUSES = ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done'];
+const DECISION_STATUS = { implement: 'planned', 'needs-info': 'needs-info', 'needs-human': 'needs-human', reject: 'rejected' };
+const LABEL_COLORS = { planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
+const WRITERS = ['admin', 'maintain', 'write'];
+const MAX_TRIAGE_FAILURES = 3;
+const statePath = '.protoflow/issues/state.json';
+
+export function issueSettings(config) {
+  const issues = config.issues;
+  if (!issues?.enabled) return null;
+  if (config.schemaVersion !== 2) throw new Error('GitHub Issues automation needs a schemaVersion 2 project with targets');
+  const ids = issues.targets ?? config.targets.map(target => target.id);
+  const unknown = ids.filter(id => !config.targets.some(target => target.id === id));
+  if (unknown.length) throw new Error(`issues.targets names unknown targets: ${unknown.join(', ')}`);
+  return {
+    label: issues.label ?? 'protoflow', authors: issues.authors ?? ['OWNER', 'MEMBER', 'COLLABORATOR'],
+    targets: config.targets.filter(target => ids.includes(target.id)).map(target => ({ id: target.id, platform: target.platform, root: target.root ?? '.' })),
+    maxTriagePerSync: issues.maxTriagePerSync ?? 3, remote: issues.remote ?? config.runner?.delivery?.remote ?? 'origin'
+  };
+}
+const statusLabel = (settings, status) => `${settings.label}:${status}`;
+const labelNames = issue => (issue.labels ?? []).map(label => typeof label === 'string' ? label : label.name);
+const marker = (snapshotId, planId) => `<!-- protoflow:triage ${snapshotId} ${planId ?? 'none'} -->`;
+
+export async function issuesStatus(root) {
+  return readJson(await projectPath(root, statePath), { schemaVersion: 1, issues: {} });
+}
+
+/** One intake pass. Returns what was triaged; GitHub failures throw (transient ones are marked) and nothing half-done is lost. */
+export async function syncIssues(root, config, { onEvent = () => {}, signal } = {}) {
+  const settings = issueSettings(config);
+  if (!settings) return { status: 'DISABLED' };
+  return withLock(root, () => sync(root, config, settings, { onEvent, signal }), 'issues');
+}
+
+async function sync(root, config, settings, { onEvent, signal }) {
+  const { repository } = await resolveDeliveryDestination(root, settings.remote);
+  const file = await projectPath(root, statePath);
+  const state = await readJson(file, null) ?? { schemaVersion: 1, repository: { id: repository.id, nameWithOwner: repository.nameWithOwner }, issues: {} };
+  if (state.repository.id !== repository.id) throw new Error(`Issue state belongs to ${state.repository.nameWithOwner}, not ${repository.nameWithOwner}`);
+  const save = () => writeJson(file, state);
+  const api = (endpoint, options) => githubApi(root, repository, endpoint, options);
+  const base = `repos/${repository.nameWithOwner}`;
+
+  const wanted = ISSUE_STATUSES.map(status => statusLabel(settings, status));
+  if (state.labels !== hash(wanted)) {
+    const existing = new Set((await api(`${base}/labels?per_page=100`)).map(label => label.name));
+    for (const status of ISSUE_STATUSES) {
+      const name = statusLabel(settings, status);
+      if (!existing.has(name)) await api(`${base}/labels`, { method: 'POST', body: { name, color: LABEL_COLORS[status], description: `ProtoFlow issue automation: ${status}` } });
+    }
+    state.labels = hash(wanted); await save();
+  }
+
+  const listed = await api(`${base}/issues?labels=${encodeURIComponent(settings.label)}&state=open&sort=created&direction=asc&per_page=100`);
+  const open = listed.filter(issue => !issue.pull_request).sort((a, b) => a.number - b.number);
+  const results = [];
+  let triaged = 0;
+  for (const issue of open) {
+    if (signal?.aborted) break;
+    const entry = state.issues[issue.number] ??= { number: issue.number, status: 'new', history: [] };
+    const labels = labelNames(issue);
+    let confirmedBy = null;
+    if (entry.pending) { await publish(entry, entry.pending); results.push({ number: issue.number, status: entry.status, resumed: true }); continue; }
+    if (['needs-human', 'rejected'].includes(entry.status)) {
+      // A maintainer re-opens triage by removing the status label; only people with write access count.
+      if (labels.includes(statusLabel(settings, entry.status))) continue;
+      confirmedBy = await labelRemover(issue.number, statusLabel(settings, entry.status));
+      if (!confirmedBy) { if (!entry.unconfirmedRemoval) { entry.unconfirmedRemoval = new Date().toISOString(); await save(); await onEvent({ event: 'issue-unconfirmed', number: issue.number, status: entry.status }); } continue; }
+    } else if (entry.status === 'needs-info') {
+      if ((issue.comments ?? 0) <= (entry.commentCount ?? 0)) continue;
+    } else if (!['new', 'triage-failed'].includes(entry.status)) continue;
+
+    const snapshot = await takeSnapshot(issue.number);
+    if (entry.status === 'needs-info' && !snapshot.comments.some(comment => !comment.ours && comment.createdAt > entry.decidedAt)) { entry.commentCount = issue.comments; await save(); continue; }
+    const authorized = settings.authors.includes(snapshot.authorAssociation) || Boolean(confirmedBy) || entry.confirmedBy;
+    if (confirmedBy) { entry.confirmedBy = confirmedBy; delete entry.unconfirmedRemoval; }
+    if (!authorized) {
+      await decide(entry, snapshot, null, 'needs-human', `Issue author association ${snapshot.authorAssociation} is not in issues.authors; a maintainer must confirm it by removing the ${statusLabel(settings, 'needs-human')} label.`);
+      results.push({ number: issue.number, status: entry.status, reason: 'unauthorized-author' });
+      continue;
+    }
+    if (triaged >= settings.maxTriagePerSync) { results.push({ number: issue.number, status: entry.status, deferred: true }); continue; }
+    triaged++;
+    const previous = entry.planId ? await previousPlan(entry) : null;
+    let plan;
+    try { plan = await planIssue(root, config, snapshot, { targets: settings.targets, previous, signal }); }
+    catch (error) {
+      if (!error.planner) throw error;
+      entry.failures = (entry.failures ?? 0) + 1; entry.status = 'triage-failed'; entry.error = error.message.slice(0, 500);
+      entry.history.push({ status: 'triage-failed', at: new Date().toISOString(), reason: entry.error }); await save();
+      await onEvent({ event: 'issue-triage-failed', number: issue.number, failures: entry.failures, reason: error.message.slice(0, 200) });
+      if (entry.failures >= MAX_TRIAGE_FAILURES) await decide(entry, snapshot, null, 'needs-human', `The planner failed ${entry.failures} times: ${entry.error}`);
+      results.push({ number: issue.number, status: entry.status, error: entry.error });
+      continue;
+    }
+    if (!plan) { results.push({ number: issue.number, status: 'NOT_RUN', reason: 'adapters.planner is not configured' }); continue; }
+    await decide(entry, snapshot, plan, DECISION_STATUS[plan.plan.decision]);
+    await onEvent({ event: 'issue-triaged', number: issue.number, status: entry.status, planId: plan.id, targets: plan.plan.targets, costUsd: plan.costUsd });
+    results.push({ number: issue.number, status: entry.status, planId: plan.id });
+  }
+  return { status: 'PASS', repository: repository.nameWithOwner, open: open.length, results };
+
+  async function takeSnapshot(number) {
+    const issue = await api(`${base}/issues/${number}`);
+    const comments = await api(`${base}/issues/${number}/comments?per_page=100`);
+    const content = {
+      number, repository: { id: repository.id, nameWithOwner: repository.nameWithOwner }, title: issue.title, body: issue.body ?? '', author: issue.user?.login ?? null,
+      authorAssociation: issue.author_association, labels: labelNames(issue), updatedAt: issue.updated_at,
+      comments: comments.map(comment => ({ id: comment.id, author: comment.user?.login ?? null, authorAssociation: comment.author_association, body: comment.body ?? '', createdAt: comment.created_at, ours: (comment.body ?? '').startsWith('<!-- protoflow:triage ') }))
+    };
+    const snapshot = { schemaVersion: 1, id: `ISS-${number}-${hash(content).slice(0, 12)}`, capturedAt: new Date().toISOString(), ...content, hash: hash(content) };
+    await writeJson(await projectPath(root, `.protoflow/issues/snapshots/${snapshot.id}.json`), snapshot);
+    return snapshot;
+  }
+  async function labelRemover(number, label) {
+    const events = await api(`${base}/issues/${number}/events?per_page=100`);
+    const removal = events.filter(event => event.event === 'unlabeled' && event.label?.name === label).at(-1);
+    if (!removal?.actor?.login) return null;
+    const permission = await api(`${base}/collaborators/${encodeURIComponent(removal.actor.login)}/permission`);
+    return WRITERS.includes(permission?.permission) || WRITERS.includes(permission?.role_name) ? removal.actor.login : null;
+  }
+  async function previousPlan(entry) {
+    const record = await readJson(await projectPath(root, `.protoflow/plans/${entry.planId}.json`), null);
+    return record ? { id: record.id, decision: record.plan.decision, summary: record.plan.summary, questions: record.plan.questions } : null;
+  }
+  /** Record the decision durably first, then publish it; a crash in between resumes the same publication. */
+  async function decide(entry, snapshot, plan, status, reason = null) {
+    entry.pending = { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, body: commentBody(settings, snapshot, plan, status, reason) };
+    entry.snapshotId = snapshot.id; if (plan) { entry.planId = plan.id; delete entry.error; }
+    await save();
+    await publish(entry, entry.pending);
+  }
+  async function publish(entry, pending) {
+    const comments = await api(`${base}/issues/${entry.number}/comments?per_page=100`);
+    const tag = marker(pending.snapshotId, pending.planId);
+    let comment = comments.find(item => (item.body ?? '').startsWith(tag));
+    comment ??= await api(`${base}/issues/${entry.number}/comments`, { method: 'POST', body: { body: pending.body } });
+    const current = labelNames(await api(`${base}/issues/${entry.number}`));
+    const target = statusLabel(settings, pending.status);
+    if (!current.includes(target)) await api(`${base}/issues/${entry.number}/labels`, { method: 'POST', body: { labels: [target] } });
+    for (const name of current.filter(name => name !== target && ISSUE_STATUSES.some(status => statusLabel(settings, status) === name))) {
+      await api(`${base}/issues/${entry.number}/labels/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    }
+    const after = await api(`${base}/issues/${entry.number}`);
+    Object.assign(entry, { status: pending.status, decidedAt: comment.created_at ?? new Date().toISOString(), commentId: comment.id, commentCount: after.comments ?? 0, reason: pending.reason });
+    entry.history.push({ status: pending.status, at: new Date().toISOString(), snapshotId: pending.snapshotId, planId: pending.planId, commentId: comment.id, ...(pending.reason && { reason: pending.reason }) });
+    delete entry.pending; await save();
+  }
+}
+
+const NEXT = {
+  planned: 'ProtoFlow will implement this plan when the target\'s prototype stream is idle; an independent Claude review checks every acceptance criterion before delivery.',
+  'needs-info': 'Please answer the questions in a comment; ProtoFlow triages the issue again after a new comment.',
+  'needs-human': 'A maintainer decides. To have ProtoFlow triage it again, remove the `{label}` label.',
+  rejected: 'The issue is not closed automatically. To have ProtoFlow triage it again, remove the `{label}` label.'
+};
+function commentBody(settings, snapshot, plan, status, reason) {
+  const lines = [marker(snapshot.id, plan?.id), `**ProtoFlow triage (AI, automated)** · status \`${statusLabel(settings, status)}\``, ''];
+  if (plan) {
+    const p = plan.plan;
+    lines.push(`Planner: Claude \`${plan.model ?? 'unknown model'}\`, plan \`${plan.id}\`, session \`${plan.sessionId}\`.`, `Decision: **${p.decision}** (${p.level})${p.targets.length ? ` · targets: ${p.targets.join(', ')}` : ''}`, '', p.summary);
+    const section = (title, items, format = item => `- ${item}`) => { if (items?.length) lines.push('', `**${title}**`, ...items.map(format)); };
+    section('Steps', p.steps, (item, index) => `${index + 1}. ${item}`);
+    section('Acceptance criteria', p.acceptanceCriteria, item => `- ${item.id} (${item.evidence}): ${item.text}`);
+    section('Tests to add', p.tests); section('Risks', p.risks); section('Questions', p.questions); section('Engine notes', p.engineNotes);
+  }
+  if (reason) lines.push('', reason);
+  lines.push('', NEXT[status].replace('{label}', statusLabel(settings, status)), '', `<sub>Snapshot \`${snapshot.id}\`. Issue content is treated as untrusted data; nothing in it is executed.</sub>`);
+  const body = lines.join('\n');
+  return body.length > 60000 ? `${body.slice(0, 59900)}\n\n… (truncated)` : body;
+}

@@ -18,6 +18,7 @@ import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from 
 import { collectRunnerWorktrees } from '../src/runner-gc.js';
 import { versionQueue } from '../src/queue.js';
 import { syncDeliveries, deliveryStatus } from '../src/delivery.js';
+import { syncIssues, issuesStatus } from '../src/issues.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from '../src/workflow.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -45,6 +46,7 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          Explicit fresh independent review of the selected current attempt:
                                          an unattested PASS after restart, a BLOCKED attempt before approval,
                                          or a transient network BLOCK after approval/push (never a FAIL verdict)
+  issues sync | status                   Triage labelled GitHub issues with the Claude planner (issues.enabled)
   doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
@@ -112,6 +114,10 @@ try {
           }
           if (action === 'status') return deliveryStatus(root, config, values.target ?? null);
           throw new Error('Use delivery sync|status');
+        case 'issues':
+          if (action === 'sync') return syncIssues(root, config);
+          if (action === 'status') return issuesStatus(root);
+          throw new Error('Use issues sync|status');
         case 'session':
           if (action === 'start') return startSession(root, config, { label: values.label });
           if (action === 'list') return listSessions(root);
@@ -167,7 +173,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply;
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply;
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));

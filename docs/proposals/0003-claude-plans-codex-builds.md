@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 已接受（2026-10-14），決策見 §9；P1 實作中 |
+| 狀態 | 已接受（2026-10-14），決策見 §9；P1–P4 已實作，P5 進行中 |
 | 前置 | [提案 0001](0001-anchor-contracts.md)（錨點、分層驗收、獨立審查）、[提案 0002](0002-android-flutter.md)、v0.3.6 |
 | 影響範圍 | 新增規劃者角色與 Claude adapter；獨立審查改為可插拔供應者並預設 Claude；新增 Issue 串流（收件、分流、執行、交付、結案） |
 
@@ -148,7 +148,7 @@ claude -p --output-format stream-json --verbose --json-schema <schema>
 | P1 Claude adapter | `scripts/claude-adapter.js`、可執行檔解析、trace 驗證器、假 CLI fixture | 單元測試：唯讀工具驗證、結構化輸出、NOT_RUN／BLOCKED 分類 |
 | P2 Claude 驗收者 | 閘門可插拔供應者、`criteria` verdict、cross-provider 記錄 | 既有交付測試全過；Claude 供應者的假 CLI 測試 |
 | P3 規劃者（原型流程） | `PLN` 紀錄、context `plan`、重新規劃 | 單元與 E2E；未配置時行為不變。**已實作**：`src/planner.js`、runner 規劃步驟、交付綁定 `versions[].plan`（見 [integrations](../integrations.md#claude-規劃者提案-0003)） |
-| P4 Issues 收件與分流 | 輪詢、授權、快照、標籤、留言 | 假 `gh` 測試涵蓋每個標籤轉換 |
+| P4 Issues 收件與分流 | 輪詢、授權、快照、標籤、留言 | 假 `gh` 測試涵蓋每個標籤轉換。**已實作**：`src/issues.js`、`protoflow issues sync|status`、runner 每輪分流（見 [integrations](../integrations.md#github-issues-收件與分流提案-0003-p4)） |
 | P5 Issues 執行與交付 | Issue worktree、驗證、PR `Fixes #n`、結案 | 本機 Git fixture 走完一次 Issue 交付 |
 | P6 真實驗收 | protoflow-test：一個新原型版本與 3 個 Issue（UI 修正、邏輯修正、需補充資訊）全程零介入 | 全部合併或正確停在 `needs-info`；證據紀錄 |
 

@@ -80,7 +80,7 @@ export async function applicationHygiene(root, files) {
 }
 /** `active` serializes application-side work; `design` serializes prototype sessions so both sides can run concurrently. */
 export async function withLock(root, action, name = 'active') {
-  if (!['active', 'design', 'runner'].includes(name)) throw new Error(`Unknown lock: ${name}`);
+  if (!['active', 'design', 'runner', 'issues'].includes(name)) throw new Error(`Unknown lock: ${name}`);
   const directory = await projectPath(root, `.protoflow/${name}.lock`);
   await mkdir(path.dirname(directory), { recursive: true });
   try { await mkdir(directory); } catch (error) {

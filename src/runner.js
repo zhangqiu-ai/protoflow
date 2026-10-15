@@ -16,6 +16,7 @@ import { staticContract } from './anchors.js';
 import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { planVersion } from './planner.js';
+import { syncIssues } from './issues.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -667,6 +668,11 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         results[stream ?? ''] = result;
       }
       last = streams[0] === null ? results[''] : aggregate(results);
+      // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
+      if (config.issues?.enabled && !signal?.aborted) {
+        try { await syncIssues(root, config, { onEvent, signal }); }
+        catch (error) { await onEvent({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+      }
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
       if (once || stuck) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }

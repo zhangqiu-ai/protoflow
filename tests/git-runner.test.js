@@ -1500,3 +1500,15 @@ test('FAKE CLI only: a configured planner plans the version first; its plan reac
     }
   }
 });
+
+test('issue triage runs after the prototype streams and its failure never stops the runner', async t => {
+  const { root, config } = await fixture(t);
+  // A schemaVersion 1 project cannot enable issues: the pass fails, is reported, and the version still runs.
+  await scanSource(root, config);
+  const events = [];
+  const result = await startRunner(root, { ...config, issues: { enabled: true } }, { once: true, onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED');
+  const names = events.map(event => event.event);
+  assert.ok(names.indexOf('execute') < names.indexOf('issues-failed'), names.join(','));
+  assert.match(events.find(event => event.event === 'issues-failed').error, /needs a schemaVersion 2 project/);
+});
