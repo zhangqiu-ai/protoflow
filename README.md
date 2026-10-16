@@ -201,7 +201,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 角色分開，原型對齊與 GitHub Issues 走同一條鏈：Claude 規劃 → 執行者實作 → 引擎分層驗證 → Claude 驗收 → 交付。
 
 - **規劃者**（`adapters.planner`，`scripts/claude-adapter.js`，建議 `claude-opus-5-5`）：唯讀 session，為每個原型版本產出步驟、逐條驗收條件、需新增的測試與風險；L3 一律交給人。
-- **執行者**（`policy.executor`）：預設 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），額度不足時同一個 attempt 改由 Codex 重做；未配置時維持 Codex。
+- **執行者**（`policy.executor`）：可依工作分流（`routes`）：前端與原型交給 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），後端交給 Codex；任一邊額度不足時，同一個 attempt 改由另一邊重做。未配置時維持 Codex。
 - **驗收者**（`adapters.independentReview.provider: "claude"`）：唯讀、全新 session，逐條檢查方案的驗收條件；不得與規劃者或執行者是同一 session。
 - **GitHub Issues**（`issues.enabled`）：帶 `protoflow` 標籤、作者為 OWNER／MEMBER／COLLABORATOR 的 Issue 由規劃者分流（`planned`、`needs-info`、`needs-human`、`rejected`，決定以標示為 AI 的留言發布）。原型優先：target 閒置且原型都已交付時，`planned` 的 Issue 才在該 target 實作，並重新驗證最新已接受的原型版本，再審查、以 `Fixes #n` 的 PR 合併並結案。
 

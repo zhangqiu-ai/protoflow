@@ -13,7 +13,7 @@ import { githubApi } from '../src/delivery-scope.js';
 const exec = promisify(execFile);
 const fixtures = new URL('./fixtures/', import.meta.url);
 const bridge = fileURLToPath(new URL('../scripts/claude-adapter.js', import.meta.url));
-const plan = extra => JSON.stringify({ decision: 'implement', level: 'L1', targets: ['flutter'], summary: 'FAKE FIXTURE PLAN: fix the counter', steps: ['Change the counter'], acceptanceCriteria: [{ id: 'AC1', text: 'The counter starts at zero', evidence: 'test' }], tests: ['Counter widget test'], risks: [], questions: [], ...extra });
+const plan = extra => JSON.stringify({ decision: 'implement', level: 'L1', area: 'frontend', targets: ['flutter'], summary: 'FAKE FIXTURE PLAN: fix the counter', steps: ['Change the counter'], acceptanceCriteria: [{ id: 'AC1', text: 'The counter starts at zero', evidence: 'test' }], tests: ['Counter widget test'], risks: [], questions: [], ...extra });
 const issue = (number, extra = {}) => ({ number, title: `Issue ${number}`, body: 'FAKE FIXTURE ISSUE', author: 'owner', association: 'OWNER', labels: ['protoflow'], comments: [], ...extra });
 
 async function fixture(t, issues) {
@@ -197,4 +197,19 @@ test('FAKE gh and CLI only: stopped work from 0.3.9-0.3.10 resumes unpublished, 
   assert.equal(state.issues[6].status, 'planned'); assert.equal(state.issues[6].confirmedBy, 'maintainer');
   assert.deepEqual(state.issues[6].targets, { flutter: { status: 'MERGED' } });
   assert.deepEqual((await gh()).issues[1].labels, ['protoflow', 'protoflow:planned']);
+});
+
+test('executors are routed by area: frontend work and backend work spend different providers, each the other\'s fallback', async () => {
+  const { executorPlan } = await import('../src/workflow.js');
+  const routed = { policy: { executor: { primary: 'claude', fallback: 'codex', routes: { frontend: 'claude', backend: 'codex' } } } };
+  assert.deepEqual(executorPlan(routed), { primary: 'claude', fallback: 'codex', area: 'frontend' });
+  assert.deepEqual(executorPlan(routed, 'mixed'), { primary: 'claude', fallback: 'codex', area: 'frontend' });
+  assert.deepEqual(executorPlan(routed, 'backend'), { primary: 'codex', fallback: 'claude', area: 'backend' });
+  // Without routes nothing changes; without a policy the executor stays Codex.
+  assert.deepEqual(executorPlan({ policy: { executor: { primary: 'claude', fallback: 'codex' } } }, 'backend'), { primary: 'claude', fallback: 'codex', area: 'backend' });
+  assert.deepEqual(executorPlan({}, 'backend'), { primary: 'codex', fallback: null, area: 'backend' });
+  // A route to a provider that is not primary or fallback still falls back to the configured primary.
+  assert.deepEqual(executorPlan({ policy: { executor: { primary: 'claude', routes: { backend: 'codex' } } } }, 'backend'), { primary: 'codex', fallback: 'claude', area: 'backend' });
+  const { issuePlanSchema } = await import('../src/planner.js');
+  assert.deepEqual(issuePlanSchema(['ios']).properties.area.enum, ['frontend', 'backend', 'mixed']);
 });

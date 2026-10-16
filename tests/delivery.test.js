@@ -1672,3 +1672,25 @@ test('FAKE providers only: a stopped runner never blocks an issue fix, and a bas
   assert.equal((await issues()).comments.filter(comment => comment.body.startsWith('<!-- protoflow:issue-started 12 -->')).length, 1);
   assert.equal((await issues()).state, 'closed');
 });
+
+test('FAKE providers only: a backend issue is implemented by the backend executor; the frontend executor is never called', async t => {
+  const f = await fixture(t);
+  const { record } = await plannedIssue(f);
+  record.plan.area = 'backend'; record.planHash = hash(record.plan);
+  await writeJson(path.join(f.root, `.protoflow/plans/${record.id}.json`), record);
+  const claudeRuns = path.join(f.base, 'claude-runs');
+  f.config.adapters.claude = { command: { argv: [process.execPath, '-e', `require('fs').appendFileSync(process.argv[1],'x');process.exit(1)`, claudeRuns] } };
+  f.config.policy = { ...f.config.policy, executor: { primary: 'claude', fallback: 'codex', routes: { frontend: 'claude', backend: 'codex' } } };
+  const { runIssues } = await import('../src/issue-runner.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await idleRunner(f);
+  const events = [];
+  const result = await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify(), onEvent: event => events.push(event) });
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const execute = events.find(event => event.event === 'issue-execute');
+  assert.equal(execute.area, 'backend'); assert.equal(execute.executor, 'codex');
+  const work = (await readJson(path.join(f.root, '.protoflow/issues/state.json'))).issues[12].targets.application;
+  assert.deepEqual(work.executorRoute, { area: 'backend', primary: 'codex', fallback: 'claude' });
+  assert.equal(work.attempts[0].executor, 'codex');
+  await assert.rejects(fs.access(claudeRuns), { code: 'ENOENT' });
+});

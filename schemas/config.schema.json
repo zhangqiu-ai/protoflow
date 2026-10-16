@@ -269,6 +269,24 @@
                 "claude",
                 "codex"
               ]
+            },
+            "routes": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "frontend": {
+                  "enum": [
+                    "claude",
+                    "codex"
+                  ]
+                },
+                "backend": {
+                  "enum": [
+                    "claude",
+                    "codex"
+                  ]
+                }
+              }
             }
           }
         }

@@ -159,7 +159,7 @@ claude -p --output-format stream-json --verbose --json-schema <schema>
 使用者已確認（2026-10-14）：
 
 1. **角色**：Claude 規劃與驗收、Codex 實作，原型對齊與 GitHub Issues 兩條流程一致。
-2. **模型與執行者**：規劃與驗收用 `claude-opus-5-5`。**執行者預設 Claude Sonnet（`claude-sonnet-5-5`）**；Sonnet 額度不足（限流、用量上限）時，同一個 attempt 自動改由 Codex 重做；需要並行時（例如多個 target 同時處理），額外的工作交給 Codex。Claude 執行者在 worktree 內可寫，沙箱強度不得低於 Codex `workspace-write`，並沿用 hygiene 與 scope 檢查。執行者與驗收者同為 Anthropic 時，獨立性由全新 session、不同模型、驗收者唯讀（trace 證明）以及 session 不重複保證，紀錄 `crossProvider: false`。
+2. **模型與執行者**：規劃與驗收用 `claude-opus-5-5`。**執行者依工作分流（2026-10-15 修訂）**：前端（原型版本，以及規劃者標為 `frontend` 或 `mixed` 的 Issue）由 Claude Sonnet（`claude-sonnet-5-5`）實作，後端（`backend` 的 Issue）由 Codex 實作，分散兩邊的用量；兩者互為額度不足時的備援，規劃與驗收一律仍由 Opus。修訂前的規則：執行者預設 Claude Sonnet；Sonnet 額度不足（限流、用量上限）時，同一個 attempt 自動改由 Codex 重做；需要並行時（例如多個 target 同時處理），額外的工作交給 Codex。Claude 執行者在 worktree 內可寫，沙箱強度不得低於 Codex `workspace-write`，並沿用 hygiene 與 scope 檢查。執行者與驗收者同為 Anthropic 時，獨立性由全新 session、不同模型、驗收者唯讀（trace 證明）以及 session 不重複保證，紀錄 `crossProvider: false`。
 3. **原型流程也先經過 Claude 規劃**：方案把每個錨點與狀態轉成逐條驗收條件。
 4. **原型優先**：某個 target 的原型串流閒置時才處理它的 Issue。
 5. **Codex 審查保留為替代供應者**，主要使用 Claude 驗收；新專案預設 Claude。
