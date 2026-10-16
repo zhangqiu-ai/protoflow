@@ -699,7 +699,9 @@ export async function doctor(root, config) {
   await check('source', () => { validateSource(config.source); return `${config.source.repository}#${config.source.branch}:${config.source.path}`; });
   await check('git', () => git(root, ['rev-parse', 'HEAD']));
   await check('codex', async () => {
-    if (!executorCommand(config, executorPlan(config).primary)) throw new Error(`Configure adapters.${executorPlan(config).primary}.command argv; built-in adapters: scripts/codex-adapter.js, scripts/claude-exec-adapter.js`);
+    for (const provider of new Set(['frontend', 'backend'].map(area => executorPlan(config, area).primary))) {
+      if (!executorCommand(config, provider)) throw new Error(`Configure adapters.${provider}.command argv; built-in adapters: scripts/codex-adapter.js, scripts/claude-exec-adapter.js`);
+    }
     const result = await runCommand(root, { argv: ['codex', '--version'] });
     if (result.status !== 'PASS') throw new Error(result.stderr || 'Codex unavailable'); return result.stdout.trim();
   });

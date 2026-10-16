@@ -297,3 +297,17 @@ reviewer 的真實發現也在過程中被修正：Android 開關未勾選時沿
 | v(d) `25da01f`：About 顯示版本號、詳情可收合 | PR #24 | PR #25 | PR #26 | **0** |
 
 v(c) 的每次介入都對應一個引擎缺口，在 v0.3.6–v0.3.8 修正：執行代理逾時與孤兒 Gradle 程序、`~/.gradle` 沙箱權限、已發布交付的保護、過期基底重建、PASS 後網路失敗的重審、審查被中斷、`runner configure` 改寫有未結交付的 worktree 配置、Android 模擬器輔助程序被誤清理。v(d) 在 v0.3.8 上從推送原型到最後一個 target 合併共 32 分 43 秒，每個 target 各一次審查、零修復、零阻擋，`release.version` 自動前進；唯一的自動處置是執行與驗證後停止殘留的 Xcode `DTServiceHub`。證據摘要：驗收專案的 `evidence/zero-intervention-20261015.json`。
+
+### 2026-10-15：Claude 規劃與驗收、GitHub Issues（提案 0003 P6）
+
+規劃者與驗收者為 Claude Opus，執行者為 Claude Sonnet（Codex 備援未被觸發），在同一個行動驗收專案上跑一個原型版本與 5 個 Issue。
+
+| 項目 | 結果 |
+|---|---|
+| v(e) `cd94bf9`：Settings 新增預設開啟的「Weekly summary」 | iOS #30、Android #31、Flutter #32；Flutter 首次被 Claude 驗收拒收，自動重開、重新規劃並修正後交付 |
+| #33 點設定名稱不會切換（原型以 `<label>` 包住開關） | Flutter #35、iOS #36、Android #37，Issue 自動結案；Flutter 首次修改破壞 settings 結構層，原型回歸驗證擋下，修復一輪後通過 |
+| #34 Flutter 補「只有空白」與「前後空白」的測試 | #38，自動結案 |
+| #27、#28：原型沒有定義的新互動 | `needs-human`，規劃者建議改走原型流程（判斷正確） |
+| #29「App 很慢」 | `needs-info`，留言列出 5 個問題 |
+
+Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪不是零介入：兩次環境修正（runner 缺 Homebrew 路徑、`~/.local/bin/node` 被移除）、改出符合原型的 Issue，以及兩個引擎修正：v0.3.10（已退役交付讓 target 永遠不接 Issue）、v0.3.11（同一 Issue 其他 target 合併後 base 前進、停止被當成阻塞、重複的開始留言）。證據摘要：驗收專案的 `evidence/p6-claude-issues-20261015.json`。

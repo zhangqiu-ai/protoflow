@@ -210,7 +210,9 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
 
 /** Execute the plan and verify the target's latest accepted version on the result, with bounded repair. */
 async function implement(root, config, stream, worktree, { snapshot, plan, manifestId, work, save, signal, onEvent, verifyVersion }) {
-  const maximum = config.policy?.maxRepairAttempts ?? 3, executors = executorPlan(config);
+  // Backend-only issues go to the backend executor (policy.executor.routes); frontend and mixed work to the frontend one.
+  const maximum = config.policy?.maxRepairAttempts ?? 3, executors = executorPlan(config, plan.plan.area === 'backend' ? 'backend' : 'frontend');
+  work.executorRoute = { area: executors.area, primary: executors.primary, fallback: executors.fallback };
   const executionIds = [];
   let report = null, failure = null;
   for (let attempt = 0; attempt <= maximum; attempt++) {
@@ -218,7 +220,7 @@ async function implement(root, config, stream, worktree, { snapshot, plan, manif
     const context = await createContext(worktree, config, manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target: stream ?? undefined, plan, issue: snapshot });
     const record = { attempt, contextId: context.id, startedAt: new Date().toISOString() };
     work.attempts.push(record); await save();
-    await onEvent({ event: attempt ? 'issue-repair' : 'issue-execute', attempt });
+    await onEvent({ event: attempt ? 'issue-repair' : 'issue-execute', attempt, area: executors.area, executor: executors.primary });
     let provider = executors.primary, execution;
     for (let retry = 0; ; retry++) {
       execution = await executeContext(worktree, config, context.id, { provider, execute: true, repair: attempt ? { attempt, verification: report, ...(failure && { execution: failure }) } : null, signal });
