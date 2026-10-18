@@ -47,6 +47,16 @@ test('with Node runtime warnings, a successful command keeps stdout pure JSON', 
   assert.match(lint.stderr, /ProtoFlow diagnostic: Warning/);
 });
 
+test('the CLI entry takes over Node warnings before any built-in module is linked', async () => {
+  // Node 24 warns while linking built-in modules of a static import graph, before any module of it runs; only a
+  // dependency-free first import followed by a dynamic import of the CLI catches that on every Node version.
+  const entry = await fs.readFile(cli, 'utf8');
+  assert.deepEqual([...entry.matchAll(/^\s*import\s+(?:[^'"]*\s+from\s+)?['"]([^'"]+)['"]/gm)].map(match => match[1]), ['../src/cli-diagnostics.js']);
+  assert.match(entry, /await import\('\.\.\/src\/cli\.js'\)/);
+  const diagnostics = await fs.readFile(new URL('../src/cli-diagnostics.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(diagnostics, /^\s*import\s/m);
+});
+
 test('multi-target source status and runner status show per-target progress and exit 0', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-cli-status-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

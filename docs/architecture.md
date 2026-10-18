@@ -6,7 +6,9 @@
 
 | 模組 | 所有權／責任 |
 |---|---|
-| `bin/protoflow.js` | 參數、JSON輸出、退出碼、專案鎖 |
+| `bin/protoflow.js` | CLI 入口：先由 `src/cli-diagnostics.js` 接管 Node 警告，再動態載入 `src/cli.js` |
+| `src/cli.js` | 參數、JSON輸出、退出碼、專案鎖 |
+| `src/cli-diagnostics.js` | 把 Node 執行期警告轉成 `ProtoFlow diagnostic:` 行，維持 stdout 純 JSON |
 | `src/config.js` | schema 與路徑／配置檢查 |
 | `src/install.js` | 非破壞 init、Skill installation、AGENTS managed block |
 | `src/integrations.js` | Spec Kit／BMad 偵測、配置 argv 安裝、安裝提醒 |
