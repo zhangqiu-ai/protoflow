@@ -161,7 +161,7 @@ target 的 `viewport` 必須等於該裝置的內容區域，原型也在同一�
 | React Native | `testID="tasks.add"`；可點擊元件加 `accessibilityRole="button"`，讓它被視為 action |
 | Flutter | `Semantics(identifier: "tasks.add")`；畫面與 region 用 `Semantics(container: true, explicitChildNodes: true, identifier: …)`；讀取無障礙樹需要語意樹，啟動時呼叫 `SemanticsBinding.instance.ensureSemantics()` |
 
-隱藏的錨點（原型中 `hidden`）在原生端可以完全不渲染，視同隱藏。
+隱藏的錨點（原型中 `hidden`）在原生端可以完全不渲染，視同隱藏。原生無障礙樹只分得出文字、密碼與搜尋欄位，讀不到鍵盤類型，因此原生 target 比對結構時，原型的 `email`、`tel`、`url`、`number` 輸入視為文字欄位；密碼仍需對應安全輸入。
 
 React Native 注意事項：
 

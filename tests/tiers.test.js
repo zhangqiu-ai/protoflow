@@ -186,3 +186,11 @@ test('tier verdict honours required, advisory and off policies', () => {
   assert.equal(tierVerdict({ ...tiers, structure: { status: 'NOT_RUN' } }, { visual: 'advisory' }), 'NOT_RUN');
   assert.equal(tierVerdict({ ...tiers, tokens: { status: 'NOT_RUN' } }, { tokens: 'off', visual: 'off' }), 'PASS');
 });
+
+test('T1 structure on a native target compares an email input as a text field but keeps password distinct', () => {
+  // A native accessibility tree cannot report the keyboard type.
+  assert.equal(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'text' } }), { native: true }).status, 'PASS');
+  assert.deepEqual(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'password' } }), { native: true }).reasons, ['home.email: input type email vs password']);
+  // On the web the input type stays exact.
+  assert.deepEqual(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'text' } })).reasons, ['home.email: input type email vs text']);
+});

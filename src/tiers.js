@@ -33,7 +33,10 @@ function siblingOrder(capture, ids, byIndex) {
 }
 
 /** T1: every anchor exists with the right multiplicity, visibility, text, role and order; state expectations hold. */
-export function compareStructure(screen, state, prototype, application) {
+// Native accessibility trees expose text, password and search fields but not the keyboard type, so on a native
+// target the prototype's email, tel, url and number inputs compare as text.
+const NATIVE_TEXT_INPUTS = new Set(['email', 'tel', 'url', 'number']);
+export function compareStructure(screen, state, prototype, application, { native = false } = {}) {
   const reasons = [];
   let checked = 0;
   const anchors = uniqueAnchors(screen).filter(anchor => !anchor.visualOnly);
@@ -57,7 +60,8 @@ export function compareStructure(screen, state, prototype, application) {
     if (anchor.role === 'action' && !right.interactive) reasons.push(`${anchor.id}: action is not interactive in the application`);
     if (anchor.role === 'input' && !right.editable) reasons.push(`${anchor.id}: input is not editable in the application`);
     if (['action', 'input'].includes(anchor.role) && left.enabled !== undefined && right.enabled !== undefined && left.enabled !== right.enabled) reasons.push(`${anchor.id}: enabled ${left.enabled} vs ${right.enabled}`);
-    if (left.inputType && right.inputType && left.inputType !== right.inputType) reasons.push(`${anchor.id}: input type ${left.inputType} vs ${right.inputType}`);
+    const expectedInput = native && NATIVE_TEXT_INPUTS.has(left.inputType) ? 'text' : left.inputType;
+    if (expectedInput && right.inputType && expectedInput !== right.inputType) reasons.push(`${anchor.id}: input type ${left.inputType} vs ${right.inputType}`);
   }
   const parents = new Map();
   for (const anchor of anchors) {
