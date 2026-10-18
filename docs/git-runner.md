@@ -82,7 +82,7 @@ Runner 為每條來源路由（多目標時每個 target）保留一個 `.protof
 
 ## CLI 輸出契約
 
-stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結果）；失敗時 stderr 最後一行是 JSON 錯誤，之前的行是提醒或 `ProtoFlow diagnostic:` 診斷。巡查或其他程式解析輸出時應依此規則，不要把整段 stderr 當 JSON。
+stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結果）；失敗時 stderr 最後一行是 JSON 錯誤，之前的行是提醒或 `ProtoFlow diagnostic:` 診斷。巡查或其他程式解析輸出時應依此規則，不要把整段 stderr 當 JSON。Node 執行期警告（例如同時設定 `FORCE_COLOR` 與 `NO_COLOR`，Node 24 在連結內建模組時就會發出）也一律轉成 `ProtoFlow diagnostic:` 行；Node 22 與 24 行為一致。
 
 ## 證據與順序
 
