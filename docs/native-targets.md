@@ -311,3 +311,15 @@ v(c) 的每次介入都對應一個引擎缺口，在 v0.3.6–v0.3.8 修正：�
 | #29「App 很慢」 | `needs-info`，留言列出 5 個問題 |
 
 Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪不是零介入：兩次環境修正（runner 缺 Homebrew 路徑、`~/.local/bin/node` 被移除）、改出符合原型的 Issue，以及兩個引擎修正：v0.3.10（已退役交付讓 target 永遠不接 Issue）、v0.3.11（同一 Issue 其他 target 合併後 base 前進、停止被當成阻塞、重複的開始留言）。證據摘要：驗收專案的 `evidence/p6-claude-issues-20261015.json`。
+
+### 2026-10-18：前後端分流的零介入驗收（v0.3.13）
+
+規劃與驗收為 Claude Opus；執行者依 `policy.executor.routes` 分流：前端（原型與前端 Issue）由 Claude Sonnet、後端 Issue 由 Codex。Runner 在驗收開始前啟動一次，之後全程未接觸 Runner、配置或 GitHub。
+
+| 項目 | 規劃 | 執行者 | 結果 |
+|---|---|---|---|
+| v(f) `3ab42c5`：空白任務提示改為「Type a task name first.」 | Opus | Sonnet | iOS #41（修復一輪）、Android #42、Flutter #43 |
+| #39 iOS、Android 在輸入框按 Return 不會新增任務（原型為 `<form>`） | Opus：`frontend`，L1 | Sonnet | iOS #44、Android #45，自動結案 |
+| #40 Android 新增驗證抽成純 Kotlin 函式並加 JVM 單元測試 | Opus：`backend`，L1 | Codex | #46，自動結案（Codex 實作、Claude 驗收） |
+
+從推送原型到最後一次合併共 53 分鐘：人工介入 0、阻塞 0、審查拒收 0、執行者備援 0、修復 1。Claude 費用約 4.25 美元（規劃與分流 1.47、執行 0.72、驗收 2.06；Codex 另計）。證據摘要：驗收專案的 `evidence/zero-intervention-routes-20261018.json`。
