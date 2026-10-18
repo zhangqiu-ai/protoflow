@@ -45,7 +45,7 @@ test('settings: disabled projects do nothing; issues need targets that exist', a
   assert.deepEqual(await syncIssues(root, { ...config, issues: { enabled: false } }), { status: 'DISABLED' });
   assert.deepEqual(issueSettings({ schemaVersion: 1, issues: { enabled: true } }).targets, [{ id: 'application', platform: 'web', root: '.' }]);
   assert.throws(() => issueSettings({ ...config, issues: { enabled: true, targets: ['web'] } }), /unknown targets: web/);
-  assert.deepEqual(issueSettings(config), { label: 'protoflow', authors: ['OWNER', 'MEMBER', 'COLLABORATOR'], targets: [{ id: 'ios', platform: 'ios', root: 'ios' }, { id: 'flutter', platform: 'flutter', root: 'flutter' }], maxTriagePerSync: 3, remote: 'origin' });
+  assert.deepEqual(issueSettings(config), { label: 'protoflow', authors: ['OWNER', 'MEMBER', 'COLLABORATOR'], targets: [{ id: 'ios', platform: 'ios', root: 'ios' }, { id: 'flutter', platform: 'flutter', root: 'flutter' }], maxTriagePerSync: 3, remote: 'origin', all: false });
 });
 
 test('engine rules: L3, incomplete implementation plans and question-less requests go to a person', () => {
@@ -68,7 +68,7 @@ test('FAKE gh and CLI only: authorised issues are triaged once in number order; 
   assert.deepEqual(first.results.map(item => [item.number, item.status]), [[1, 'needs-human'], [3, 'planned']]);
   let db = await gh();
   // Status labels are created once; pull requests and unlabelled issues are ignored.
-  assert.deepEqual(db.labels.slice(2), ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done'].map(status => `protoflow:${status}`));
+  assert.deepEqual(db.labels.slice(2), ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done', 'skip'].map(status => `protoflow:${status}`));
   const [one, , three] = [1, 2, 3].map(number => db.issues.find(item => item.number === number));
   assert.deepEqual(one.labels, ['protoflow', 'protoflow:needs-human']); assert.equal(one.comments.length, 1);
   assert.match(one.comments[0].body, /ProtoFlow triage \(AI, automated\)[\s\S]*association NONE is not in issues\.authors[\s\S]*remove the `protoflow:needs-human` label/);
@@ -212,4 +212,19 @@ test('executors are routed by area: frontend work and backend work spend differe
   assert.deepEqual(executorPlan({ policy: { executor: { primary: 'claude', routes: { backend: 'codex' } } } }, 'backend'), { primary: 'codex', fallback: 'claude', area: 'backend' });
   const { issuePlanSchema } = await import('../src/planner.js');
   assert.deepEqual(issuePlanSchema(['ios']).properties.area.enum, ['frontend', 'backend', 'mixed']);
+});
+
+test('FAKE gh and CLI only: with issues.all every open issue of an authorised author is AI work, except those labelled skip', async t => {
+  const { root, config, gh } = await fixture(t, [issue(1, { labels: [] }), issue(2, { labels: ['bug', 'protoflow:skip'] }), issue(3, { labels: ['protoflow'] }), issue(4, { labels: [], pull: true })]);
+  process.env.FAKE_CLAUDE_OUTPUT = plan();
+  // Without all only the labelled issue is processed.
+  assert.deepEqual((await syncIssues(root, config)).results.map(item => item.number), [3]);
+  const result = await syncIssues(root, { ...config, issues: { enabled: true, all: true } });
+  assert.deepEqual(result.results.map(item => [item.number, item.status]), [[1, 'planned']]);
+  const db = await gh();
+  assert.deepEqual(db.issues.find(item => item.number === 1).labels, ['protoflow:planned']);
+  assert.deepEqual(db.issues.find(item => item.number === 2).labels, ['bug', 'protoflow:skip'], 'skipped issues are never touched');
+  assert.equal(db.issues.find(item => item.number === 2).comments.length, 0);
+  assert.ok(db.labels.includes('protoflow:skip'));
+  assert.ok(db.calls.some(call => call.method === 'GET' && /\/issues\?state=open&/.test(call.endpoint)), 'lists open issues without a label filter');
 });

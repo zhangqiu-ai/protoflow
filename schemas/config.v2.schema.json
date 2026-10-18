@@ -606,6 +606,9 @@
             "minLength": 1
           }
         },
+        "all": {
+          "type": "boolean"
+        },
         "maxTriagePerSync": {
           "type": "integer",
           "minimum": 1,

@@ -61,7 +61,7 @@ export const configSchemaV2 = {
       enabled: { type: 'boolean' }, label: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$' },
       authors: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] } },
       targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-      maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
+      all: { type: 'boolean' }, maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
     } },
     anchors: { type: 'object', additionalProperties: false, properties: {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },

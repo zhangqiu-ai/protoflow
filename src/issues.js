@@ -10,7 +10,7 @@ import { planIssue } from './planner.js';
  */
 export const ISSUE_STATUSES = ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done'];
 const DECISION_STATUS = { implement: 'planned', 'needs-info': 'needs-info', 'needs-human': 'needs-human', reject: 'rejected' };
-const LABEL_COLORS = { planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
+const LABEL_COLORS = { skip: 'ededed', planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
 const WRITERS = ['admin', 'maintain', 'write'];
 const MAX_TRIAGE_FAILURES = 3;
 const statePath = '.protoflow/issues/state.json';
@@ -29,7 +29,9 @@ export function issueSettings(config) {
   return {
     label: issues.label ?? 'protoflow', authors: issues.authors ?? ['OWNER', 'MEMBER', 'COLLABORATOR'],
     targets: all.filter(target => ids.includes(target.id)),
-    maxTriagePerSync: issues.maxTriagePerSync ?? 3, remote: issues.remote ?? config.runner?.delivery?.remote ?? 'origin'
+    maxTriagePerSync: issues.maxTriagePerSync ?? 3, remote: issues.remote ?? config.runner?.delivery?.remote ?? 'origin',
+    // all: every open issue is AI work (authorised authors only), not just those carrying the label; <label>:skip opts one out.
+    all: issues.all === true
   };
 }
 const statusLabel = (settings, status) => `${settings.label}:${status}`;
@@ -91,18 +93,26 @@ export async function openIssues(root, config) {
 async function sync(root, config, settings, { onEvent, signal }) {
   const { repository, state, save, api, base, publish, transition } = await openIssues(root, config);
 
-  const wanted = ISSUE_STATUSES.map(status => statusLabel(settings, status));
+  const names = [...ISSUE_STATUSES, 'skip'];
+  const wanted = names.map(status => statusLabel(settings, status));
   if (state.labels !== hash(wanted)) {
     const existing = new Set((await api(`${base}/labels?per_page=100`)).map(label => label.name));
-    for (const status of ISSUE_STATUSES) {
+    for (const status of names) {
       const name = statusLabel(settings, status);
-      if (!existing.has(name)) await api(`${base}/labels`, { method: 'POST', body: { name, color: LABEL_COLORS[status], description: `ProtoFlow issue automation: ${status}` } });
+      if (!existing.has(name)) await api(`${base}/labels`, { method: 'POST', body: { name, color: LABEL_COLORS[status], description: status === 'skip' ? 'ProtoFlow leaves this issue alone' : `ProtoFlow issue automation: ${status}` } });
     }
     state.labels = hash(wanted); await save();
   }
 
-  const listed = await api(`${base}/issues?labels=${encodeURIComponent(settings.label)}&state=open&sort=created&direction=asc&per_page=100`);
-  const open = listed.filter(issue => !issue.pull_request).sort((a, b) => a.number - b.number);
+  // With issues.all every open issue is listed (page by page); otherwise only those carrying the label.
+  const listed = [];
+  for (let page = 1; ; page++) {
+    const batch = await api(`${base}/issues?${settings.all ? '' : `labels=${encodeURIComponent(settings.label)}&`}state=open&sort=created&direction=asc&per_page=100&page=${page}`);
+    listed.push(...batch);
+    if (batch.length < 100 || page >= 10) break;
+  }
+  const skip = statusLabel(settings, 'skip');
+  const open = listed.filter(issue => !issue.pull_request && !labelNames(issue).includes(skip)).sort((a, b) => a.number - b.number);
   const results = [];
   let triaged = 0;
   for (const issue of open) {
