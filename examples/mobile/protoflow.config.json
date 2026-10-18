@@ -230,6 +230,125 @@
       ]
     },
     {
+      "id": "expo",
+      "platform": "react-native",
+      "root": "expo",
+      "build": {
+        "argv": [
+          "npm",
+          "--prefix",
+          "expo",
+          "run",
+          "prebuild"
+        ],
+        "timeoutMs": 1800000
+      },
+      "functional": {
+        "argv": [
+          "npm",
+          "--prefix",
+          "expo",
+          "test",
+          "--",
+          "--ci"
+        ],
+        "timeoutMs": 600000
+      },
+      "variants": [
+        {
+          "id": "ios",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/ios-driver.js",
+                "--bundle-id",
+                "dev.protoflow.examples.tasksexpo",
+                "--device",
+                "ProtoFlow iPhone 17",
+                "--app",
+                "expo/build/DerivedData/Build/Products/Release-iphonesimulator/ProtoFlowTasksExpo.app",
+                "--launch-url",
+                "protoflowtasks://{screen}?state={state}&fixture={fixture}"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "xcodebuild",
+              "build",
+              "-workspace",
+              "expo/ios/ProtoFlowTasksExpo.xcworkspace",
+              "-scheme",
+              "ProtoFlowTasksExpo",
+              "-configuration",
+              "Release",
+              "-destination",
+              "platform=iOS Simulator,name=ProtoFlow iPhone 17",
+              "-derivedDataPath",
+              "expo/build/DerivedData",
+              "ONLY_ACTIVE_ARCH=YES",
+              "CODE_SIGNING_ALLOWED=NO",
+              "-quiet"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 402,
+            "height": 778,
+            "scale": 3
+          }
+        },
+        {
+          "id": "android",
+          "driver": {
+            "kind": "external",
+            "command": {
+              "argv": [
+                "node",
+                "../../scripts/android-driver.js",
+                "--package",
+                "dev.protoflow.examples.tasksexpo",
+                "--avd",
+                "ProtoFlow_Pixel",
+                "--apk",
+                "expo/android/app/build/outputs/apk/release/app-release.apk",
+                "--launch-url",
+                "protoflowtasks://{screen}?state={state}&fixture={fixture}"
+              ],
+              "timeoutMs": 900000
+            }
+          },
+          "build": {
+            "argv": [
+              "expo/android/gradlew",
+              "-p",
+              "expo/android",
+              "--no-daemon",
+              "-q",
+              "assembleRelease"
+            ],
+            "timeoutMs": 3600000
+          },
+          "viewport": {
+            "width": 360,
+            "height": 730,
+            "scale": 3
+          },
+          "deviations": [
+            {
+              "anchor": "settings.notify-toggle",
+              "allow": [
+                "layout"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "flutter",
       "platform": "flutter",
       "root": "flutter",
@@ -335,7 +454,8 @@
       "ios",
       "android",
       "react-native",
-      "flutter"
+      "flutter",
+      "expo"
     ]
   }
 }

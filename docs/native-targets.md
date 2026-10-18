@@ -1,11 +1,11 @@
-# 原生 target：iOS、Android、React Native 與 Flutter
+# 原生 target：iOS、Android、React Native、Expo 與 Flutter
 
 ProtoFlow 以外部驅動器協定（`schemas/driver-request.schema.json` → `schemas/driver-response.schema.json`）接入原生平台，並內建兩個參考驅動器：
 
 | 驅動器 | 平台 | 方式 | 適用框架 |
 |---|---|---|---|
-| `scripts/ios-driver.js` | iOS 模擬器 | XCUITest，依 bundle identifier 驅動 | SwiftUI、UIKit、React Native、Flutter |
-| `scripts/android-driver.js` | Android 模擬器（AVD） | UiAutomator instrumentation，依 package 驅動 | Compose、View、React Native、Flutter |
+| `scripts/ios-driver.js` | iOS 模擬器 | XCUITest，依 bundle identifier 驅動 | SwiftUI、UIKit、React Native（含 Expo）、Flutter |
+| `scripts/android-driver.js` | Android 模擬器（AVD） | UiAutomator instrumentation，依 package 驅動 | Compose、View、React Native（含 Expo）、Flutter |
 
 兩者輸出相同的原始格式（無障礙樹＋整個螢幕截圖），由引擎的 `src/drivers/native-tree.js` 以同一套規則解讀（iOS 直接使用 XCUITest 類型，Android 先經 `src/drivers/android-tree.js` 正規化）。同一份程式碼跑在多個平台（React Native、Flutter）時以 [target 變體](#target-變體一份程式碼多個平台) 表達。可執行範例見 [examples/mobile](../examples/mobile/)。
 
@@ -93,6 +93,7 @@ AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-wi
 |---|---|
 | `--frame` | `safe-area`（預設）只比較內容區域；`device` 比較整個螢幕，含系統列 |
 | `--timeout-ms` | 單一步驟的等待時間，預設 10000 |
+| `--launch-url` | 以 deep link 啟動，取代啟動參數（iOS）或預設 launcher intent（Android），見 [deep link 啟動](#deep-link-啟動) |
 | `--launch-timeout-ms` | 應用啟動到畫面錨點出現的等待時間，預設 60000（React Native 冷啟動需載入 JS bundle） |
 | `--cache` | runner 與內容區域快取，預設 `.protoflow/cache/<ios\|android>-driver` |
 
@@ -131,8 +132,23 @@ target 的 `viewport` 必須等於該裝置的內容區域，原型也在同一�
 | Android | 字串 intent extras `PROTOFLOW_SCREEN`、`PROTOFLOW_STATE`、`PROTOFLOW_FIXTURE` | `intent.getStringExtra("PROTOFLOW_SCREEN")` |
 | React Native | 同上 | iOS：`Settings.get('PROTOFLOW_SCREEN')`；Android：`MainActivity` 的 `getLaunchOptions()` 把 extras 轉成根元件的 initial props |
 | Flutter | 同上 | 一個 `MethodChannel('dev.protoflow/launch')`，iOS 在 `AppDelegate`、Android 在 `MainActivity` 回傳上述值 |
+| Expo Router | `--launch-url` 的 deep link（見下節） | 路由即畫面；`state`、`fixture` 是 query 參數（`useLocalSearchParams`） |
 
-應用以這些值**直接打開該畫面**並套用 fixture，等同 Web target 的 `urlTemplate`。帶有 `PROTOFLOW_SCREEN` 時建議停用動畫。四種寫法都在 `examples/mobile` 中。
+應用以這些值**直接打開該畫面**並套用 fixture，等同 Web target 的 `urlTemplate`。帶有 `PROTOFLOW_SCREEN` 時建議停用動畫。五種寫法都在 `examples/mobile` 中。
+
+### deep link 啟動
+
+畫面本身就是路由的應用（Expo Router、React Navigation linking）以 URL 打開畫面較自然。驅動器參數 `--launch-url` 是 URL 模板：
+
+```text
+--launch-url "protoflowtasks://{screen}?state={state}&fixture={fixture}"
+```
+
+`{screen}`、`{state}` 是場景的值，`{fixture}` 是 fixture 資料的 JSON（無 fixture 時 `{}`），三者都經 percent-encoding。模板必須含 `{screen}` 與 URL scheme，不能有其他 `{…}` 佔位符；不合格時驅動器在碰到裝置前就回報 `NOT_RUN`。
+
+- iOS：先結束應用，再以 `XCUIApplication.open(URL)` 冷啟動；不再傳 launch arguments。
+- Android：以 `ACTION_VIEW` intent（資料為該 URL，限定 `--package`）啟動，`PROTOFLOW_*` extras 照樣附上；應用的 Activity 需有對應 scheme 的 intent filter（Expo 由 `app.json` 的 `scheme` 產生）。
+- 驗證產物的 `driver/job.json` 記錄展開後的 `launchUrl`；畫面錨點未出現時，失敗原因會列出該 URL。
 
 ### 錨點標記
 
@@ -153,6 +169,15 @@ React Native 注意事項：
 - flex 欄位預設把子元素撐滿寬度；原型中只佔文字寬度的段落（例如錯誤訊息），`Text` 需加 `alignSelf: 'flex-start'`，否則 T3 寬度不符。
 - iOS 27 強制 UIScene 生命週期；RN 0.87 模板的 `AppDelegate` 直接建立 `UIWindow`，啟動即中斷。需加入 `UIApplicationSceneManifest` 與 `SceneDelegate`（見 `examples/mobile/react-native/ios`）。
 - 以 Release 配置建置，JS bundle 打包進 `.app`／APK；驗收不依賴 Metro。
+
+Expo 注意事項（Continuous Native Generation，範例為 SDK 58、Expo Router）：
+
+- Expo Go 不能作為驗收對象（bundle id 屬於 Expo Go，JS 由 Metro 載入）；build 要產出自己的 `.app`／APK。`ios/`、`android/` 由 prebuild 產生且被 Git 忽略，因此 target 的 `build` 先執行 `expo prebuild --clean`（重建原生專案並 `pod install`），變體的 `build` 再以 `xcodebuild`／`gradlew assembleRelease` 建置 Release。CocoaPods 需要 UTF-8 locale：範例把 `LANG=en_US.UTF-8 expo prebuild --clean` 寫成 npm script，ProtoFlow 以 argv 呼叫 `npm --prefix expo run prebuild`。
+- 原生設定只能經 config plugin，手改 `ios/`、`android/` 會被下一次 prebuild 覆蓋。範例的 `plugins/with-protoflow.js` 只寫 `gradle.properties`：關閉 Gradle／Kotlin daemon（見上），並只建 `arm64-v8a`。
+- SDK 58 的 prebuild 模板已採用 UIScene（`SceneDelegate` 與 `UIApplicationSceneManifest`），iOS 27 不需另外修補；Android 也不需修改 `MainActivity`，因為畫面由 deep link 打開。
+- 每個原型畫面是一個路由（`app/<screen>.tsx`），`app.json` 的 `scheme` 提供 deep link；Stack 關閉標題列（`headerShown: false`，原型只畫內容區域）與轉場動畫。由 deep link 直接打開的畫面沒有上一頁，返回需改以 `router.replace`。
+- 功能測試用 `jest-expo` preset 與 `expo-router/testing-library` 的 `renderRouter('./app', { initialUrl })`，在真實路由樹上驗證；`@testing-library/react-native` 14 的 `fireEvent` 是非同步的，需 `await`。
+- Runner worktree 沒有 `node_modules`：以 `runner.setup` 執行 `npm --prefix expo ci`。
 
 Compose 與 Flutter 注意事項：
 
@@ -230,7 +255,6 @@ React Native 與 Flutter 的同一份程式碼同時是 iOS 與 Android 應用�
 - iOS 每個場景是一次 `xcodebuild test-without-building`，約 15–40 秒；Android 每個場景是一次 instrumentation，約 5–10 秒。runner 只在驅動器原始碼或 Xcode／JDK 版本改變時重新建置。
 - T2 只比較取樣的主色，不比較字級與字重；字型與排版差異由 T3 相對版面與 T4 感知相似度觀察。
 - 驅動器只在本機或專案自備的 CI 上執行，不提供裝置農場或實機；CI 不執行模擬器驗收（`tests/e2e/ios.spec.js`、`tests/e2e/android.spec.js` 為設定環境變數才執行的真實驗收）。
-- Expo 尚未提供範例；做法見 [提案 0002 D7](proposals/0002-android-flutter.md)。
 
 ## 驗收紀錄
 
@@ -323,3 +347,20 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 | #40 Android 新增驗證抽成純 Kotlin 函式並加 JVM 單元測試 | Opus：`backend`，L1 | Codex | #46，自動結案（Codex 實作、Claude 驗收） |
 
 從推送原型到最後一次合併共 53 分鐘：人工介入 0、阻塞 0、審查拒收 0、執行者備援 0、修復 1。Claude 費用約 4.25 美元（規劃與分流 1.47、執行 0.72、驗收 2.06；Codex 另計）。證據摘要：驗收專案的 `evidence/zero-intervention-routes-20261018.json`。
+
+### 2026-10-18：Expo（SDK 58、Expo Router、CNG）與自動交付（提案 0002 P3.5）
+
+**範例**：`PROTOFLOW_EXPO=1` 的 Playwright 真實驗收（`tests/e2e/android.spec.js`）把 `examples/mobile` 複製成乾淨的 Git checkout（不含 `expo/ios`、`expo/android`），由 target build 執行 `expo prebuild --clean`，再建置 iOS、Android Release：
+
+| target | build | functional | T1 結構 | T2 token | T3 版面 | 啟動 |
+|---|---|---|---|---|---|---|
+| `expo`（變體 `ios`、`android`） | PASS | PASS（jest-expo 5/5） | PASS | PASS | PASS | deep link，`job.json` 記錄 `protoflowtasks://settings?state=initial&fixture=%7B%7D` |
+
+整個測試 17.4 分鐘（prebuild 與 `pod install`、兩個 Release 建置、10 個場景）；prebuild 重新產生的被忽略原生專案沒有造成 `changedDuringVerification`。
+
+**自動交付**：獨立驗收專案（protoflow-test 的 `expo-acceptance` 分支，原型來源 `protoflow-expo-20261018`）只有 `expo` 一個 target，規劃與驗收為 Claude Opus、執行者為 Claude Sonnet，`runner.setup` 為 `npm --prefix expo ci`。原型 v1 `03778d7`（標題下顯示任務數量）：
+
+1. 第一輪 verify PASS（兩變體 T1–T3 PASS），獨立審查以一個低嚴重度發現（JSX 屬性間缺空格）判 FAIL，Runner 自動拒收；但因為唯一的 target 回報 BLOCKED，Runner 判定全部卡住而結束（exit 3）。這是引擎缺陷：多 target 專案有其他 target 讓迴圈繼續，所以先前未出現。已修正：自動拒收回傳 `REOPENED`，同一輪立即重開並修復（上限仍是 `MAX_AUTOMATED_REOPENINGS`）。
+2. 重新啟動 Runner 一次後，規劃、修復、verify PASS、獨立審查 PASS，交付 [protoflow-test#47](https://github.com/zhangqiu-ai/protoflow-test/pull/47) 自動合併（變更 `expo/app/tasks.tsx`、`expo/src/ui.tsx` 與功能測試）。
+
+從推送原型到合併 49 分鐘，人工介入 1（上述重啟），Claude 費用約 1.40 美元（規劃 0.47、執行 0.25、審查 0.68）。T4 為 advisory：場景整體相似度 0.947–0.992，低於門檻的元素是標題列字型渲染。證據摘要：驗收專案的 `evidence/expo-p35-20261018.json`。

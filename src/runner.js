@@ -198,7 +198,7 @@ const MAX_REVIEW_ATTEMPTS = 6;
 /**
  * Under policy.autoApprove the runner settles a blocked delivery the way an operator would, without weakening a gate:
  * a reviewer FAIL with findings becomes the decided model rejection of the accepted verification, so the version reopens
- * for repair (its findings are claims the executor checks against evidence); a review that lost its in-process
+ * for repair (status REOPENED; its findings are claims the executor checks against evidence); a review that lost its in-process
  * attestation on a restart, or was BLOCKED by a transient failure, gets a fresh provider review. A verdict is never
  * re-rolled; NOT_RUN, a version rejected MAX_AUTOMATED_REOPENINGS times and every other block stay for a person.
  */
@@ -262,7 +262,8 @@ async function rejectAutomatically(root, config, stream, runner, delivery, recor
     notes: `Automated rejection of independent AI review ${record.id} under policy.autoApprove; findings are claims to check against the evidence.`
   });
   await onEvent({ event: 'auto-rejected', deliveryId: delivery.id, reviewId: record.id, rejection: decided.id, findings: verdict.findings.length });
-  return { status: 'BLOCKED', reason: `Independent review ${record.id} FAIL; recorded automated rejection ${decided.id}, the version reopens for repair`, rejection: decided.id };
+  // Progress, not a block: the next pass reopens the version, so a single-target runner must not stop here.
+  return { status: 'REOPENED', reason: `Independent review ${record.id} FAIL; recorded automated rejection ${decided.id}, the version reopens for repair`, rejection: decided.id };
 }
 /** Durable launch intent, PID and completion of each child process of an attempt. */
 function processHooks(root, config, stream, state, record) {
@@ -666,7 +667,8 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         const events = stream ? event => onEvent({ ...event, target: stream }) : onEvent;
         let result;
         do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
-        while (result.status === 'PASS' && !signal?.aborted);
+        // An automated rejection (REOPENED) repairs at once; MAX_AUTOMATED_REOPENINGS bounds the loop.
+        while (['PASS', 'REOPENED'].includes(result.status) && !signal?.aborted);
         // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
         if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
           try {

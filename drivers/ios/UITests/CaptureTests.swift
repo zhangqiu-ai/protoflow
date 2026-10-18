@@ -14,6 +14,7 @@ final class CaptureTests: XCTestCase {
         let bundleId: String
         let screen: String
         let launchArguments: [String]
+        let launchUrl: String?
         let steps: [Step]
         let outputDir: String
         let timeoutMs: Int?
@@ -51,14 +52,23 @@ final class CaptureTests: XCTestCase {
             host.terminate()
         }
         app.terminate()
-        app.launchArguments = job.launchArguments
-        app.launch()
+        if let launchUrl = job.launchUrl {
+            // Deep-link apps (Expo Router) cold-start on the route the URL names; launch arguments do not apply.
+            guard let url = URL(string: launchUrl) else {
+                result = ["status": "FAIL", "reason": "launch URL \(launchUrl) is not a valid URL"]
+                return
+            }
+            app.open(url)
+        } else {
+            app.launchArguments = job.launchArguments
+            app.launch()
+        }
         guard app.wait(for: .runningForeground, timeout: launchTimeout) else {
             result = ["status": "FAIL", "reason": "app \(job.bundleId) did not reach the foreground"]
             return
         }
         guard element(app, job.screen).waitForExistence(timeout: launchTimeout) else {
-            result = failure(app, output, "screen anchor \(job.screen) did not appear (does the app honour -PROTOFLOW_SCREEN?)")
+            result = failure(app, output, "screen anchor \(job.screen) did not appear (does the app honour \(job.launchUrl.map { "the launch URL \($0)" } ?? "-PROTOFLOW_SCREEN")?)")
             return
         }
         for (index, step) in job.steps.enumerated() {
