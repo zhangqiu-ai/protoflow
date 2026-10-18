@@ -167,7 +167,7 @@ export function classifyChanges(before, after, config, { level } = {}) {
   // Anchored prototypes: the static contract gives scope; an invalid contract is never published as a version.
   const afterContract = staticContract(after, config);
   if (afterContract.errors.length) throw new AnchorLintError(afterContract.errors);
-  const scope = contractScope(staticContract(before, config), afterContract, changes.map(change => change.path));
+  const scope = contractScope(staticContract(before, config), afterContract, changes.map(change => change.path), { scopeExclude: config.anchors?.scopeExclude ?? [] });
   const contractLevel = scopeLevel(scope, afterContract);
   return { level: LEVELS.indexOf(contractLevel) > LEVELS.indexOf(fileLevel) ? contractLevel : fileLevel, changes, mappings: [], scope, contractWarnings: afterContract.warnings };
 }

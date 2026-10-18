@@ -13,7 +13,7 @@ import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interrupt
 import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
-import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
+import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive, isSymlinkKey } from './util.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { planVersion } from './planner.js';
 import { syncIssues } from './issues.js';
@@ -75,7 +75,7 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   try { await fs.access(path.join(worktree, '.git')); }
   catch { await git(root, ['worktree', 'add', '-b', branch, worktree, base]); }
   // Preserve the user's dirty index and files: copy the current content into an isolated checkout.
-  for (const relative of Object.keys(seed.files).filter(file => !file.endsWith(':target'))) {
+  for (const relative of Object.keys(seed.files).filter(file => !isSymlinkKey(file))) {
     const source = await projectPath(root, relative);
     const target = await projectPath(worktree, relative);
     await fs.mkdir(path.dirname(target), { recursive: true });

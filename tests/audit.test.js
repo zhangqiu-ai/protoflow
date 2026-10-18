@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { checkpoint, startSession } from '../src/sessions.js';
 import { createContext, executeContext, createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from '../src/workflow.js';
-import { fingerprint, gitIgnoredPaths, projectPath, hash, writeJson, runCommand } from '../src/util.js';
+import { fingerprint, gitIgnoredPaths, projectPath, hash, writeJson, runCommand, applicationHygiene} from '../src/util.js';
 
 const config = {
   schemaVersion: 1, prototypeDir: 'prototype', policy: { requireHumanReview: true },
@@ -121,6 +121,27 @@ test('fingerprint rejects internal symlinks into ignored state and tracks regula
   const after = await fingerprint(root);
   assert.notEqual(before.hash, after.hash);
   assert.notEqual(before.files['src/linked.js'], after.files['src/linked.js']);
+});
+
+test('fingerprint hashes symlinks that leave the project or dangle as link text without following them', async t => {
+  const { root } = await fixture(t);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-outside-'));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.writeFile(path.join(outside, 'secret.txt'), 'outside content');
+  await fs.mkdir(path.join(root, 'tools'), { recursive: true });
+  await fs.symlink(outside, path.join(root, 'tools/skills'));
+  await fs.symlink(path.join(root, 'missing.js'), path.join(root, 'tools/dangling'));
+  const before = await fingerprint(root);
+  assert.equal(before.files['tools/skills:link'], outside);
+  assert.equal(before.files['tools/dangling:link'], path.join(root, 'missing.js'));
+  assert.ok(!Object.keys(before.files).some(file => file.startsWith('tools/skills/')));
+  // Consumers that stat fingerprint entries skip link keys.
+  await applicationHygiene(root, before.files);
+  await fs.writeFile(path.join(outside, 'secret.txt'), 'changed outside');
+  assert.equal((await fingerprint(root)).hash, before.hash);
+  await fs.unlink(path.join(root, 'tools/skills'));
+  await fs.symlink(path.join(outside, 'secret.txt'), path.join(root, 'tools/skills'));
+  assert.notEqual((await fingerprint(root)).hash, before.hash);
 });
 
 test('fingerprint ignores native build output and dependency installs at any depth', async t => {

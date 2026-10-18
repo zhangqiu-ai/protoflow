@@ -254,8 +254,12 @@ export class AnchorLintError extends Error {
 
 const anchorFields = ['role', 'parent', 'order', 'repeat', 'dynamic', 'visualOnly', 'tag', 'inputType', 'text'];
 
-/** Scope of a version: which screens, anchors and states changed, from static contracts plus file-level changes. */
-export function contractScope(before, after, changedFiles) {
+/**
+ * Scope of a version: which screens, anchors and states changed, from static contracts plus file-level changes.
+ * `scopeExclude` globs name shared resources whose change alone does not affect a screen (for example a runtime
+ * that pre-rendered pages load); page, sidecar and contract changes still count.
+ */
+export function contractScope(before, after, changedFiles, { scopeExclude = [] } = {}) {
   const screens = {};
   const ensure = id => screens[id] ??= { status: 'changed', reasons: [], anchors: { added: [], removed: [], changed: [] }, states: { added: [], removed: [], changed: [] }, lowPrecision: false };
   for (const [id, screen] of Object.entries(after.screens)) {
@@ -280,7 +284,8 @@ export function contractScope(before, after, changedFiles) {
     if (JSON.stringify(previous.fixtures) !== JSON.stringify(screen.fixtures)) ensure(id).reasons.push('fixtures changed');
     if (screens[id]) screens[id].reasons.push('anchors or states changed');
     // File changes without a contract difference still affect rendering; record them at screen precision.
-    const touched = changedFiles.filter(file => file === screen.page || file === screen.sidecar || screen.resources.includes(file) || previous.resources.includes(file));
+    const excluded = file => scopeExclude.some(pattern => patternMatches(pattern, file));
+    const touched = changedFiles.filter(file => file === screen.page || file === screen.sidecar || ((screen.resources.includes(file) || previous.resources.includes(file)) && !excluded(file)));
     if (touched.length) {
       const entry = ensure(id);
       entry.reasons.push(...touched.map(file => file === screen.page ? `page changed: ${file}` : `resource changed: ${file}`));

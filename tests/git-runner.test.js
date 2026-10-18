@@ -1512,3 +1512,13 @@ test('issue triage runs after the prototype streams and its failure never stops 
   assert.ok(names.indexOf('execute') < names.indexOf('issues-failed'), names.join(','));
   assert.match(events.find(event => event.event === 'issues-failed').error, /No such remote 'origin'/);
 });
+
+test('JavaScript audit rejects module syntax but not prose that mentions export and from', async () => {
+  const { auditJavaScript } = await import('../src/source.js');
+  for (const code of ['import("https://example.test/a.js")', 'import x from "./a.js"', 'export * from "./a.js"', 'export * as ns from "./a.js"', 'export { a, b } from "./a.js"', 'export {a}from"./a.js"', 'export * /* note */ from "./a.js"', 'export /* a */ { a } // b\n from "./a.js"']) {
+    assert.throws(() => auditJavaScript(code), /JavaScript import\/re-export syntax is not auditable/, code);
+  }
+  for (const code of ["toast('Preparing your export'); const tip = 'picking up from the last';", 'const exported = 1; // export later from config']) {
+    assert.doesNotThrow(() => auditJavaScript(code), code);
+  }
+});

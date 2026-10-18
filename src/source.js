@@ -75,10 +75,14 @@ function srcsetReferences(value) {
   }
   return references;
 }
-function auditJavaScript(content) {
-  // No module parser is bundled. Conservatively reject module-loading tokens,
-  // including comment-separated and computed imports, rather than miss URLs.
-  if (/\bimport\b|\bexport\b[\s\S]*\bfrom\b/.test(content)) throw new Error('Prototype resource is not frozen: JavaScript import/re-export syntax is not auditable; vendor a bundled script without module-loading syntax');
+// Whitespace or comments between re-export tokens, so `export * /* note */ from` is still caught.
+const GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)*`;
+const REEXPORT = new RegExp(String.raw`\bexport${GAP}(?:\*(?:${GAP}as${GAP}[\w$]+)?|\{[^}]*\})${GAP}from\b`);
+export function auditJavaScript(content) {
+  // No module parser is bundled. Conservatively reject any `import` token, including comment-separated and computed
+  // imports, rather than miss URLs. Re-exports must take their module form (`export * from`, `export { … } from`), so
+  // prose such as "your export … from the last session" in UI copy is not mistaken for one.
+  if (/\bimport\b/.test(content) || REEXPORT.test(content)) throw new Error('Prototype resource is not frozen: JavaScript import/re-export syntax is not auditable; vendor a bundled script without module-loading syntax');
 }
 
 function auditableLocalFormat(value, extension) {
