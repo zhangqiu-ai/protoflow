@@ -30,6 +30,23 @@ export async function runIssues(root, config, stream, { signal, onEvent = () => 
   return withLock(root, () => withLock(root, () => runLocked(root, config, stream, targetId, { signal, onEvent, verifyVersion }), 'issues'));
 }
 
+/** Uncommitted tracked changes split into files whose bytes equal the current base's and all others. */
+async function baseIdenticalChanges(worktree, options) {
+  const files = (await git(worktree, ['diff', '--name-only', '-z', 'HEAD'])).split('\0').filter(Boolean);
+  if (!files.length) return { identical: [], other: [] };
+  const { sha: baseSha, url } = await currentBase(worktree, options);
+  try { await git(worktree, ['cat-file', '-e', `${baseSha}^{commit}`]); }
+  catch { await git(worktree, ['fetch', '--no-tags', '--no-write-fetch-head', url, baseSha]); }
+  const identical = [], other = [];
+  for (const file of files) {
+    let same = false;
+    try { same = (await git(worktree, ['hash-object', '--', file])) === (await git(worktree, ['rev-parse', `${baseSha}:${file}`])); }
+    catch { same = false; }
+    (same ? identical : other).push(file);
+  }
+  return { identical, other };
+}
+
 /** Why the target cannot take an issue now, or null when its prototype stream is idle and fully delivered. */
 async function busy(root, config, stream, runner) {
   if (!runner || runner.status !== 'IDLE' || runner.configHash !== hash(config)) return 'the runner is not idle';
@@ -64,7 +81,11 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
   if (!work) {
     const live = await api(`${base}/issues/${n}`);
     if (live.state !== 'open') { entry.status = 'closed'; entry.history.push({ status: 'closed', at: new Date().toISOString(), reason: 'Closed on GitHub before implementation' }); await save(); return { status: 'IDLE', reason: `Issue #${n} was closed` }; }
-    if ((await git(worktree, ['status', '--porcelain', '--untracked-files=no'])).trim()) return { status: 'IDLE', reason: `Issue #${n} waits: the runner worktree has uncommitted changes` };
+    const dirty = await baseIdenticalChanges(worktree, options);
+    if (dirty.other.length) return { status: 'IDLE', reason: `Issue #${n} waits: the runner worktree has uncommitted changes (${dirty.other.slice(0, 5).join(', ')})` };
+    // `runner configure` writes the new config into the worktree; the base already has those exact bytes, so the
+    // change is restored to HEAD and comes back unchanged with the fast-forward to the base.
+    if (dirty.identical.length) { await git(worktree, ['checkout', '-q', 'HEAD', '--', ...dirty.identical]); await events({ event: 'issue-settled-changes', files: dirty.identical }); }
     work = entry.targets[targetId] = { status: 'RUNNING', startedAt: new Date().toISOString(), attempts: [], reviews: [] };
     await save();
   }

@@ -1694,3 +1694,24 @@ test('FAKE providers only: a backend issue is implemented by the backend executo
   assert.equal(work.attempts[0].executor, 'codex');
   await assert.rejects(fs.access(claudeRuns), { code: 'ENOENT' });
 });
+
+test('FAKE providers only: worktree changes the base already has (runner configure) are settled; other changes keep the issue waiting', async t => {
+  const f = await fixture(t);
+  await plannedIssue(f);
+  const { runIssues } = await import('../src/issue-runner.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await idleRunner(f);
+  // The base gets a new README, as runner configure syncs a committed config into every worktree.
+  const clone = path.join(f.base, 'base-change');
+  await git(f.base, 'clone', '-q', f.remote, clone); await git(clone, 'config', 'user.email', 'fixture@protoflow.test'); await git(clone, 'config', 'user.name', 'Fixture');
+  await fs.writeFile(path.join(clone, 'README.md'), 'app\nFAKE FIXTURE: synced setting\n'); await git(clone, 'commit', '-q', '-am', 'sync setting'); await git(clone, 'push', '-q', 'origin', 'HEAD:main');
+  await fs.writeFile(path.join(f.worktree, 'README.md'), 'app\nFAKE FIXTURE: local edit\n');
+  assert.match((await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify() })).reason, /Issue #12 waits: the runner worktree has uncommitted changes \(README\.md\)/);
+  await fs.writeFile(path.join(f.worktree, 'README.md'), 'app\nFAKE FIXTURE: synced setting\n');
+  const events = [];
+  const result = await runIssues(f.root, f.config, null, { verifyVersion: fakeVerify(), onEvent: event => events.push(event) });
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  assert.deepEqual(events.find(event => event.event === 'issue-settled-changes').files, ['README.md']);
+  assert.equal(await git(f.remote, 'show', 'main:README.md'), 'app\nFAKE FIXTURE: synced setting');
+  assert.equal(await git(f.remote, 'show', 'main:app/index.html'), '<main>v1 fixed</main>');
+});
