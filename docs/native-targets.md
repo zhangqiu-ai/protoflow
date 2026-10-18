@@ -196,7 +196,7 @@ Compose 與 Flutter 注意事項：
 | `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density |
 | `visible` | frame 與內容區域相交且尺寸大於 0 | `isVisibleToUser` 且與內容區域相交 |
 | `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
-| `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型 |
+| `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型；可勾選的 `Button`（`ToggleButton`、帶 checked 狀態的 React Native 按鈕）視為按鈕，文字取其標籤 |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
 
 步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。

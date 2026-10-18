@@ -144,6 +144,7 @@ public class CaptureTest {
         if (id == null) return "step has no anchor";
         UiObject2 target = device.wait(Until.findObject(anchor(id)), timeout);
         if (target == null && !action.equals("scroll-to")) return "anchor " + id + " not found";
+        if (target != null) target = settled(id, target);
         switch (action) {
             case "wait-for": return null;
             case "tap": target.click(); return null;
@@ -168,6 +169,26 @@ public class CaptureTest {
             }
             default: return "unsupported action";
         }
+    }
+
+    /**
+     * The target once its bounds hold still. A previous step can start a layout animation (the keyboard hiding
+     * resizes the window), and a click on bounds read mid-animation lands on whatever moved there.
+     */
+    private UiObject2 settled(String id, UiObject2 target) {
+        device.waitForIdle();
+        long deadline = SystemClock.uptimeMillis() + 2000;
+        android.graphics.Rect previous = null;
+        while (SystemClock.uptimeMillis() < deadline) {
+            UiObject2 current = device.findObject(anchor(id));
+            if (current == null) return target;
+            android.graphics.Rect bounds = current.getVisibleBounds();
+            if (bounds.equals(previous)) return current;
+            previous = bounds;
+            target = current;
+            SystemClock.sleep(120);
+        }
+        return target;
     }
 
     /** Set the field and read it back; retry before reporting what the field actually shows. */
