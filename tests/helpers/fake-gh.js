@@ -13,7 +13,7 @@ const flag = name => args[args.indexOf(name) + 1];
 const repository = args.includes('--repo') ? flag('--repo') : process.env.GH_REPO;
 const head = (branch, target = repository) => execFileSync('git', ['ls-remote', 'https://' + target + '.git', 'refs/heads/' + branch]).toString().split('\t')[0] || null;
 const find = key => state.prs.find(pr => pr.repository === repository && (String(pr.number) === key || pr.head === key));
-const view = pr => ({ number: pr.number, url: 'https://' + pr.repository + '/pull/' + pr.number, state: pr.state, headRefOid: head(pr.head, pr.repository), baseRefOid: head(pr.base, pr.repository), baseRefName: pr.base, headRefName: pr.head, isDraft: pr.isDraft ?? false, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergedAt: pr.mergedAt ?? null });
+const view = pr => ({ number: pr.number, url: 'https://' + pr.repository + '/pull/' + pr.number, state: pr.state, headRefOid: head(pr.head, pr.repository), baseRefOid: head(pr.base, pr.repository), baseRefName: pr.base, headRefName: pr.head, isDraft: pr.isDraft ?? false, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergedAt: pr.mergedAt ?? null, body: pr.body ?? '' });
 const repo = name => ({ id: name.endsWith('/application') ? 101 : 202, full_name: name.replace('github.com/', ''), html_url: 'https://' + name });
 const rest = pr => ({ number: pr.number, html_url: view(pr).url, state: pr.state.toLowerCase(), head: { ref: pr.head, sha: pr.headSha ?? head(pr.head, pr.repository), repo: pr.headRepo ?? repo(pr.repository) }, base: { ref: pr.base, sha: pr.baseSha ?? head(pr.base, pr.repository), repo: repo(pr.repository) } });
 const [group, verb] = args;
@@ -31,9 +31,10 @@ else if (group === 'api' && /^repos\/protoflow-fixture\/[^/]+$/.test(verb) && fl
   console.log(JSON.stringify({ id: Number(process.env.FAKE_GH_REPOSITORY_ID ?? (name.endsWith('/application') ? 101 : 202)), full_name: name, html_url: 'https://github.com/' + name }));
 }
 else if (group === 'pr' && verb === 'list') { console.log(JSON.stringify(state.prs.filter(pr => pr.repository === repository && pr.state === 'OPEN' && pr.head === flag('--head') && pr.base === flag('--base')).map(view))); }
-else if (group === 'pr' && verb === 'create') { state.prs.push({ number: state.prs.length + 1, repository, head: flag('--head'), base: flag('--base'), title: flag('--title'), state: 'OPEN', isDraft: args.includes('--draft'), comments: [] }); }
+else if (group === 'pr' && verb === 'create') { state.prs.push({ number: state.prs.length + 1, repository, head: flag('--head'), base: flag('--base'), title: flag('--title'), body: flag('--body'), state: 'OPEN', isDraft: args.includes('--draft'), comments: [] }); }
 else if (group === 'pr' && verb === 'view') { console.log(JSON.stringify(view(find(args[2])))); }
 else if (group === 'pr' && verb === 'comment') { find(args[2]).comments.push(flag('--body')); }
+else if (group === 'pr' && verb === 'edit') { find(args[2]).body = flag('--body'); }
 else if (group === 'pr' && verb === 'ready') { find(args[2]).isDraft = false; }
 else if (group === 'pr' && verb === 'merge') {
   const pr = find(args[2]);

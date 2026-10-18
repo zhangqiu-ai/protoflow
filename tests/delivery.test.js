@@ -23,7 +23,7 @@ const realGit = (await exec('which', ['git'])).stdout.trim();
 const fixtureUrl = 'https://github.com/protoflow-fixture/application.git';
 const fixtureRepository = 'github.com/protoflow-fixture/application';
 
-async function fixture(t, { merge = 'auto', versions = 1, generated = false } = {}) {
+async function fixture(t, { merge = 'auto', versions = 1, generated = false, baseBranch = 'main' } = {}) {
   const base = await fs.mkdtemp(path.join('/tmp', 'protoflow-delivery-review-fake-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const remote = path.join(base, 'remote.git');
@@ -43,6 +43,7 @@ async function fixture(t, { merge = 'auto', versions = 1, generated = false } = 
   await git(root, 'add', '.');
   await git(root, 'commit', '-q', '-m', 'init');
   await git(root, 'push', '-q', 'origin', 'HEAD:main');
+  if (baseBranch !== 'main') await git(root, 'push', '-q', 'origin', `HEAD:${baseBranch}`);
   await git(root, 'worktree', 'add', '-q', '-b', 'runner-local', worktree);
   // Application edits plus content that must never be committed.
   await fs.mkdir(path.join(worktree, 'app'));
@@ -67,7 +68,7 @@ async function fixture(t, { merge = 'auto', versions = 1, generated = false } = 
   const config = {
     schemaVersion: 1, prototypeDir: 'prototype', mappings: [], policy: { sequentialVersions: true },
     source: { kind: 'git', repository: remote, branch: 'prototypes', path: 'prototype' },
-    runner: { delivery: { remote: 'origin', branch: 'protoflow/delivery', baseBranch: 'main', merge } },
+    runner: { delivery: { remote: 'origin', branch: 'protoflow/delivery', baseBranch, merge } },
     adapters: { independentReview: { command: { argv: [process.execPath, fileURLToPath(new URL('../scripts/codex-review-adapter.js', import.meta.url))], timeoutMs: 10000 } } },
   };
   for (const [index, sha] of shas.entries()) await acceptVersion({ root, worktree, config, sha, ordinal: index + 1, verificationId: `VER-${index + 1}`, executionId: `EXEC-fixture-${index + 1}` });
@@ -612,6 +613,55 @@ test('FAKE transport: legacy grafts are rejected before review or delivery', asy
   const review = await requestIndependentReview(f.root, f.config, f.reviewOptions);
   assert.equal(review.status, 'BLOCKED'); assert.match(review.reason, /Legacy Git grafts/);
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); await assertNoPublication(f);
+});
+
+const openSpecLines = body => body.split(/\r?\n/).filter(line => /^\s*OpenSpec-(?:Change|Exempt):/.test(line));
+
+test('FAKE GitHub: a non-main base branch receives the PR and merge, and the PR body carries each trailer exactly once', async t => {
+  const f = await fixture(t, { baseBranch: 'feature/mobile-rewrite' });
+  f.config.runner.delivery.prBodyTrailers = ['OpenSpec-Change: rewrite-mobile-ui'];
+  process.env.FAKE_GH_REAL_REMOTE = f.remote; process.env.FAKE_GH_ROOT = f.root;
+  const main = await git(f.remote, 'rev-parse', 'main');
+  const result = await syncDeliveries(f.root, f.config); assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const github = await f.gh(), [pr] = github.prs;
+  assert.equal(pr.base, 'feature/mobile-rewrite'); assert.equal(pr.state, 'MERGED');
+  assert.deepEqual(openSpecLines(pr.body), ['OpenSpec-Change: rewrite-mobile-ui']);
+  assert.match(pr.body, /^Automated application delivery from ProtoFlow\.[^\n]*\n\nOpenSpec-Change: rewrite-mobile-ui$/);
+  assert.ok(github.calls.filter(call => ['list', 'create'].includes(call[1])).every(call => call[call.indexOf('--base') + 1] === 'feature/mobile-rewrite'));
+  assert.ok(!github.calls.some(call => call[1] === 'edit'), 'a PR created with the trailers is not edited');
+  assert.equal(await git(f.remote, 'show', 'feature/mobile-rewrite:app/index.html'), '<main>v1</main>');
+  assert.equal(await git(f.remote, 'rev-parse', 'main'), main, 'main is never touched');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
+});
+
+test('FAKE GitHub: a reused open PR gets its stale trailer replaced so the body keeps exactly one', async t => {
+  const f = await fixture(t);
+  f.config.runner.delivery.prBodyTrailers = ['OpenSpec-Change: rewrite-mobile-ui'];
+  await writeJson(path.join(f.base, 'gh.json'), { calls: [], environments: [], prs: [{ number: 1, repository: fixtureRepository, head: 'protoflow/delivery', base: 'main', title: 'Opened by hand', state: 'OPEN', comments: [], body: 'Notes from a person\n\nOpenSpec-Change: old-change\nOpenSpec-Change: old-change' }] });
+  const result = await syncDeliveries(f.root, f.config); assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const github = await f.gh();
+  assert.equal(github.prs.length, 1); assert.ok(!github.calls.some(call => call[1] === 'create'));
+  assert.equal(github.prs[0].body, 'Notes from a person\n\nOpenSpec-Change: rewrite-mobile-ui');
+  assert.equal(github.calls.filter(call => call[1] === 'edit').length, 1);
+  assert.ok((await deliveryStatus(f.root)).deliveries[0].steps.prBodyAt);
+});
+
+test('runner.delivery.prBodyTrailers: the schema takes single "Key: value" lines and delivery blocks duplicate keys', async t => {
+  const { default: Ajv } = await import('ajv');
+  const { configSchemaV2 } = await import('../src/config.js');
+  const { withPullRequestTrailers } = await import('../src/delivery.js');
+  const validate = new Ajv({ strict: false }).compile(configSchemaV2);
+  const config = trailers => ({ schemaVersion: 2, prototypeDir: 'prototype', targets: [{ id: 'web', platform: 'web', root: '.' }], runner: { delivery: { branch: 'protoflow/delivery', baseBranch: 'feature/mobile-rewrite', prBodyTrailers: trailers } } });
+  assert.equal(validate(config(['OpenSpec-Change: rewrite-mobile-ui', 'Refs: #12'])), true, JSON.stringify(validate.errors));
+  for (const trailers of [[], ['OpenSpec-Change:'], ['no colon'], ['OpenSpec-Change: a\nOpenSpec-Change: b'], ['Key: trailing '], [' Key: x'], ['A: x', 'A: x']]) assert.equal(validate(config(trailers)), false, JSON.stringify(trailers));
+  assert.equal(withPullRequestTrailers('', ['A: 1']), 'A: 1');
+  assert.equal(withPullRequestTrailers('Body\r\nA: 0\r\n\r\n', ['A: 1']), 'Body\n\nA: 1');
+  assert.equal(withPullRequestTrailers('Body\n\nA: 1', ['A: 1']), 'Body\n\nA: 1');
+  assert.equal(withPullRequestTrailers('Body', undefined), 'Body');
+  const f = await fixture(t);
+  f.config.runner.delivery.prBodyTrailers = ['OpenSpec-Change: a', 'OpenSpec-Change: b'];
+  assert.deepEqual(await syncDeliveries(f.root, f.config), { status: 'BLOCKED', reason: 'runner.delivery.prBodyTrailers keys must be unique' });
+  await assertNoPublication(f);
 });
 
 test('FAKE GitHub: every PR action has reviewed repository/host scope despite GH_REPO, GH_HOST and default remote', async t => {
@@ -1581,6 +1631,7 @@ const idleRunner = async f => writeJson(path.join(f.root, '.protoflow/runner/sta
 
 test('FAKE providers only: a planned issue waits for the delivered prototype stream, then is fixed, reviewed, merged by PR and closed', async t => {
   const f = await fixture(t);
+  f.config.runner.delivery.prBodyTrailers = ['OpenSpec-Change: rewrite-mobile-ui'];
   const { issues, record } = await plannedIssue(f);
   const { runIssues } = await import('../src/issue-runner.js');
   await idleRunner(f);
@@ -1605,6 +1656,7 @@ test('FAKE providers only: a planned issue waits for the delivered prototype str
   assert.match(await git(f.worktree, 'log', '-1', '--format=%B', work.commit), /^Fix #12: Index shows the wrong label\n\nFixes #12\nIssue-Snapshot: ISS-12-[0-9a-f]{12}\nPlan: PLN-fixture-12\n/);
   const pr = (await f.gh()).prs.find(item => item.head === 'protoflow/issue-12');
   assert.equal(pr.state, 'MERGED'); assert.equal(pr.title, 'Fix #12: Index shows the wrong label');
+  assert.deepEqual(openSpecLines(pr.body), ['OpenSpec-Change: rewrite-mobile-ui']); assert.match(pr.body, /^Fixes #12\n[\s\S]*not a human approval\.\n\nOpenSpec-Change: rewrite-mobile-ui$/);
   assert.match(work.approval.reviewer, /^ai:codex-independent-review:review-fixture-AIR-/);
   // The acceptor judged the issue binding: snapshot, plan criteria and a regression verification of the latest version.
   const review = await reviewRecord(f, work.reviewId);

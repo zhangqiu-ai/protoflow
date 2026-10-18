@@ -112,7 +112,7 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 ```json
 {
   "policy": {"autoApprove": true},
-  "runner": {"delivery": {"remote": "origin", "branch": "protoflow/delivery", "baseBranch": "main", "merge": "auto", "draft": true, "paths": ["app", "package.json"]}},
+  "runner": {"delivery": {"remote": "origin", "branch": "protoflow/delivery", "baseBranch": "main", "merge": "auto", "draft": true, "paths": ["app", "package.json"], "prBodyTrailers": ["OpenSpec-Change: my-change"]}},
   "adapters": {"independentReview": {"command": {"argv": ["node", "/absolute/shared-engine/scripts/codex-review-adapter.js"], "timeoutMs": 600000}}}
 }
 ```
@@ -120,7 +120,22 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 1. 在隔離 worktree commit 應用改動，排除 `RUNTIME_DIRS`（`.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`、DerivedData、Pods、`.gradle`、xcuserdata）；Git 忽略的未追蹤檔（React Native codegen、Expo CNG 的 `ios/`／`android/` 等）不會被 stage，也不在 application hash 中，見 [Git 忽略的檔案](independent-review.md#git-忽略的檔案)。訊息列出 source、manifest 和 verification，獨立 review 尚未執行時不宣稱批准。
 2. 使用新 Codex read-only session review 已 commit 的完整應用；session 必須不同於原 executor JSONL 中的所有 session 與已知作者 thread。嚴格 structured verdict PASS 且無 findings 才能通過，綁定 HEAD/tree、完整內容、source/manifest/new VER/hash 和當前 remote base SHA。缺配置、缺原始 execution provenance、FAIL／NOT_RUN 或漂移一律 BLOCKED。
 3. `policy.autoApprove: true` 時才建立 `reviewerKind: automated` 的本地 Review／Baseline，明確引用独立 session 與 trace/hash；不冒充真人 ADR 或 GitHub review。接著普通推送至專用 `delivery.branch`，不推 main/base、不強推、不跟隨 tag。推送前、恢復時和合併前都重核對證據與 remote refs；只容許合法推送令 branch tip 精確成為被 review 的 commit。
-4. 重用或建立 PR 並留言證據。`merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併；不使用 `gh pr review --approve` 或 `--admin`，保留 branch protection。`"manual"`（兼容 `"none"`）留給人合併；draft PR 的後續 auto 版本必須通過自身 gate 才 ready 和 merge。已記錄 MERGED 的版本不重複處理。
+4. 重用或建立 PR 並留言證據。PR 的目標分支是 `baseBranch`，可為任何分支（例如 `feature/mobile-rewrite`），不限 `main`；交付分支不得等於 `baseBranch`、`main` 或 `master`。`merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併；不使用 `gh pr review --approve` 或 `--admin`，保留 branch protection。`"manual"`（兼容 `"none"`）留給人合併；draft PR 的後續 auto 版本必須通過自身 gate 才 ready 和 merge。已記錄 MERGED 的版本不重複處理。
+
+### PR 正文附加行（`prBodyTrailers`）
+
+目標 repo 的 CI 要求 PR 正文帶固定標記時（例如每個 PR 恰好一行 `OpenSpec-Change: <change-id>`），在 `runner.delivery` 設定 `prBodyTrailers`：
+
+```json
+{"runner": {"delivery": {"branch": "protoflow/delivery", "baseBranch": "feature/mobile-rewrite", "merge": "auto", "prBodyTrailers": ["OpenSpec-Change: rewrite-mobile-ui"]}}}
+```
+
+- 每項是一行 `Key: value`（key 為英文字母開頭的字母、數字與 `-`，冒號後一個空格，值不可為空、不可換行或以空白結尾），最多 10 項，key 不得重複；不符時 schema 驗證失敗，交付與 issue 修復回傳 BLOCKED。
+- 建立 PR 時附加在正文末尾，與原正文以空行隔開。
+- 重用既有的 open PR（之前建立或人工開的）時，先讀取正文：移除與設定 key 相同的舊行，再把設定的行附加在末尾；只有內容不同時才 `gh pr edit --body`。每個交付只檢查一次（`steps.prBodyAt`），在留言與合併之前完成。
+- 同樣套用到 issue 修復的 PR（見 [GitHub Issues 收件與分流](integrations.md#github-issues-收件與分流提案-0003-p4)）。
+- 只比對設定的 key：其他 key 的行（例如人工寫的 `OpenSpec-Exempt:`）原樣保留，若目標 CI 把它們算進同一條規則，需自行移除。
+- 正文在 PR 建立後才修改時，GitHub 觸發 `pull_request` 的 `edited` 事件；目標 CI 只監聽 `opened`／`synchronize` 時，需重新執行檢查。
 
 多目標時每個 target 依序以自己的 worktree、交付分支 `<delivery.branch>/<id>` 與紀錄 `.protoflow/delivery/<id>.json` 走完上述步驟，各自取得獨立 review PASS；一個 target BLOCKED 不阻擋其他 target。交付 commit 不得包含兄弟 target 的 root。兄弟 target 先合併令 base 前進時，只在 base 的變更全部位於兄弟 root／prototype／runtime 目錄、且本 target application hash 不變時，才把精確 base SHA merge 進本 target worktree 後再 review；否則 BLOCKED 並需在新 base 上重新驗收。詳見 [獨立 review 的多目標交付](independent-review.md#多目標交付schemaversion-2)。
 

@@ -276,6 +276,31 @@ export async function ghJson(worktree, repository, args) {
   return result.stdout.trim() ? JSON.parse(result.stdout) : null;
 }
 
+const trailerKey = line => line.slice(0, line.indexOf(':'));
+/** `body` with each configured `Key: value` trailer exactly once at its end; earlier lines with the same key are dropped. */
+export function withPullRequestTrailers(body, trailers) {
+  if (!trailers?.length) return body;
+  const keys = new Set(trailers.map(trailerKey));
+  const kept = String(body ?? '').split(/\r?\n/).filter(line => !keys.has(/^\s*([A-Za-z][A-Za-z0-9-]*):/.exec(line)?.[1]));
+  while (kept.length && !kept.at(-1).trim()) kept.pop();
+  return [...kept, ...(kept.length ? [''] : []), ...trailers].join('\n');
+}
+export function trailerError(trailers) {
+  if (trailers === undefined) return null;
+  if (!Array.isArray(trailers) || !trailers.length || trailers.some(line => typeof line !== 'string' || !/^[A-Za-z][A-Za-z0-9-]*: [^\r\n]*\S$/.test(line))) return 'runner.delivery.prBodyTrailers must be single "Key: value" lines';
+  return new Set(trailers.map(trailerKey)).size === trailers.length ? null : 'runner.delivery.prBodyTrailers keys must be unique';
+}
+/** A reused PR (opened earlier or by hand) gets the configured trailers; the body is rewritten only when it differs. */
+export async function ensurePullRequestTrailers(worktree, repository, number, trailers) {
+  if (!trailers?.length) return false;
+  const { body } = await ghJson(worktree, repository, ['pr', 'view', String(number), '--json', 'body']);
+  const wanted = withPullRequestTrailers(body, trailers);
+  if (wanted === body) return false;
+  const edited = await gh(worktree, repository, ['pr', 'edit', String(number), '--body', wanted]);
+  if (edited.status !== 'PASS') throw ghFailure('gh pr edit', edited);
+  return true;
+}
+
 async function assertPullRequestScope(worktree, independent, delivery) {
   const reviewed = independent.binding.remote, repository = reviewed.repository;
   const pr = await deliveryPullRequest(worktree, repository, delivery.pr?.number);
@@ -327,6 +352,8 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   catch { return { status: 'BLOCKED', reason: 'Invalid delivery branch/base' }; }
   try { if (options.paths) { if (!Array.isArray(options.paths) || !options.paths.length || new Set(options.paths).size !== options.paths.length) throw new Error('Delivery allowlist must contain unique prefixes'); for (const prefix of options.paths) allowPath(prefix, config); } }
   catch (error) { return { status: 'BLOCKED', reason: error.message }; }
+  const invalidTrailers = trailerError(options.prBodyTrailers);
+  if (invalidTrailers) return { status: 'BLOCKED', reason: invalidTrailers };
   worktree ??= (await readJson(await projectPath(root, runnerStatePath(config, target)), null))?.worktree;
   if (!worktree) return { status: 'NOT_RUN', reason: 'Runner worktree does not exist yet' };
   const source = await loadProgress(root, config, target);
@@ -455,7 +482,7 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         delivery.pr = open?.[0] ?? null;
         if (!delivery.pr) {
           await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
-          const created = await gh(worktree, repository, ['pr', 'create', ...(options.draft ? ['--draft'] : []), '--base', options.baseBranch, '--head', branch, '--title', `ProtoFlow delivery: prototype ${delivery.shas.at(-1).slice(0, 7)}`, '--body', 'Automated application delivery from ProtoFlow. Each delivery is summarized in a comment below.']);
+          const created = await gh(worktree, repository, ['pr', 'create', ...(options.draft ? ['--draft'] : []), '--base', options.baseBranch, '--head', branch, '--title', `ProtoFlow delivery: prototype ${delivery.shas.at(-1).slice(0, 7)}`, '--body', withPullRequestTrailers('Automated application delivery from ProtoFlow. Each delivery is summarized in a comment below.', options.prBodyTrailers)]);
           if (created.status !== 'PASS') throw ghFailure('gh pr create', created);
           // Look the new PR up among open PRs: the branch may also have older, merged PRs.
           delivery.pr = (await ghJson(worktree, repository, ['pr', 'list', '--head', branch, '--base', options.baseBranch, '--state', 'open', '--json', 'number,url']))?.[0] ?? null;
@@ -463,6 +490,11 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         }
       }
       await assertPullRequestScope(worktree, independent, delivery);
+      if (options.prBodyTrailers && !delivery.steps.prBodyAt) {
+        await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
+        await ensurePullRequestTrailers(worktree, repository, delivery.pr.number, options.prBodyTrailers);
+        delivery.steps.prBodyAt = new Date().toISOString(); await saveDelivery(root, config, target, state);
+      }
       if (!delivery.steps.commentedAt) {
         const entries = (await loadProgress(root, config, target)).entries.filter(entry => delivery.versions.includes(entry.manifestId));
         await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
