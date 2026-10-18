@@ -27,7 +27,8 @@ if (kind === 'labels' && !number) {
 }
 if (kind === 'issues' && !number && method === 'GET') {
   const label = url.searchParams.get('labels');
-  out(state.issues.filter(item => (item.state ?? 'open') === 'open' && item.labels.includes(label)).map(view));
+  if (Number(url.searchParams.get('page') ?? 1) > 1) out([]);
+  out(state.issues.filter(item => (item.state ?? 'open') === 'open' && (label === null || item.labels.includes(label))).map(view));
 }
 if (kind === 'issues' && number && !sub && method === 'GET') out(view(issue()));
 if (kind === 'issues' && number && !sub && method === 'PATCH') { const item = issue(); item.state = body.state; item.stateReason = body.state_reason; out(view(item)); }

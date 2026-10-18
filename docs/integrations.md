@@ -107,7 +107,7 @@
 ```
 
 - **範圍**：只讀取交付 remote（`issues.remote`，預設 `runner.delivery.remote` 或 `origin`）解析出的正式 GitHub 倉庫；每個 API 端點都必須在 `repos/<owner>/<name>/` 之下。讀取遇到網路暫時錯誤會原地重試，寫入（留言、標籤）一律不重試。
-- **收件**：帶 `issues.label` 的開啟 Issue（不含 PR），依編號處理。每次分流前快照標題、內文、留言、標籤與作者，存成 `.protoflow/issues/snapshots/ISS-<n>-<hash>.json`。
+- **收件**：帶 `issues.label` 的開啟 Issue（不含 PR），依編號處理。設 `issues.all: true` 時改為處理**所有**開啟的 Issue（逐頁讀取，最多 1,000 個），由 AI 接手整個 Issue 列表；加上 `<label>:skip`（預設 `protoflow:skip`，首次執行時建立）的 Issue 一律略過。作者授權規則不變。每次分流前快照標題、內文、留言、標籤與作者，存成 `.protoflow/issues/snapshots/ISS-<n>-<hash>.json`。
 - **授權**：作者的 `author_association` 不在 `issues.authors` 時不呼叫規劃者，直接標 `needs-human`。維護者移除該標籤即重新分流；引擎從 Issue events 找出移除者，確認其有 write、maintain 或 admin 權限才算數，否則發出 `issue-unconfirmed` 並繼續等待。
 - **分流**：唯讀 Claude 規劃者（與原型流程同一套 trace 驗證）回答 `implement`、`needs-info`、`needs-human` 或 `reject`，並給出 targets、步驟、驗收條件、需新增的測試、風險與問題。引擎規則：L3、缺 targets／步驟／驗收條件／測試的 `implement`、沒有問題的 `needs-info`，一律改為 `needs-human`。每輪最多規劃 `maxTriagePerSync` 個 Issue；規劃失敗下一輪重試，連續 3 次失敗轉 `needs-human`。
 - **發布**：決定以標示為 AI 的留言發布（含規劃者模型、方案 id、session、快照 id），並把 Issue 的狀態標籤換成 `<label>:planned`、`needs-info`、`needs-human` 或 `rejected`（首次執行時自動建立 7 個狀態標籤）。決定先寫入 `.protoflow/issues/state.json` 再發布；中途中斷時下一輪依留言開頭的標記續做，不會重複留言。`rejected` 不會自動關閉 Issue。
