@@ -68,7 +68,8 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
     return runner;
   }
   const base = runner?.base ?? (await git(root, ['rev-parse', `${config.runner?.applicationRef ?? 'HEAD'}^{commit}`])).trim();
-  const seed = await fingerprint(root, { exclude: [config.prototypeDir] });
+  // Committable content only: Git-ignored build output and local files (.env, native builds) are rebuilt by setup, not copied.
+  const seed = await fingerprint(root, { exclude: [config.prototypeDir], gitIgnore: true });
   const branch = runner?.branch ?? `protoflow-runner-${id('local').toLowerCase()}`;
   runner = { schemaVersion: 1, worktree, branch, base, configHash: hash(config), seedHash: seed.hash, status: 'INITIALIZING', afterMergeAlignment: true, createdAt: new Date().toISOString() };
   await saveRunner(root, runner, statePath);
@@ -86,7 +87,8 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   const tracked = (await git(worktree, ['ls-files', '-z'])).split('\0').filter(Boolean);
   for (const relative of tracked) {
     if (relative === config.prototypeDir || relative.startsWith(`${config.prototypeDir}/`)) continue;
-    if (!(relative in seed.files)) await fs.rm(await projectPath(worktree, relative), { force: true });
+    // A symlink leaving the project is recorded as `<path>:link` and comes with the checkout; it is not a deletion.
+    if (!(relative in seed.files) && !(`${relative}:link` in seed.files)) await fs.rm(await projectPath(worktree, relative), { force: true });
   }
   await fs.mkdir(await projectPath(worktree, config.prototypeDir), { recursive: true });
   if (config.runner?.setup) {

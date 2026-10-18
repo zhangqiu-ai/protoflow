@@ -105,6 +105,23 @@ test('runner unit fixture (failing argv, no Codex provider): blocks FIFO, preser
   await retryRunner(root); await runOnce(root, config); state = await sourceStatus(root);
   assert.equal(state.entries[0].attempts.length, 2); assert.equal(state.entries[1].attempts.length, 0);
 });
+test('runner seeds committable content only and keeps a tracked symlink that leaves the project', async t => {
+  const { root, config } = await fixture(t);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-skills-'));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'tools'), { recursive: true });
+  await fs.symlink(outside, path.join(root, 'tools/skills'));
+  await fs.writeFile(path.join(root, '.gitignore'), `${await fs.readFile(path.join(root, '.gitignore'), 'utf8').catch(() => '')}\nbuild-output/\n`);
+  await git(root, ['add', 'tools/skills', '.gitignore']); await git(root, ['commit', '-m', 'Link tools']);
+  await fs.mkdir(path.join(root, 'build-output'), { recursive: true });
+  await fs.writeFile(path.join(root, 'build-output/huge.bin'), 'generated');
+  await scanSource(root, config);
+  const result = await runOnce(root, config);
+  assert.equal(result.status, 'BLOCKED');
+  const { worktree } = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/state.json'), 'utf8'));
+  assert.equal(await fs.readlink(path.join(worktree, 'tools/skills')), outside);
+  await assert.rejects(fs.stat(path.join(worktree, 'build-output/huge.bin')), { code: 'ENOENT' });
+});
 test('foreground runner reports failed initial fetch as failure instead of idle success', async t => {
   const { root, config } = await fixture(t);
   const result = await startRunner(root, { ...config, source: { ...config.source, repository: path.join(root, 'missing-source') } }, { once: true });
