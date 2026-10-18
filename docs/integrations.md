@@ -116,7 +116,7 @@
   1. 把該 target 的 runner worktree 快轉到目前的 base，Issue 轉為 `in-progress`（AI 留言）。
   2. 執行者依方案修改（context 帶 `issue` 與 `plan`；Issue 內容標為不受信任資料），再以 `reverify` 對該 target **最新已接受的原型版本**跑完整驗證（build、functional、分層），確保修 Issue 不破壞原型一致性。方案列出測試時，修改必須新增或修改測試檔，否則視為失敗並進入修復；修復上限沿用 `policy.maxRepairAttempts`，執行者額度與暫時性錯誤的處理與原型流程相同。
   3. 提交 `Fix #n: <標題>`（trailer 含 `Fixes #n`、快照、方案、驗證與 base），獨立審查的 binding 改為 `issue`（快照、方案驗收條件與測試、規劃者 session）加上一筆 `regression: true` 的版本驗證；驗收者不得是規劃者或執行者 session。審查 FAIL 不重審。
-  4. 自動批准（標示為 AI）、推送到 `protoflow/issue-<n>`（多 target 為 `protoflow/issue-<n>/<target>`）、開 PR（內文 `Fixes #n`；尚有其他 target 未合併時為 `Part of #n`）、以 `--match-head-commit` 合併，再把 runner worktree 對齊到合併 commit。
+  4. 自動批准（標示為 AI）、推送到 `protoflow/issue-<n>`（多 target 為 `protoflow/issue-<n>/<target>`）、開 PR（內文 `Fixes #n`；尚有其他 target 未合併時為 `Part of #n`；設定 `runner.delivery.prBodyTrailers` 時末尾附加這些行，見 [PR 正文附加行](git-runner.md#pr-正文附加行prbodytrailers)）、目標分支為 `runner.delivery.baseBranch`、以 `--match-head-commit` 合併，再把 runner worktree 對齊到合併 commit。
   5. 方案的所有 target 都合併後，Issue 加上 `done`、AI 結案留言並關閉（非預設分支不會因 `Fixes #n` 自動關閉，因此由引擎關閉）。
   - 修復用盡、審查 FAIL 或其他阻擋時，該 target 的修改被丟棄、worktree 回到開始時的 base，Issue 標 `blocked` 並附原因與 findings，原型串流繼續。有寫入權限的維護者移除 `blocked` 標籤後，Issue 重新分流，已合併的 target 保留。
   - base 在發布前前進（例如同一個 Issue 的其他 target 先合併）時，已提交的修正被丟棄、從新的 base 重做（最多 3 次，記在 `restarts` 與 `history`）；尚未提交的工作每次接續都先丟棄未完成的修改並快轉到目前的 base。

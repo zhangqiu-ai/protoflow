@@ -188,7 +188,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 1. 在隔離 worktree commit 應用改動（排除 `.protoflow/`、`node_modules`、建置快取，以及 Git 忽略的生成檔）。
 2. 以全新、唯讀、ephemeral 的 Codex session 審查已 commit 的完整應用（`scripts/codex-review-adapter.js`）。審查 session 必須不同於執行者，只有嚴格的結構化 PASS 且沒有 findings 才算通過。
 3. `policy.autoApprove: true` 時，才建立 `reviewerKind: automated` 的 Review 與 Baseline。這不能代替真人 ADR 或 GitHub approval。
-4. 推送到專用交付分支（多目標時為 `<branch>/<id>`），重用或建立 PR，並留言證據。`merge: "auto"` 以 `--match-head-commit` 合併；`"manual"` 留給人合併。不使用 `--admin`，也不強推。
+4. 推送到專用交付分支（多目標時為 `<branch>/<id>`），重用或建立以 `baseBranch`（任何分支，不限 `main`）為目標的 PR，並留言證據。`prBodyTrailers` 讓 PR 正文帶固定標記行（例如 `OpenSpec-Change: <id>`），每個 key 恰好一行，重用的 PR 也會更正，見 [PR 正文附加行](docs/git-runner.md#pr-正文附加行prbodytrailers)。`merge: "auto"` 以 `--match-head-commit` 合併；`"manual"` 留給人合併。不使用 `--admin`，也不強推。
 
 在 `autoApprove` 下，審查 FAIL 且附 findings 時，Runner 會自動記錄模型拒收並重開版本修復（每版最多 3 次）。因暫時性網路故障而 BLOCKED 的審查會自動重新審查；審查判斷本身永不重擲。GitHub 的只讀請求遇到暫時性錯誤會原地重試（`PROTOFLOW_NETWORK_RETRIES`，預設 2）。
 

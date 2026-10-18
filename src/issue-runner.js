@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { projectPath, readJson, writeJson, hash, withLock } from './util.js';
 import { createContext, executeContext, executorPlan, executorCommand, verify } from './workflow.js';
 import { loadProgress, runnerStatePath } from './streams.js';
-import { deliveryStatus, stageApplication, currentBase, ghJson, ghFailure, AUTOMATED_REVIEWER } from './delivery.js';
+import { deliveryStatus, stageApplication, currentBase, ghJson, ghFailure, AUTOMATED_REVIEWER, withPullRequestTrailers, ensurePullRequestTrailers, trailerError } from './delivery.js';
 import { requestIndependentReview, assertIndependentReview, recordedVerdict, isRejectingVerdict, issueBranch } from './delivery-review.js';
 import { deliveryGit as git, deliveryGh as gh } from './delivery-scope.js';
 import { alignDeliveredRunner } from './runner-alignment.js';
@@ -27,6 +27,8 @@ export async function runIssues(root, config, stream, { signal, onEvent = () => 
   const targetId = stream ?? defaultIssueTarget(config);
   if (!settings.targets.some(target => target.id === targetId)) return { status: 'IDLE' };
   if (!config.policy?.autoApprove || config.runner?.delivery?.merge !== 'auto') return { status: 'NOT_RUN', reason: 'Issue fixes need policy.autoApprove and runner.delivery.merge "auto"' };
+  const invalidTrailers = trailerError(config.runner.delivery.prBodyTrailers);
+  if (invalidTrailers) return { status: 'BLOCKED', reason: invalidTrailers };
   return withLock(root, () => withLock(root, () => runLocked(root, config, stream, targetId, { signal, onEvent, verifyVersion }), 'issues'));
 }
 
@@ -95,7 +97,7 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
     await git(worktree, ['reset', '-q', '--hard', work.baseSha]); await git(worktree, ['clean', '-fdq', '-e', '.protoflow', '-e', 'node_modules']);
     work.history = [...(work.history ?? []), { restartedAt: new Date().toISOString(), reason, commit: work.commit, reviewId: work.reviewId ?? null, pr: work.pr?.url ?? null }];
     work.restarts = (work.restarts ?? 0) + 1;
-    for (const key of ['commit', 'manifestId', 'verificationId', 'executionIds', 'committedAt', 'reviewId', 'approval', 'pushedAt', 'pr']) delete work[key];
+    for (const key of ['commit', 'manifestId', 'verificationId', 'executionIds', 'committedAt', 'reviewId', 'approval', 'pushedAt', 'pr', 'prBodyAt']) delete work[key];
     work.previousReviews = [...(work.previousReviews ?? []), ...work.reviews]; work.reviews = [];
     await save();
     await events({ event: 'issue-restart', reason });
@@ -189,12 +191,16 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
       work.pr = await find();
       if (!work.pr) {
         const remaining = plan.plan.targets.filter(target => target !== targetId && entry.targets[target]?.status !== 'MERGED');
-        const created = await gh(worktree, repository, ['pr', 'create', '--base', options.baseBranch, '--head', branch, '--title', `Fix #${n}: ${(await readJson(await projectPath(root, `.protoflow/issues/snapshots/${entry.snapshotId}.json`))).title}`.slice(0, 250), '--body', pullRequestBody(n, targetId, plan, independent, work, remaining)]);
+        const created = await gh(worktree, repository, ['pr', 'create', '--base', options.baseBranch, '--head', branch, '--title', `Fix #${n}: ${(await readJson(await projectPath(root, `.protoflow/issues/snapshots/${entry.snapshotId}.json`))).title}`.slice(0, 250), '--body', withPullRequestTrailers(pullRequestBody(n, targetId, plan, independent, work, remaining), options.prBodyTrailers)]);
         if (created.status !== 'PASS') throw ghFailure('gh pr create', created);
         work.pr = await find();
         if (!work.pr) throw new Error(`gh pr create did not leave an open PR for ${branch}`);
       }
       await save();
+    }
+    if (options.prBodyTrailers && !work.prBodyAt) {
+      await ensurePullRequestTrailers(worktree, repository, work.pr.number, options.prBodyTrailers);
+      work.prBodyAt = new Date().toISOString(); await save();
     }
     if (!work.mergedAt) {
       await assertIndependentReview(root, config, independent.id, { ...gate, published: true });
