@@ -8,7 +8,7 @@ ProtoFlow 是原型驅動的工程引擎：設計者提交 HTML 原型，引擎�
 
 - **原型來源**：追蹤 GitHub repo／branch／path 的提交，逐筆凍結完整原型快照（固定 SHA 與內容 hash）；未配置 Git 來源時，可改用本機 Design Session／watch／checkpoint。
 - **兩種 UI 協定**：schemaVersion 2 以平台中立的**語意錨點**（`data-pf`）描述原型，新增畫面不需改配置；schemaVersion 1 以 selector **元件映射**對應原型與應用。
-- **多平台 target**：Web（Playwright）、Electron、iOS（XCUITest）、Android（UiAutomator）、React Native 與 Flutter；一份原型可同時驅動多個 target，各自獨立推進。
+- **多平台 target**：Web（Playwright）、Electron、iOS（XCUITest）、Android（UiAutomator）、React Native、Expo（Expo Router、CNG）與 Flutter；一份原型可同時驅動多個 target，各自獨立推進。
 - **分層驗收**：T1 結構語意、T2 design token（CIEDE2000）、T3 相對版面、T4 視覺（Web 像素、原生 SSIM），每層可設為 required／advisory／off。
 - **本機 Runner**：在隔離 worktree 依序呼叫 Codex、驗證與有限次修復；可自動重試暫時性故障、清理殘留程序、持久保存進度，中斷後可安全恢復。
 - **自動交付**：通過驗收的版本會被 commit，取得獨立 Codex 審查 PASS 後才推送、開 PR、合併，並且保留 branch protection。
@@ -94,9 +94,9 @@ protoflow install --project /path/to/app
   | React Native | `testID` |
   | Flutter | `Semantics(identifier:)` |
 
-- **驅動器**：`driver.kind` 可以是 `playwright-web`、`playwright-electron`（`main`、`route`）或 `external`。原生平台使用 `external`，透過 [驅動器協定](schemas/driver-request.schema.json) 接入；內建 `scripts/ios-driver.js` 與 `scripts/android-driver.js` 兩個參考驅動器。應用要能以 `PROTOFLOW_SCREEN` 啟動參數直接打開指定畫面，見 [原生 target](docs/native-targets.md)。
+- **驅動器**：`driver.kind` 可以是 `playwright-web`、`playwright-electron`（`main`、`route`）或 `external`。原生平台使用 `external`，透過 [驅動器協定](schemas/driver-request.schema.json) 接入；內建 `scripts/ios-driver.js` 與 `scripts/android-driver.js` 兩個參考驅動器。應用要能以 `PROTOFLOW_SCREEN` 啟動參數直接打開指定畫面；畫面即路由的應用（例如 Expo Router）改用驅動器的 `--launch-url` deep link，見 [原生 target](docs/native-targets.md)。
 - **分層與回歸範圍**：Web 預設四層全部 required，並做全量回歸；原生預設 T4 為 advisory，回歸範圍是 `affected+smoke`。checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響的畫面與錨點；錨點無效的版本不會產生。
-- **變體與差異**：同一份程式碼跑在多個平台（React Native、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
+- **變體與差異**：同一份程式碼跑在多個平台（React Native、Expo、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
 - **多目標**：`targets` 可以列出多個平台，各有獨立的 `root`、進度、worktree 與交付分支，一個 target 阻塞不影響其他 target。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已完成的最新版本。多目標時用 `--target <id>` 指定命令作用的 target。
 - **工具**：`anchors lint`、`anchors suggest --patch-file`、`contract show`，以及從 v1 遷移的 `migrate anchors`（只產生草稿，不套用）。
 
@@ -253,7 +253,7 @@ Node API 從 `src/index.js` 匯出，包括 `requestIndependentReview`、`accept
 | [examples/demo](examples/demo/) | 最小 v1 流程，`npm run demo` 啟動原型與應用 |
 | [examples/modular](examples/modular/) | 多頁原型、共用資源與多筆映射（v1） |
 | [examples/anchors](examples/anchors/) | 語意錨點、sidecar 狀態與 tokens，一個 Web target（v2） |
-| [examples/mobile](examples/mobile/) | 同一份原型驅動 SwiftUI、Compose、React Native、Flutter 四個 target（v2） |
+| [examples/mobile](examples/mobile/) | 同一份原型驅動 SwiftUI、Compose、React Native、Expo、Flutter 五個 target（v2） |
 
 範例命令請從引擎根目錄執行，例如：
 
@@ -275,7 +275,7 @@ npm run validate    # 以上全部
 npm pack            # 產生可移交的本機套件，不會 publish
 ```
 
-Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可用 `npm run test:e2e -- --project=<name>` 分別執行。`ios` 與 `android` 是真實模擬器驗收，需要設定 `PROTOFLOW_IOS_DEVICE` 或 `PROTOFLOW_ANDROID_AVD`。缺少原生環境時，會在報告中明確顯示為 skip，不能當作驗收通過。CI 在 Ubuntu 執行單元測試與 Chromium E2E，在 macOS 執行真實 Electron E2E。
+Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可用 `npm run test:e2e -- --project=<name>` 分別執行。`ios` 與 `android` 是真實模擬器驗收，需要設定 `PROTOFLOW_IOS_DEVICE` 或 `PROTOFLOW_ANDROID_AVD`；`PROTOFLOW_FLUTTER=1`、`PROTOFLOW_EXPO=1` 另外驗收 Flutter 與 Expo target 的兩個變體。缺少原生環境時，會在報告中明確顯示為 skip，不能當作驗收通過。CI 在 Ubuntu 執行單元測試與 Chromium E2E，在 macOS 執行真實 Electron E2E。
 
 測試都在暫存專案中隔離執行；人工批准測試使用明確標示的 synthetic reviewer。本機 Git fixture 和假的 provider 只是測試替身，真實 GitHub + Codex 驗收另需保留來源 SHA、EXEC JSONL、verification 與截圖，見 [原生 target 驗收紀錄](docs/native-targets.md#驗收紀錄)。
 
@@ -288,10 +288,10 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/architecture.md](docs/architecture.md) | 模組邊界、路由、驗證可信度與限制 |
 | [docs/git-runner.md](docs/git-runner.md) | Git 來源、Runner、多目標、自動交付與恢復 |
 | [docs/independent-review.md](docs/independent-review.md) | 獨立 AI 審查閘門與重用接口 |
-| [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Flutter 的需求、配置與約定 |
+| [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Expo、Flutter 的需求、配置、deep link 啟動與約定 |
 | [docs/integrations.md](docs/integrations.md) | Codex、Claude（規劃、執行、驗收）、GitHub Issues、Spec Kit、BMad adapter 與沙箱權限 |
 | [docs/acceptance-adapters.md](docs/acceptance-adapters.md) | 專案驗收 adapter 協定（v1） |
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
-| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter（0002）、Claude 規劃與驗收及 GitHub Issues（0003）提案與實作紀錄 |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）提案與實作紀錄 |
