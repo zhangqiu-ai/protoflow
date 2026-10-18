@@ -40,6 +40,21 @@ export function compareStructure(screen, state, prototype, application, { native
   const reasons = [];
   let checked = 0;
   const anchors = uniqueAnchors(screen).filter(anchor => !anchor.visualOnly);
+  // A container's text includes its descendants'. Text an anchor marks dynamic (a clock, a countdown, a receipt id)
+  // is left out at every level, so it is checked only for presence, never compared through an ancestor.
+  const parentOf = new Map(screen.anchors.map(anchor => [anchor.id, anchor.parent]));
+  const dynamicUnder = id => anchors.filter(item => item.dynamic && item.id !== id && (() => {
+    for (let parent = parentOf.get(item.id); parent; parent = parentOf.get(parent)) if (parent === id) return true;
+    return id === screen.anchors.find(anchor => anchor.role === 'screen')?.id;
+  })());
+  const textOf = (capture, id) => {
+    let text = normalizeText(element(capture, id).text);
+    for (const item of dynamicUnder(id)) {
+      const part = normalizeText(element(capture, item.id).text);
+      if (part) text = normalizeText(text.replace(part, ' '));
+    }
+    return text;
+  };
   for (const anchor of anchors) {
     checked++;
     const left = element(prototype, anchor.id), right = element(application, anchor.id);
@@ -56,7 +71,7 @@ export function compareStructure(screen, state, prototype, application, { native
     }
     if (left.visible !== right.visible) { reasons.push(`${anchor.id}: visible ${left.visible} in prototype vs ${right.visible} in application`); continue; }
     if (!left.visible) continue;
-    if (!anchor.dynamic && normalizeText(left.text) !== normalizeText(right.text)) reasons.push(`${anchor.id}: text "${normalizeText(left.text)}" vs "${normalizeText(right.text)}"`);
+    if (!anchor.dynamic && textOf(prototype, anchor.id) !== textOf(application, anchor.id)) reasons.push(`${anchor.id}: text "${textOf(prototype, anchor.id)}" vs "${textOf(application, anchor.id)}"`);
     if (anchor.role === 'action' && !right.interactive) reasons.push(`${anchor.id}: action is not interactive in the application`);
     if (anchor.role === 'input' && !right.editable) reasons.push(`${anchor.id}: input is not editable in the application`);
     if (['action', 'input'].includes(anchor.role) && left.enabled !== undefined && right.enabled !== undefined && left.enabled !== right.enabled) reasons.push(`${anchor.id}: enabled ${left.enabled} vs ${right.enabled}`);
