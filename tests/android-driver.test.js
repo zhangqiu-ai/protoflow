@@ -53,6 +53,9 @@ test('Android classes and flags map to the shared element types', () => {
   assert.equal(nodeType({ className: 'androidx.appcompat.widget.SwitchCompat', checkable: true }), 'switch');
   assert.equal(nodeType({ className: 'android.widget.CheckBox', checkable: true }), 'checkBox');
   assert.equal(nodeType({ className: 'android.widget.RadioButton', checkable: true }), 'radioButton');
+  assert.equal(nodeType({ className: 'android.widget.Button', checkable: true, contentDescription: 'I agree' }), 'button');
+  assert.equal(nodeType({ className: 'android.widget.ToggleButton', checkable: true }), 'button');
+  assert.equal(nodeType({ className: 'android.view.ViewGroup', checkable: true }), 'checkBox');
   assert.equal(nodeType({ className: 'android.widget.SeekBar' }), 'slider');
   assert.equal(nodeType({ className: 'android.widget.Button', text: 'Add' }), 'button');
   assert.equal(nodeType({ className: 'android.view.View', clickable: true, contentDescription: 'Back' }), 'button');

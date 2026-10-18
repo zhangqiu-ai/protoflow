@@ -41,17 +41,26 @@ export function compareStructure(screen, state, prototype, application, { native
   let checked = 0;
   const anchors = uniqueAnchors(screen).filter(anchor => !anchor.visualOnly);
   // A container's text includes its descendants'. Text an anchor marks dynamic (a clock, a countdown, a receipt id)
-  // is left out at every level, so it is checked only for presence, never compared through an ancestor.
+  // is left out at every level, so it is checked only for presence, never compared through an ancestor. The same
+  // words can also be static text nearby (a field labelled "Password" whose placeholder is "Password"), and whether a
+  // field's own text shows up in its container differs by platform, so only occurrences beyond those the static leaf
+  // anchors account for are removed, last first (a field follows its label).
   const parentOf = new Map(screen.anchors.map(anchor => [anchor.id, anchor.parent]));
-  const dynamicUnder = id => anchors.filter(item => item.dynamic && item.id !== id && (() => {
+  const screenId = screen.anchors.find(anchor => anchor.role === 'screen')?.id;
+  const isUnder = (item, id) => {
+    if (item.id === id) return false;
     for (let parent = parentOf.get(item.id); parent; parent = parentOf.get(parent)) if (parent === id) return true;
-    return id === screen.anchors.find(anchor => anchor.role === 'screen')?.id;
-  })());
+    return id === screenId;
+  };
+  const leaves = anchors.filter(item => !item.dynamic && !anchors.some(other => isUnder(other, item.id)));
+  const occurrences = (text, part) => [...` ${text} `.matchAll(new RegExp(`(?<= )${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= )`, 'g'))].map(match => match.index - 1);
   const textOf = (capture, id) => {
     let text = normalizeText(element(capture, id).text);
-    for (const item of dynamicUnder(id)) {
+    for (const item of anchors.filter(other => other.dynamic && isUnder(other, id))) {
       const part = normalizeText(element(capture, item.id).text);
-      if (part) text = normalizeText(text.replace(part, ' '));
+      if (!part) continue;
+      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(normalizeText(element(capture, leaf.id).text), part).length, 0);
+      for (const index of occurrences(text, part).slice(accounted).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
     }
     return text;
   };
