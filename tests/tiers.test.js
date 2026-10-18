@@ -210,3 +210,20 @@ test('T1 structure leaves dynamic descendants out of a container text', () => {
   // Static text around it is still compared.
   assert.deepEqual(compareStructure(page, state, shot(45), shot(44, 'Enter code')).reasons, ['verify: text "Enter the code" vs "Enter code"', 'verify.title: text "Enter the code" vs "Enter code"']);
 });
+
+test('T1 structure keeps static text that repeats a dynamic field text', () => {
+  const page = { anchors: [
+    { id: 'signin', role: 'screen', parent: null },
+    { id: 'signin.label', role: 'element', parent: 'signin' },
+    { id: 'signin.password', role: 'input', parent: 'signin', dynamic: true }
+  ] };
+  const shot = (container, field) => ({ elements: {
+    signin: { count: 1, visible: true, bounds: box(0, 0, 400, 300), text: container },
+    'signin.label': { count: 1, visible: true, bounds: box(0, 0, 400, 20), text: 'Password' },
+    'signin.password': { count: 1, visible: true, interactive: true, editable: true, bounds: box(0, 30, 400, 40), text: field }
+  } });
+  // The web container omits input values; the native one may or may not include the placeholder.
+  assert.deepEqual(compareStructure(page, state, shot('Password Sign in', ''), shot('Password Sign in', 'Password')).reasons, []);
+  assert.equal(compareStructure(page, state, shot('Password Sign in', ''), shot('Password Password Sign in', 'Password')).status, 'PASS');
+  assert.equal(compareStructure(page, state, shot('Password Sign in', ''), shot('Sign in', 'Password')).status, 'FAIL');
+});

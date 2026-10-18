@@ -27,7 +27,9 @@ export function nodeType(node) {
   const cls = shortClass(node.className);
   const label = node.text || node.contentDescription;
   if (node.editable || /EditText|AutoCompleteTextView/.test(cls)) return node.password ? 'secureTextField' : 'textField';
-  if (node.checkable) return /Switch/.test(cls) ? 'switch' : /RadioButton/.test(cls) ? 'radioButton' : 'checkBox';
+  // A checkable Button (ToggleButton, or a React Native pressable with a checked state) is a toggle button: its label is
+  // its text, like a web button with aria-pressed.
+  if (node.checkable) return /Switch/.test(cls) ? 'switch' : /RadioButton/.test(cls) ? 'radioButton' : /CheckBox/.test(cls) ? 'checkBox' : /Button$/.test(cls) ? 'button' : 'checkBox';
   if (/SeekBar|Slider/.test(cls)) return 'slider';
   if (/Button/.test(cls)) return 'button';
   if (node.clickable && label && !node.children?.length) return 'button';
