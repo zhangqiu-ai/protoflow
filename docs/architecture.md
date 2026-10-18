@@ -58,7 +58,7 @@ checkpoint 保存 exact before/after hashes、文字 diff、增刪改、映射�
 
 依序執行 build、functional，再執行 visual。build 可能產生應用資產，因此在 build 後記錄 acceptance 起點，並在 functional/visual 後重算 project fingerprint。驗證期間產品內容變動、checkpoint 原型變更、任何子檢查 FAIL 都導致 FAIL；未配置／缺少 Chromium／native 表面導致 NOT_RUN。
 
-fingerprint 涵蓋專案檔案，排除 `.git`、`node_modules`、`.protoflow`、Playwright report/result。symlink 必須在專案內，並跟蹤來源內容；追蹤來源不能 symlink 到被排除的依賴或 state。專案 testing artifacts 建議放 `.protoflow/` 或預設 Playwright 目錄，避免 acceptance 自己改動被驗證內容。
+fingerprint 涵蓋專案檔案，排除 `.git`、`node_modules`、`.protoflow`、Playwright report/result。專案內的 symlink 跟蹤來源內容，追蹤來源不能 symlink 到被排除的依賴或 state；指向專案外或懸空的 symlink（例如連到使用者家目錄的工具目錄）以連結文字計入，不跟蹤，與 Git 保存 symlink 的方式一致。專案 testing artifacts 建議放 `.protoflow/` 或預設 Playwright 目錄，避免 acceptance 自己改動被驗證內容。
 
 視覺比較在獨立的 prototype/app browser contexts 執行相同 fixture 和步驟。等待字型／圖片就緒，停止 transition/animation，捕捉 viewport。幾何容差預設 1 CSS px；重要 computed styles 精確比較；pixelmatch 允許小量抗鋸齒容差。每個元件區域單獨比較，無平均權重掩蓋失敗。初版只驗證穩定場景，動畫時間軸需目標專案另寫 Playwright 測試。
 

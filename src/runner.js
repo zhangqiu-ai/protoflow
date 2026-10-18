@@ -13,7 +13,7 @@ import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interrupt
 import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
 import { staticContract } from './anchors.js';
-import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive } from './util.js';
+import { fingerprint, hash, projectPath, readJson, writeJson, runCommand, withLock, id, processGroupAlive, isSymlinkKey } from './util.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { planVersion } from './planner.js';
 import { syncIssues } from './issues.js';
@@ -68,14 +68,15 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
     return runner;
   }
   const base = runner?.base ?? (await git(root, ['rev-parse', `${config.runner?.applicationRef ?? 'HEAD'}^{commit}`])).trim();
-  const seed = await fingerprint(root, { exclude: [config.prototypeDir] });
+  // Committable content only: Git-ignored build output and local files (.env, native builds) are rebuilt by setup, not copied.
+  const seed = await fingerprint(root, { exclude: [config.prototypeDir], gitIgnore: true });
   const branch = runner?.branch ?? `protoflow-runner-${id('local').toLowerCase()}`;
   runner = { schemaVersion: 1, worktree, branch, base, configHash: hash(config), seedHash: seed.hash, status: 'INITIALIZING', afterMergeAlignment: true, createdAt: new Date().toISOString() };
   await saveRunner(root, runner, statePath);
   try { await fs.access(path.join(worktree, '.git')); }
   catch { await git(root, ['worktree', 'add', '-b', branch, worktree, base]); }
   // Preserve the user's dirty index and files: copy the current content into an isolated checkout.
-  for (const relative of Object.keys(seed.files).filter(file => !file.endsWith(':target'))) {
+  for (const relative of Object.keys(seed.files).filter(file => !isSymlinkKey(file))) {
     const source = await projectPath(root, relative);
     const target = await projectPath(worktree, relative);
     await fs.mkdir(path.dirname(target), { recursive: true });
@@ -86,7 +87,8 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   const tracked = (await git(worktree, ['ls-files', '-z'])).split('\0').filter(Boolean);
   for (const relative of tracked) {
     if (relative === config.prototypeDir || relative.startsWith(`${config.prototypeDir}/`)) continue;
-    if (!(relative in seed.files)) await fs.rm(await projectPath(worktree, relative), { force: true });
+    // A symlink leaving the project is recorded as `<path>:link` and comes with the checkout; it is not a deletion.
+    if (!(relative in seed.files) && !(`${relative}:link` in seed.files)) await fs.rm(await projectPath(worktree, relative), { force: true });
   }
   await fs.mkdir(await projectPath(worktree, config.prototypeDir), { recursive: true });
   if (config.runner?.setup) {

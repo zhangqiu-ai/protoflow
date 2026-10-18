@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, lstat, stat, realpath, readdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, lstat, stat, realpath, readdir, readlink, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -54,12 +54,14 @@ export const HYGIENE = { maxNewFiles: 1000, maxFileBytes: 25 * 1024 * 1024 };
  * repository should hold: more than HYGIENE.maxNewFiles files that Git does not track yet (a GRADLE_USER_HOME or pub
  * cache placed in the worktree), or any file above HYGIENE.maxFileBytes. Non-Git projects only get the size check.
  */
+/** Fingerprint keys that describe a symlink (`:target` inside the project, `:link` outside or dangling), not a file. */
+export const isSymlinkKey = name => name.endsWith(':target') || name.endsWith(':link');
 export async function applicationHygiene(root, files) {
   root = await realpath(root);
   let tracked = null;
   try { tracked = new Set((await exec('git', ['-c', 'core.quotePath=false', 'ls-files', '-z'], { cwd: root, maxBuffer: 64 * 1024 * 1024 })).stdout.split('\0').filter(Boolean)); }
   catch { /* not a Git checkout */ }
-  const names = Object.keys(files).filter(name => !name.endsWith(':target'));
+  const names = Object.keys(files).filter(name => !isSymlinkKey(name));
   const added = tracked ? names.filter(name => !tracked.has(name)) : [];
   const large = [];
   for (const name of names) {
@@ -177,8 +179,18 @@ export async function fingerprint(root, { exclude = [], gitIgnore = false } = {}
       if (ignored.has(item.name)) continue;
       const name = relative ? `${relative}/${item.name}` : item.name;
       if (excluded.includes(name) || gitIgnored.has(name) || gitIgnored.has(`${name}/`)) continue;
-      const location = await projectPath(root, name);
       let entry = item;
+      if (item.isSymbolicLink()) {
+        // Git stores a symlink as its target text. A link that leaves the project or dangles (for example a tool
+        // directory linking to the user's home) is hashed as that text and never followed.
+        const link = path.join(root, name);
+        const destination = await realpath(link).catch(() => null);
+        if (!destination || (destination !== root && !destination.startsWith(`${root}${path.sep}`))) {
+          files[`${name}:link`] = await readlink(link);
+          continue;
+        }
+      }
+      const location = await projectPath(root, name);
       if (item.isSymbolicLink()) {
         const destination = await realpath(location);
         if (path.relative(root, destination).split(path.sep).some(segment => ignored.has(segment))) throw new Error(`Tracked symlink points into ignored state: ${name}`);

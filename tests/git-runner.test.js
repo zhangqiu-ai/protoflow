@@ -105,6 +105,23 @@ test('runner unit fixture (failing argv, no Codex provider): blocks FIFO, preser
   await retryRunner(root); await runOnce(root, config); state = await sourceStatus(root);
   assert.equal(state.entries[0].attempts.length, 2); assert.equal(state.entries[1].attempts.length, 0);
 });
+test('runner seeds committable content only and keeps a tracked symlink that leaves the project', async t => {
+  const { root, config } = await fixture(t);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-skills-'));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'tools'), { recursive: true });
+  await fs.symlink(outside, path.join(root, 'tools/skills'));
+  await fs.writeFile(path.join(root, '.gitignore'), `${await fs.readFile(path.join(root, '.gitignore'), 'utf8').catch(() => '')}\nbuild-output/\n`);
+  await git(root, ['add', 'tools/skills', '.gitignore']); await git(root, ['commit', '-m', 'Link tools']);
+  await fs.mkdir(path.join(root, 'build-output'), { recursive: true });
+  await fs.writeFile(path.join(root, 'build-output/huge.bin'), 'generated');
+  await scanSource(root, config);
+  const result = await runOnce(root, config);
+  assert.equal(result.status, 'BLOCKED');
+  const { worktree } = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/state.json'), 'utf8'));
+  assert.equal(await fs.readlink(path.join(worktree, 'tools/skills')), outside);
+  await assert.rejects(fs.stat(path.join(worktree, 'build-output/huge.bin')), { code: 'ENOENT' });
+});
 test('foreground runner reports failed initial fetch as failure instead of idle success', async t => {
   const { root, config } = await fixture(t);
   const result = await startRunner(root, { ...config, source: { ...config.source, repository: path.join(root, 'missing-source') } }, { once: true });
@@ -1511,4 +1528,14 @@ test('issue triage runs after the prototype streams and its failure never stops 
   const names = events.map(event => event.event);
   assert.ok(names.indexOf('execute') < names.indexOf('issues-failed'), names.join(','));
   assert.match(events.find(event => event.event === 'issues-failed').error, /No such remote 'origin'/);
+});
+
+test('JavaScript audit rejects module syntax but not prose that mentions export and from', async () => {
+  const { auditJavaScript } = await import('../src/source.js');
+  for (const code of ['import("https://example.test/a.js")', 'import x from "./a.js"', 'export * from "./a.js"', 'export * as ns from "./a.js"', 'export { a, b } from "./a.js"', 'export {a}from"./a.js"', 'export * /* note */ from "./a.js"', 'export /* a */ { a } // b\n from "./a.js"']) {
+    assert.throws(() => auditJavaScript(code), /JavaScript import\/re-export syntax is not auditable/, code);
+  }
+  for (const code of ["toast('Preparing your export'); const tip = 'picking up from the last';", 'const exported = 1; // export later from config']) {
+    assert.doesNotThrow(() => auditJavaScript(code), code);
+  }
 });

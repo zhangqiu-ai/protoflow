@@ -262,7 +262,7 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         const waived = tier => new Set((target.deviations ?? []).filter(item => item.allow.includes(tier)).map(item => item.anchor));
         const without = tier => { const skip = waived(tier); return skip.size ? { ...screen, anchors: screen.anchors.filter(anchor => anchor.role === 'screen' || !skip.has(anchor.id)) } : screen; };
         const tiers = {
-          structure: compareStructure(screen, state, prototype, app.capture),
+          structure: compareStructure(screen, state, prototype, app.capture, { native: !['web', 'electron'].includes(target.platform) }),
           tokens: compareTokens(without('tokens'), prototype, app.capture, { tokens, ...settings.tokens }),
           layout: compareLayout(scene.screen, without('layout'), prototype, app.capture, { ...settings.layout, viewport: settings.viewport }),
           visual: compareVisual(without('visual'), prototype, app.capture, settings.visual)

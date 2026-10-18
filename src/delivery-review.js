@@ -194,11 +194,18 @@ async function capture(root, config, options, ownedMerge = null) {
   const treeFiles = new Map((await git(worktree, ['ls-tree', '-r', '-z', head])).split('\0').filter(Boolean).map(row => {
     const [meta, file] = row.split('\t'); return [file, meta.split(' ')];
   }));
-  for (const [file, expected] of Object.entries(application.files)) {
+  for (const [key, expected] of Object.entries(application.files)) {
+    // A symlink that leaves the project is bound by its link text; the committed tree must hold the same symlink.
+    if (key.endsWith(':link')) {
+      const entry = treeFiles.get(key.slice(0, -':link'.length));
+      if (!entry || entry[0] !== '120000' || (await gitBytes(worktree, ['cat-file', 'blob', entry[2]])).toString() !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
+      continue;
+    }
+    const file = key;
     const entry = treeFiles.get(file);
     if (!entry || !['100644', '100755'].includes(entry[0]) || ((await fs.lstat(await projectPath(worktree, file))).mode & 0o111 ? '100755' : '100644') !== entry[0] || hash(await gitBytes(worktree, ['cat-file', 'blob', entry[2]])) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
   }
-  for (const file of treeFiles.keys()) if (!file.split('/').some(part => RUNTIME_DIRS.includes(part)) && !outside.some(prefix => file === prefix || file.startsWith(`${prefix}/`)) && !Object.hasOwn(application.files, file)) throw blocked('Committed application content was removed after commit');
+  for (const file of treeFiles.keys()) if (!file.split('/').some(part => RUNTIME_DIRS.includes(part)) && !outside.some(prefix => file === prefix || file.startsWith(`${prefix}/`)) && !Object.hasOwn(application.files, file) && !Object.hasOwn(application.files, `${file}:link`)) throw blocked('Committed application content was removed after commit');
   const source = await loadProgress(root, config, target);
   let versions = [], entries, issue = null;
   if (options.issue) ({ entries, versions, issue } = await issueEvidence(root, worktree, config, target, source, options.issue));

@@ -186,3 +186,27 @@ test('tier verdict honours required, advisory and off policies', () => {
   assert.equal(tierVerdict({ ...tiers, structure: { status: 'NOT_RUN' } }, { visual: 'advisory' }), 'NOT_RUN');
   assert.equal(tierVerdict({ ...tiers, tokens: { status: 'NOT_RUN' } }, { tokens: 'off', visual: 'off' }), 'PASS');
 });
+
+test('T1 structure on a native target compares an email input as a text field but keeps password distinct', () => {
+  // A native accessibility tree cannot report the keyboard type.
+  assert.equal(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'text' } }), { native: true }).status, 'PASS');
+  assert.deepEqual(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'password' } }), { native: true }).reasons, ['home.email: input type email vs password']);
+  // On the web the input type stays exact.
+  assert.deepEqual(compareStructure(screen, state, capture(), capture({ 'home.email': { inputType: 'text' } })).reasons, ['home.email: input type email vs text']);
+});
+
+test('T1 structure leaves dynamic descendants out of a container text', () => {
+  const page = { anchors: [
+    { id: 'verify', role: 'screen', parent: null },
+    { id: 'verify.title', role: 'element', parent: 'verify' },
+    { id: 'verify.timer', role: 'element', parent: 'verify', dynamic: true }
+  ] };
+  const shot = (timer, title = 'Enter the code') => ({ elements: {
+    verify: { count: 1, visible: true, bounds: box(0, 0, 400, 300), text: `${title} Resend in ${timer} s` },
+    'verify.title': { count: 1, visible: true, bounds: box(0, 0, 400, 40), text: title },
+    'verify.timer': { count: 1, visible: true, bounds: box(0, 60, 400, 20), text: `Resend in ${timer} s` }
+  } });
+  assert.equal(compareStructure(page, state, shot(45), shot(44)).status, 'PASS');
+  // Static text around it is still compared.
+  assert.deepEqual(compareStructure(page, state, shot(45), shot(44, 'Enter code')).reasons, ['verify: text "Enter the code" vs "Enter code"', 'verify.title: text "Enter the code" vs "Enter code"']);
+});

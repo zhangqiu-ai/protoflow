@@ -95,7 +95,8 @@ protoflow install --project /path/to/app
   | Flutter | `Semantics(identifier:)` |
 
 - **驅動器**：`driver.kind` 可以是 `playwright-web`、`playwright-electron`（`main`、`route`）或 `external`。原生平台使用 `external`，透過 [驅動器協定](schemas/driver-request.schema.json) 接入；內建 `scripts/ios-driver.js` 與 `scripts/android-driver.js` 兩個參考驅動器。應用要能以 `PROTOFLOW_SCREEN` 啟動參數直接打開指定畫面；畫面即路由的應用（例如 Expo Router）改用驅動器的 `--launch-url` deep link，見 [原生 target](docs/native-targets.md)。
-- **分層與回歸範圍**：Web 預設四層全部 required，並做全量回歸；原生預設 T4 為 advisory，回歸範圍是 `affected+smoke`。checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響的畫面與錨點；錨點無效的版本不會產生。
+- **分層與回歸範圍**：Web 預設四層全部 required，並做全量回歸；原生預設 T4 為 advisory，回歸範圍是 `affected+smoke`。checkpoint 以靜態合約比較前後版本，manifest 的 `scope` 列出受影響的畫面與錨點；錨點無效的版本不會產生。target 的 `regression` 可設為 `all`、`affected`、`affected+smoke`；應用尚未涵蓋全部畫面時用 `affected`，避免冒煙測試落在未實作的畫面。
+- **共用資源範圍**：頁面引用的共用資源改變時，預設把所有引用的畫面列為受影響。原型以共用 runtime 預先渲染成靜態頁時，可設 `anchors.scopeExclude`（glob，路徑含 `prototypeDir`，如 `prototype/runtime/**`），讓這些資源單獨改變不影響畫面範圍；頁面、sidecar 與合約差異照常計入，因此產生器須把渲染結果（含樣式）反映在頁面本身。
 - **變體與差異**：同一份程式碼跑在多個平台（React Native、Expo、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
 - **多目標**：`targets` 可以列出多個平台，各有獨立的 `root`、進度、worktree 與交付分支，一個 target 阻塞不影響其他 target。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已完成的最新版本。多目標時用 `--target <id>` 指定命令作用的 target。
 - **工具**：`anchors lint`、`anchors suggest --patch-file`、`contract show`，以及從 v1 遷移的 `migrate anchors`（只產生草稿，不套用）。

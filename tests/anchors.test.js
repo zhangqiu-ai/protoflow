@@ -107,6 +107,39 @@ test('scope reports added/removed screens, anchor changes, resource-only changes
   assert.ok(!scope.screens.a.anchors.changed.some(change => change.id === 'a'));
 });
 
+test('scopeExclude keeps a shared runtime change from affecting every screen', () => {
+  const runtime = '<script src="runtime/app.js"></script>';
+  const before = staticContract(snapshot({
+    'prototype/a.html': page(`${runtime}<h1 data-pf="a.title">A</h1>`, 'a'),
+    'prototype/b.html': page(`${runtime}<h1 data-pf="b.title">B</h1>`, 'b'),
+    'prototype/runtime/app.js': 'v1'
+  }), config);
+  const after = staticContract(snapshot({
+    'prototype/a.html': page(`${runtime}<h1 data-pf="a.title">A2</h1>`, 'a'),
+    'prototype/b.html': page(`${runtime}<h1 data-pf="b.title">B</h1>`, 'b'),
+    'prototype/runtime/app.js': 'v2'
+  }), config);
+  const changed = ['prototype/a.html', 'prototype/runtime/app.js'];
+  // Without the option a runtime change marks every consumer.
+  assert.deepEqual(contractScope(before, after, changed).affected, ['a', 'b']);
+  const scope = contractScope(before, after, changed, { scopeExclude: ['prototype/runtime/**'] });
+  assert.deepEqual(scope.affected, ['a']);
+  assert.ok(scope.screens.a.reasons.includes('page changed: prototype/a.html'));
+  assert.ok(!scope.screens.a.reasons.includes('resource changed: prototype/runtime/app.js'));
+  // Still a consumed resource, so it is not reported as unscreened.
+  assert.deepEqual(scope.unscreened, []);
+  // A runtime-only change affects nothing; sidecar changes still count.
+  assert.deepEqual(contractScope(before, before, ['prototype/runtime/app.js'], { scopeExclude: ['prototype/runtime/**'] }).affected, []);
+  // Checkpoints read the option from anchors.scopeExclude.
+  const files = (title, js) => snapshot({
+    'prototype/a.html': page(`${runtime}<h1 data-pf="a.title">${title}</h1>`, 'a'),
+    'prototype/b.html': page(`${runtime}<h1 data-pf="b.title">B</h1>`, 'b'),
+    'prototype/runtime/app.js': js
+  });
+  const configured = { ...config, anchors: { scopeExclude: ['prototype/runtime/**'] } };
+  assert.deepEqual(classifyChanges(files('A', 'v1'), files('A2', 'v2'), configured).scope.affected, ['a']);
+});
+
 test('style-only change stays L0 and v2 checkpoints carry scope instead of mappings', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-anchor-cp-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

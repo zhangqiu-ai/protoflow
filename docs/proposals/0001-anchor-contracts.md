@@ -94,7 +94,7 @@ ProtoFlow 的目標是通用的原型驅動開發：同一份 HTML 原型，驅�
 | `data-pf-role` | `screen`、`region`、`element`（預設）、`action`、`input` |
 | `data-pf-repeat` | 清單項目樣板；驗收比較數量（依 fixture）與第一項內容，不要求唯一 |
 | `data-pf-visual-only` | 無語意的裝飾或繪圖（插畫、圖表），只參與 T4 視覺層 |
-| `data-pf-text="dynamic"` | 文字由資料決定（時間、金額），T1 只檢查存在與格式類型，不比對內容 |
+| `data-pf-text="dynamic"` | 文字由資料決定（時間、金額），T1 只檢查存在與格式類型，不比對內容；祖先錨點比對文字時也扣除這段動態文字 |
 
 規則：
 
