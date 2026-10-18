@@ -5,10 +5,11 @@
  * instrumentation runner (drivers/android), so it serves Compose, View, React Native and Flutter targets alike.
  *
  *   argv: node scripts/android-driver.js --package ID --avd NAME [--apk PATH.apk] [--activity CLASS]
- *         [--frame safe-area|device] [--timeout-ms N] [--launch-timeout-ms N] [--cache DIR]
+ *         [--launch-url TEMPLATE] [--frame safe-area|device] [--timeout-ms N] [--launch-timeout-ms N] [--cache DIR]
  *
  * Launch convention: the app receives PROTOFLOW_SCREEN, PROTOFLOW_STATE and PROTOFLOW_FIXTURE (JSON) as string intent
- * extras and must open that screen directly. Environment problems (no SDK/JDK, missing AVD, boot/install timeout,
+ * extras and must open that screen directly; with --launch-url the extras ride on an ACTION_VIEW intent for that deep
+ * link (src/drivers/launch-url.js), e.g. Expo Router. Environment problems (no SDK/JDK, missing AVD, boot/install timeout,
  * runner build failure, lost adb) are NOT_RUN; an app that cannot reach the state is FAIL.
  */
 import { parseArgs } from 'node:util';
@@ -20,13 +21,14 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { androidResponse } from '../src/drivers/android-tree.js';
+import { launchUrl, launchUrlTemplateError } from '../src/drivers/launch-url.js';
 
 const engine = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runnerSource = path.join(engine, 'drivers/android');
 const RUNNER_PACKAGE = 'dev.protoflow.driver';
 const { values } = parseArgs({
   options: {
-    package: { type: 'string' }, avd: { type: 'string' }, apk: { type: 'string' }, activity: { type: 'string' },
+    package: { type: 'string' }, avd: { type: 'string' }, apk: { type: 'string' }, activity: { type: 'string' }, 'launch-url': { type: 'string' },
     frame: { type: 'string', default: 'safe-area' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' }
   }
 });
@@ -146,6 +148,8 @@ async function main() {
   const request = JSON.parse(input);
   if (!values.package || !values.avd) return notRun('the Android driver needs --package and --avd');
   if (!['safe-area', 'device'].includes(values.frame)) return notRun(`unknown --frame ${values.frame}`);
+  const urlError = values['launch-url'] !== undefined && launchUrlTemplateError(values['launch-url']);
+  if (urlError) return notRun(urlError);
   if (!await exists(adbPath)) return notRun(`Android SDK platform-tools not found under ${androidHome}; set ANDROID_HOME`);
   if (!await exists(emulatorPath)) return notRun(`Android emulator not found under ${androidHome}`);
   const cache = path.resolve(values.cache ?? '.protoflow/cache/android-driver');
@@ -175,7 +179,8 @@ async function main() {
   const insetsFile = path.join(built.directory, `insets-${values.avd.replace(/[^A-Za-z0-9_.-]/g, '_')}.json`);
   const insets = JSON.parse(await readFile(insetsFile, 'utf8').catch(() => 'null'));
   const job = {
-    package: values.package, ...(values.activity && { activity: values.activity }), screen: request.screen, steps: request.steps,
+    package: values.package, ...(values.activity && { activity: values.activity }),
+    ...(values['launch-url'] && { launchUrl: launchUrl(values['launch-url'], request) }), screen: request.screen, steps: request.steps,
     timeoutMs: Number(values['timeout-ms'] ?? 10000), launchTimeoutMs: Number(values['launch-timeout-ms'] ?? 60000),
     probeInsets: values.frame === 'safe-area' && !insets,
     extras: { PROTOFLOW_SCREEN: request.screen, PROTOFLOW_STATE: request.state, PROTOFLOW_FIXTURE: JSON.stringify(request.fixture?.data ?? {}) }

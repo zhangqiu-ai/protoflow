@@ -1254,7 +1254,7 @@ test('FAKE provider: under autoApprove the runner turns a reviewer FAIL into an 
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
   const old = (await deliveryStatus(f.root)).deliveries[0], events = [];
   const result = await runOnce(f.root, f.config, { onEvent: event => events.push(event) });
-  assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /recorded automated rejection REV-.*reopens for repair/);
+  assert.equal(result.status, 'REOPENED'); assert.match(result.reason, /recorded automated rejection REV-.*reopens for repair/);
   assert.deepEqual(events.map(event => event.event), ['auto-rejected']);
   const review = await readJson(path.join(f.worktree, `.protoflow/reviews/${result.rejection}.json`));
   assert.equal(review.status, 'changes_requested'); assert.equal(review.reviewerKind, 'model'); assert.equal(review.verificationId, 'VER-1');
@@ -1265,6 +1265,18 @@ test('FAKE provider: under autoApprove the runner turns a reviewer FAIL into an 
   assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'REVOKED');
   assert.equal((await sourceStatus(f.root)).entries[0].status, 'PENDING');
   await assertNoPublication(f);
+});
+
+test('FAKE provider: a single-target runner keeps going after an automated rejection instead of stopping as stuck', async t => {
+  const { startRunner } = await import('../src/runner.js');
+  const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  const events = [];
+  const result = await startRunner(f.root, f.config, { once: true, onEvent: event => { if (!['scanned', 'scan-failed'].includes(event.event)) events.push(event.event); } });
+  // The same pass reopens the rejected version and goes on to repair it (the fixture has no executor: NOT_RUN).
+  assert.equal(result.status, 'NOT_RUN', JSON.stringify(result));
+  assert.deepEqual(events.slice(0, 2), ['auto-rejected', 'reopened']);
+  assert.equal((await sourceStatus(f.root)).entries[0].status, 'PENDING');
 });
 
 test('FAKE provider: automated rejection stops after repeated reopenings and without autoApprove', async t => {

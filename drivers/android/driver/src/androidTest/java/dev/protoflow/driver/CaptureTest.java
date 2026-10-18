@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Insets;
 import android.graphics.Rect;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Base64;
@@ -43,7 +44,7 @@ import java.util.regex.Pattern;
  * write the raw accessibility tree and a device screenshot. The Node driver (scripts/android-driver.js) normalises the
  * raw tree (src/drivers/android-tree.js), so this file stays a thin, platform-only layer.
  *
- * Input: instrumentation argument `job` = base64 JSON { package, activity?, screen, extras, steps, timeoutMs,
+ * Input: instrumentation argument `job` = base64 JSON { package, activity?, launchUrl?, screen, extras, steps, timeoutMs,
  * launchTimeoutMs, probeInsets }. Output (app files dir): out/raw.json and out/device.png.
  */
 @RunWith(AndroidJUnit4.class)
@@ -99,7 +100,9 @@ public class CaptureTest {
         }
 
         Intent intent;
-        if (job.has("activity")) intent = new Intent().setClassName(targetPackage, job.getString("activity"));
+        // Deep-link apps (Expo Router) open the route the URL names; the extras still ride along.
+        if (job.has("launchUrl")) intent = new Intent(Intent.ACTION_VIEW, Uri.parse(job.getString("launchUrl"))).setPackage(targetPackage);
+        else if (job.has("activity")) intent = new Intent().setClassName(targetPackage, job.getString("activity"));
         else intent = context.getPackageManager().getLaunchIntentForPackage(targetPackage);
         if (intent == null) return result.put("status", "FAIL").put("reason", "package " + targetPackage + " has no launcher activity");
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
@@ -109,7 +112,7 @@ public class CaptureTest {
         context.startActivity(intent);
         if (!device.wait(Until.hasObject(By.pkg(targetPackage).depth(0)), launchTimeout)) return failure(result, out, "app " + targetPackage + " did not reach the foreground");
         String screen = job.getString("screen");
-        if (!device.wait(Until.hasObject(anchor(screen)), launchTimeout)) return failure(result, out, "screen anchor " + screen + " did not appear (does the app honour the PROTOFLOW_SCREEN extra?)");
+        if (!device.wait(Until.hasObject(anchor(screen)), launchTimeout)) return failure(result, out, "screen anchor " + screen + " did not appear (does the app honour " + (job.has("launchUrl") ? "the launch URL " + job.getString("launchUrl") : "the PROTOFLOW_SCREEN extra") + "?)");
         // The first frame can be on screen before the app accepts input; replay steps on an idle UI.
         device.waitForIdle();
         SystemClock.sleep(500);

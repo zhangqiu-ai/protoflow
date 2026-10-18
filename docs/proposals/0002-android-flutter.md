@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 已接受（§12 決策 1–3：安裝環境、UiAutomator runner、target variants）；P0、P3.0–P3.4、P5.1–P5.2 已實作，見 §13；Expo（P3.5）待辦 |
+| 狀態 | 已接受（§12 決策 1–3：安裝環境、UiAutomator runner、target variants）；P0、P3.0–P3.5、P5.1–P5.2 已實作，見 §13、§14 |
 | 日期 | 2026-10-13 |
 | 前置 | [提案 0001](0001-anchor-contracts.md)（錨點、外部驅動器協定、P3／P5）、v0.3.x iOS 驅動器（[原生 target](../native-targets.md)） |
 | 影響範圍 | 新增 Android 參考驅動器、原生樹共用模組、target variants（一份程式碼多個執行平台）、Expo（CNG）建置約定、應用雜湊排除 git 忽略檔案、`examples/mobile` |
@@ -262,4 +262,17 @@ src/drivers/android-tree.js         UiAutomator 節點 → 正規化節點
 實作中修正的引擎規則：T1 兄弟順序改為閱讀順序（Compose 48 dp 觸控區）；可點擊且只含文字的容器視為按鈕；輸入框子文字或 label 作為 placeholder；Android 擷取前等 UI 閒置、清除 UiAutomation 快取並等無障礙樹穩定。
 
 與草案的差異：Compose 功能測試用 Robolectric 而非 instrumentation（不依賴模擬器）；Android 驅動器以 Java 撰寫（少一個 Kotlin 外掛）；`deviations` 只接受 `tokens`、`layout`、`visual` 三個層名作為生效值。
+
+## 14. P3.5 Expo 實作紀錄（2026-10-18）
+
+| 項目 | 結果 |
+|---|---|
+| 範例 | `examples/mobile/expo`：Expo SDK 58（RN 0.88）、Expo Router（`app/tasks.tsx`、`app/settings.tsx`）、CNG（`ios/`、`android/` 不提交）、`plugins/with-protoflow.js`（只寫 `gradle.properties`）；target `expo`，變體 `ios`、`android` |
+| UIScene spike | SDK 58 的 prebuild 模板已含 `SceneDelegate` 與 `UIApplicationSceneManifest`，iOS 27 啟動不需修補；config plugin 因此不碰 iOS |
+| 啟動 | 驅動器新增 `--launch-url`（`src/drivers/launch-url.js`）：iOS 以 `XCUIApplication.open(URL)` 冷啟動，Android 以 `ACTION_VIEW` intent；Android 不必修改 `MainActivity` |
+| 建置 | target build `npm --prefix expo run prebuild`（`LANG=en_US.UTF-8 expo prebuild --clean`，含 `pod install`），變體 build 為 `xcodebuild`（Release、只建模擬器架構）與 `gradlew assembleRelease`；決策 5 採 prebuild + 原生建置，不需要 EAS |
+| 功能測試 | `jest-expo` + `expo-router/testing-library` 5/5 |
+| 真實驗收 | 見 [原生 target：驗收紀錄](../native-targets.md#驗收紀錄) |
+
+與草案的差異：D7 的 Android `MainActivity` 修改與 iOS UIScene plugin 都不需要（deep link 取代 initial props，模板已採用 UIScene）；config plugin 改為處理 CNG 會覆蓋的 Gradle daemon 設定。
 

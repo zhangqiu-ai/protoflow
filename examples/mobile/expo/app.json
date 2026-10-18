@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "ProtoFlow Tasks Expo",
+    "slug": "protoflow-tasks-expo",
+    "scheme": "protoflowtasks",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "dev.protoflow.examples.tasksexpo",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "dev.protoflow.examples.tasksexpo",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": ["expo-router", "./plugins/with-protoflow"]
+  }
+}
