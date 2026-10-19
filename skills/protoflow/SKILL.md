@@ -29,7 +29,7 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 
 配置 `source.kind: git` 時，正式應用由指定 GitHub repo／branch／path 的提交觸發；不要啟動本機 `watch` 或用現行 prototype 檔案建立應用版本。讀共享引擎 `docs/git-runner.md` 與 `templates/protoflow.git.config.json`。`init --repository URL --branch BRANCH --path PATH [--start-sha SHA]` 可接入新專案，既有設定須明確合併；安裝 Skill 不會啟動背景程序。
 
-先 `doctor`、`source scan`、`queue`，核對 frozen checkpoint 與 mapping，再於既有授權範圍啟動 `runner start [--once]`。Runner 在隔離 worktree 逐筆 execute／verify／bounded repair，Skill 本身不常駐；不用開機服務或擴大登入權限。source state 的 scannedSha 與 completedSha 不同，只有前版全部 PASS 才可前進。`runner status` 顯示每版 attempts、verificationId 與 worktree；多目標時以 `targets.<id>.summary`／progress 判讀，source entries 狀態由各 target 合成（`statusBasis: "targets"`），不要把 state.json 的掃描時 PENDING 當成未完成；截圖須綁定 manifestHash／prototypeHash／Git SHA。
+先 `doctor`、`source scan`、`queue`，核對 frozen checkpoint 與 mapping，再於既有授權範圍啟動 `runner start [--once]`。Runner 在隔離 worktree 逐筆 execute／verify／bounded repair，Skill 本身不常駐、不擴大登入權限；常駐服務（`runner service install`，macOS launchd）只在使用者明確要求時安裝，之後以 `runner service status` 檢查健康。source state 的 scannedSha 與 completedSha 不同，只有前版全部 PASS 才可前進。`runner status` 顯示每版 attempts、verificationId 與 worktree；多目標時以 `targets.<id>.summary`／progress 判讀，source entries 狀態由各 target 合成（`statusBasis: "targets"`），不要把 state.json 的掃描時 PENDING 當成未完成；截圖須綁定 manifestHash／prototypeHash／Git SHA。
 
 BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實際錯誤、保存已有修改，解決原因後才 `runner retry`。操作設定修改需先 `runner configure` 保存前後設定綁定，再 retry；不能變更來源與 mapping 所有權。不刪除／偽造進度、不跳到較新 SHA、不關閉 FIFO。歷史重寫應明確報告並停止。GitHub 推送／新建遠端分支必須在使用者已授權的具體範圍；本機 Git fixture 必須標記為 fixture，不能冒充真實來源驗收。L2／L3 規格與人工 ADR 邊界沿用既有流程，Runner 可配置 `runner.spec`／`runner.adr`。
 

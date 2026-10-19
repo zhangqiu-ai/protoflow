@@ -1539,3 +1539,17 @@ test('JavaScript audit rejects module syntax but not prose that mentions export 
     assert.doesNotThrow(() => auditJavaScript(code), code);
   }
 });
+
+test('service mode keeps polling through blocks and heartbeats; the foreground runner returns when stuck', async t => {
+  const { root, config } = await fixture(t);
+  config.runner = { ...config.runner, pollMs: 1000 };
+  await scanSource(root, config);
+  assert.equal((await startRunner(root, config)).status, 'BLOCKED', 'foreground mode returns when every stream is blocked');
+  const controller = new AbortController();
+  const scans = [];
+  const result = await startRunner(root, config, { service: true, signal: controller.signal, onEvent: event => { if (event.event === 'scanned') { scans.push(event); if (scans.length === 2) controller.abort(); } } });
+  assert.equal(result.status, 'STOPPED'); assert.equal(scans.length, 2, 'a blocked resident runner polls again');
+  const beat = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
+  assert.equal(beat.pid, process.pid); assert.equal(beat.service, true); assert.match(beat.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(beat.lastPass.stuck, true); assert.equal(beat.lastPass.status, 'BLOCKED'); assert.equal(beat.lastEvent.event, 'scanned');
+});
