@@ -179,6 +179,19 @@ async function executorRecords(root, worktree, entries, external, issue = null) 
   if (entries.some(entry => !records.some(record => record.manifestId === entry.manifestId))) throw blocked('Executor provenance is missing an accepted source version');
   return records;
 }
+/** Where a committed in-project symlink resolves, following committed symlinks (at most 16 hops); null if it does not. */
+async function committedLinkTarget(worktree, treeFiles, file) {
+  for (let hops = 0; hops < 16; hops++) {
+    const entry = treeFiles.get(file);
+    if (!entry) return null;
+    if (entry[0] !== '120000') return file;
+    const text = (await gitBytes(worktree, ['cat-file', 'blob', entry[2]])).toString();
+    if (path.isAbsolute(text)) return null;
+    file = path.posix.normalize(path.posix.join(path.posix.dirname(file), text));
+    if (file.startsWith('../')) return null;
+  }
+  return null;
+}
 async function capture(root, config, options, ownedMerge = null) {
   const worktree = options.worktree ?? root;
   const target = reviewTarget(config, options.target ?? null);
@@ -201,7 +214,14 @@ async function capture(root, config, options, ownedMerge = null) {
       if (!entry || entry[0] !== '120000' || (await gitBytes(worktree, ['cat-file', 'blob', entry[2]])).toString() !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
       continue;
     }
-    const file = key;
+    // A symlink inside the project is bound by the path it resolves to; the committed tree must hold a symlink that
+    // reaches the same file, and that file's content is checked under its own key.
+    if (key.endsWith(':target')) {
+      if (await committedLinkTarget(worktree, treeFiles, key.slice(0, -':target'.length)) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
+      continue;
+    }
+    const target = application.files[`${key}:target`];
+    const file = target ?? key;
     const entry = treeFiles.get(file);
     if (!entry || !['100644', '100755'].includes(entry[0]) || ((await fs.lstat(await projectPath(worktree, file))).mode & 0o111 ? '100755' : '100644') !== entry[0] || hash(await gitBytes(worktree, ['cat-file', 'blob', entry[2]])) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
   }

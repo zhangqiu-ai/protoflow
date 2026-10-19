@@ -70,7 +70,7 @@ reviewer 在 worktree 中只讀，看得到的是 worktree 的 VER 副本。為�
 
 發現、恢復或建立的 PR 都透過指定 REST pull-request endpoint 核對 head／base repository 的 canonical numeric ID／full_name／URL、精確 head／base SHA 與 branch，拒絕 fork 的同名 branch。建立、留言、ready、merge 各自執行前和寫入 `PR_OPEN_MANUAL` 前都重新 assert，避免慢速 discovery／create／view 期間的內容或 refs 漂移。
 
-已 commit 的 application symlink 不受支援：gate 只接受與實際 bytes／mode 吻合的普通檔案。既有 runtime exclusions（例如 node_modules symlink）仍排除於交付與 binding。
+已 commit 的 application symlink：指向專案外或失效的 symlink 以連結文字綁定，committed tree 須有相同文字的 symlink；指向專案內的 symlink 以它解析到的路徑綁定，committed tree 須有 symlink 依序解析到同一個檔案，該檔案的 bytes／mode 在自己的路徑下比對。其他檔案須與實際 bytes／mode 吻合。既有 runtime exclusions（例如 node_modules symlink）仍排除於交付與 binding。
 
 當前 remote base 必須是 application HEAD 的祖先，不能將舊 HEAD 加上較新的 base SHA 宣稱完成整合。`expectedBaseSha` 若指定，必須等於實際觀察的 base，也會被保存供恢復核對。
 
