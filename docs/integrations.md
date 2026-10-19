@@ -93,7 +93,7 @@
 
 - **輸入**：版本 manifest 摘要、target、scope、受影響畫面的錨點契約、全部錨點 id、先前的審查 findings（`rejections`），以及同一版本再次執行時的上一份方案與失敗原因（`previous`）。全部以不受信任資料傳入。
 - **輸出**：`PLN-*` 紀錄存於 worktree 的 `.protoflow/plans/`，含 session、trace hash、request hash、model、費用與正規化後的方案（`planHash`）。引擎自行重驗 raw trace（單一 session、只用 Read／Grep／Glob、`dontAsk`、無 MCP），不採信橋接程式的摘要。
-- **引擎規則**：L3 一律改為 `needs-human`；方案未涵蓋的錨點自動補上 `AC-engine` 條件（維持凍結契約，由分層驗收檢查）。
+- **引擎規則**：L3 版本（以引擎分級或規劃者回報的等級為準）在 context 帶有已核准（`status: approved`、具名 `reviewer`、非空 `decision`）且 `manifestHash` 綁定該版的 ADR 時，可維持 `implement`：ADR 的決策與 scope 會放進規劃請求的 `adr`，方案加上 `engineNotes` 記錄依據；缺少或不符時一律改為 `needs-human`，規劃者自己回答 `needs-human` 也不會被改寫。Issue 分流不帶 ADR，L3 仍一律交給人；方案未涵蓋的錨點自動補上 `AC-engine` 條件（維持凍結契約，由分層驗收檢查）。
 - **決定**：`implement` 時，方案放進執行者 context 的 `plan`（步驟、驗收條件、測試、風險）；原型與分層驗收仍是權威，矛盾的步驟不實作並在報告中說明。`needs-human` 時版本停在 BLOCKED，原因帶規劃者的問題。
 - **失敗**：規劃者無法給出有效方案（未登入、trace 不合規、輸出不符 schema、逾時）時記錄 `planError`、發出 `plan-failed` 事件，版本照常不帶方案實作。
 - **驗收綁定**：交付時 binding 的 `versions[].plan` 綁定方案 id、`planHash`、規劃者 session 與驗收條件；方案檔被改動或屬於其他版本時交付 BLOCKED。驗收者逐條檢查條件，未滿足者以條件 id 回報 finding；驗收者 session 不得等於任何規劃者、執行者或作者 session。

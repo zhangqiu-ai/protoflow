@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planVersion, normalizePlan, contractAnchors, PLAN_SCHEMA } from '../src/planner.js';
+import { planVersion, normalizePlan, contractAnchors, approvedAdr, PLAN_SCHEMA } from '../src/planner.js';
 import { hash } from '../src/util.js';
 
 const adapter = fileURLToPath(new URL('../scripts/claude-adapter.js', import.meta.url));
@@ -55,6 +55,21 @@ test('engine rules: L3 goes to a person and uncovered contract anchors get an en
   assert.deepEqual(normalized.acceptanceCriteria.at(-1), { id: 'AC-engine', text: 'Anchors login, login.email keep their frozen prototype contract (structure, tokens, layout).', anchors: ['login', 'login.email'], evidence: 'tier', source: 'engine' });
   const covered = normalizePlan(plan({ acceptanceCriteria: [{ id: 'AC1', text: 'all', anchors: ['login', 'login.email', 'login.remember'], evidence: 'tier' }] }), contractAnchors(context));
   assert.equal(covered.acceptanceCriteria.length, 1); assert.equal(covered.decision, 'implement');
+});
+
+test('engine rules: an approved ADR bound to this manifestHash lets an L3 plan proceed; anything less goes to a person', () => {
+  const adr = fields => ({ ...context, manifest: { ...context.manifest, level: 'L3' }, adr: { path: 'adr/ADR-002.json', hash: 'sha256:adr', content: JSON.stringify({ status: 'approved', reviewer: 'maintainer', manifestHash: 'sha256:manifest', decision: 'Keys stay on the device.', scope: ['app/**'], ...fields }) } });
+  const approved = approvedAdr(adr());
+  assert.deepEqual(approved, { path: 'adr/ADR-002.json', hash: 'sha256:adr', reviewer: 'maintainer', decision: 'Keys stay on the device.', scope: ['app/**'] });
+  const allowed = normalizePlan(plan({ level: 'L3' }), contractAnchors(context), { adr: approved, level: 'L3' });
+  assert.equal(allowed.decision, 'implement'); assert.deepEqual(allowed.engineNotes, ['L3 implemented under adr/ADR-002.json, approved by maintainer for this manifestHash']);
+  // The engine's level counts even when the planner under-reports it.
+  assert.equal(normalizePlan(plan({ level: 'L1' }), contractAnchors(context), { level: 'L3' }).decision, 'needs-human');
+  for (const fields of [{ status: 'proposed' }, { reviewer: ' ' }, { manifestHash: 'sha256:other' }, { decision: '' }]) assert.equal(approvedAdr(adr(fields)), null, JSON.stringify(fields));
+  assert.equal(approvedAdr({ ...adr(), adr: { path: 'x', hash: 'y', content: 'not json' } }), null);
+  assert.equal(approvedAdr(context), null);
+  // A planner that itself asks for a person is never overridden.
+  assert.equal(normalizePlan(plan({ level: 'L3', decision: 'needs-human' }), contractAnchors(context), { adr: approved, level: 'L3' }).decision, 'needs-human');
 });
 
 test('FAKE CLI only: a read-only planner session is persisted with its trace, request and normalized plan', async t => {
