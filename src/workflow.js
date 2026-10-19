@@ -218,9 +218,23 @@ export async function executeContext(root, config, contextId, { execute = false,
   const LIMIT = 64 * 1024;
   const clip = text => typeof text === 'string' && text.length > LIMIT ? `${text.slice(0, LIMIT)}\n[truncated: ${text.length} characters, ${text.split('\n').length} lines]` : text;
   const briefGit = info => info && { ...info, status: clip(info.status), diff: clip(info.diff) };
+  // A failed build or test run reports its cause at the end of its output; full native build logs run to megabytes and
+  // would push the repair request past the executor's input limit, so the executor gets the tail of each stream.
+  const TAIL = 16 * 1024;
+  const tail = text => typeof text === 'string' && text.length > TAIL ? `[truncated: first ${text.length - TAIL} of ${text.length} characters omitted]\n${text.slice(-TAIL)}` : text;
+  const briefRun = run => run && typeof run === 'object' ? {
+    ...run, ...(run.stdout !== undefined && { stdout: tail(run.stdout) }), ...(run.stderr !== undefined && { stderr: tail(run.stderr) }),
+    // Native targets build once per device variant, each with its own log.
+    ...(run.variants && typeof run.variants === 'object' && { variants: Object.fromEntries(Object.entries(run.variants).map(([name, variant]) => [name, briefRun(variant)])) })
+  } : run;
+  const briefVerification = ({ artifactHashes, ...report }) => ({
+    ...report, project: brief(report.project), git: briefGit(report.git),
+    ...(report.build && { build: briefRun(report.build) }), ...(report.functional && { functional: briefRun(report.functional) }),
+    ...(artifactHashes && { artifactCount: Object.keys(artifactHashes).length })
+  });
   const request = {
     ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
-    repair: repair && { ...repair, ...(repair.verification && { verification: { ...repair.verification, project: brief(repair.verification.project), git: briefGit(repair.verification.git) } }) },
+    repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }) },
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
