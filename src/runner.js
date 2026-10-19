@@ -653,15 +653,38 @@ function aggregate(results) {
   const status = ['BLOCKED', 'NOT_RUN', 'STOPPED', 'PASS'].find(item => statuses.includes(item)) ?? 'IDLE';
   return { status, targets: results };
 }
-export async function startRunner(root, config, { once = false, signal, onEvent = () => {} } = {}) {
+/**
+ * The runner's liveness record: pid, engine version, mode, the last pass and the last event. A supervisor (runner
+ * service status) compares it with the process it started; it is written best-effort and never stops the runner.
+ */
+export const HEARTBEAT = '.protoflow/runner/heartbeat.json';
+const ENGINE_VERSION = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+
+/**
+ * Advance every target stream, deliver, and handle issues. `service` is the resident mode a supervisor (launchd)
+ * keeps alive: it never returns because every target is blocked or the source cannot be read; it keeps polling
+ * until a person resolves the block, and returns only when stopped.
+ */
+export async function startRunner(root, config, { once = false, service = false, signal, onEvent: report = () => {} } = {}) {
   const streams = streamTargets(config);
   const waiting = new Map();
+  const startedAt = new Date().toISOString();
+  let lastEvent = null, lastPass = null;
+  const beat = async () => {
+    try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), lastPass, lastEvent }); }
+    catch { /* liveness is advisory */ }
+  };
+  const onEvent = async event => {
+    lastEvent = { event: event.event, target: event.target ?? null, at: new Date().toISOString() };
+    await beat(); await report(event);
+  };
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
+    await beat();
     while (!signal?.aborted) {
       let scanError = null;
       try { const scan = await withLock(root, () => scanSource(root, config)); await onEvent({ event: 'scanned', tip: scan.tip, added: scan.added }); }
-      catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN') throw error; }
+      catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN' && !service) throw error; }
       if (signal?.aborted) return { status: 'STOPPED' };
       // Each target advances through the same versions independently; one blocked target does not hold the others.
       const results = {};
@@ -690,7 +713,10 @@ export async function startRunner(root, config, { once = false, signal, onEvent 
         catch (error) { await onEvent({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
       }
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
-      if (once || stuck) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
+      lastPass = { at: new Date().toISOString(), status: last.status, stuck, ...(scanError && { scanError: scanError.slice(0, 200) }), targets: Object.fromEntries(Object.entries(results).map(([key, result]) => [key || 'default', result.status])) };
+      await beat();
+      // A resident runner waits for a person to resolve a block instead of exiting into a supervisor restart loop.
+      if (once || (stuck && !service)) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
     }
     return { status: 'STOPPED' };

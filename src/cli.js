@@ -15,6 +15,7 @@ import { scanSource } from './source.js';
 import { sourceView } from './streams.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from './runner.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
+import { installService, uninstallService, serviceStatus } from './runner-service.js';
 import { versionQueue } from './queue.js';
 import { syncDeliveries, deliveryStatus } from './delivery.js';
 import { syncIssues, issuesStatus } from './issues.js';
@@ -40,6 +41,9 @@ Usage: protoflow <command> [action] --project <path> [options]
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
   runner retry --recover-unknown-start  Also close launch intents without a PID once no live process uses the worktree
   runner gc [--apply]                    List runner worktrees; --apply archives and removes unused clean ones
+  runner start --service                 Resident mode: keeps polling through blocks; stops only on SIGTERM/SIGINT
+  runner service install [--env K=V] | uninstall | status
+                                         macOS launchd LaunchAgent: start at login, restart on exit, heartbeat health
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
   delivery sync --retry-review --delivery id --review AIR-id [--target id]
                                          Explicit fresh independent review of the selected current attempt:
@@ -71,7 +75,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
     ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -99,10 +103,18 @@ try {
             const controller = new AbortController();
             const stop = () => controller.abort();
             process.once('SIGINT', stop); process.once('SIGTERM', stop);
-            try { return await startRunner(root, config, { once: values.once, signal: controller.signal, onEvent: event => console.log(JSON.stringify(event)) }); }
+            try { return await startRunner(root, config, { once: values.once, service: values.service === true, signal: controller.signal, onEvent: event => console.log(JSON.stringify(event)) }); }
             finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
           }
-          throw new Error('Use runner start|status|retry|configure|gc');
+          if (action === 'service') {
+            const [, , operation] = positionals;
+            const extraEnv = Object.fromEntries((values.env ?? []).map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes KEY=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; }));
+            if (operation === 'install') return installService(root, config, { extraEnv });
+            if (operation === 'uninstall') return uninstallService(root);
+            if (operation === 'status') return serviceStatus(root);
+            throw new Error('Use runner service install|uninstall|status');
+          }
+          throw new Error('Use runner start|status|retry|configure|gc|service');
         case 'delivery':
           if (action === 'sync') {
             if (!values['retry-review']) {
@@ -172,7 +184,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply;
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));

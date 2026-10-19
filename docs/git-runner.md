@@ -173,3 +173,18 @@ Codex 會在該自動化的對話串回覆結果（未讀提示點）。自動�
 內建 Codex adapter 可在 argv 加 `--model <本機 CLI 支援模型>`、`--ephemeral`，只影響本次執行，不改全域模型設定或登入。預設模型不受目前帳號支援時，保存 provider 失敗、選擇官方可用模型，再用 configure／retry 重試同版。
 
 執行者預設沿用開發者的 `~/.codex/config.toml`；其中啟用的 memories 會讓執行 session 讀取個人記憶，內容進入 EXEC JSONL，而獨立 reviewer 會讀這些 trace。設定 `adapters.codex.ignoreUserConfig: true` 讓執行者以 `--ignore-user-config` 隔離（取捨與細節見 [整合：Codex](integrations.md#codex)）。在已有 worktree 的專案啟用時，先停止 Runner、修改設定，再執行 `runner configure`。
+
+## 常駐服務（macOS launchd）
+
+前景執行的 `runner start` 在 session 結束、終端機關閉或程序被終止時就停止，且所有 target 都 BLOCKED 時會直接結束。正式專案改用常駐服務：
+
+```sh
+protoflow runner service install --project /path/to/app   # 另可加 --env KEY=VALUE
+protoflow runner service status --project /path/to/app
+protoflow runner service uninstall --project /path/to/app
+```
+
+- `install` 先檢查這個配置會用到的工具（`git`；交付或 Issues 需要 `gh`；Claude adapter 需要 `claude`；Codex adapter 需要 `codex`），在目前的 PATH 與 `/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`、`/bin` 中解析成絕對路徑，缺一個就 BLOCKED，不安裝。接著寫入 `~/Library/LaunchAgents/dev.protoflow.runner.<專案路徑雜湊>.plist`：以安裝時的 node 絕對路徑執行 `runner start --service`，PATH 為解析出的工具目錄加上安裝時的 PATH（例如 Flutter），並帶入 `JAVA_HOME`、`ANDROID_HOME`、`ANDROID_SDK_ROOT`、`LANG` 與 `--env`。登入時啟動（`RunAtLoad`），程序結束就重啟（`KeepAlive`，間隔至少 60 秒）；日誌在 `.protoflow/runner/service.out.log` 與 `service.err.log`，安裝紀錄在 `.protoflow/runner/service.json`。已有前景 Runner 持有鎖時拒絕安裝，避免服務因鎖而反覆重啟。
+- `runner start --service` 是常駐模式：所有 target 都 BLOCKED 或來源暫時讀不到時不退出，繼續輪詢，等人處理後自動接手；只在 SIGTERM／SIGINT（`uninstall` 或 `launchctl bootout`）時停止。
+- Runner 每一輪與每個事件都寫 `.protoflow/runner/heartbeat.json`（pid、版本、模式、最後一輪各 target 狀態、最後事件）。`service status` 回報 launchd 的 state、pid、啟動次數、最後結束碼與心跳距今秒數：launchd 正在執行且心跳來自同一個常駐 pid 時為 `HEALTHY`，程序在跑但尚未心跳為 `STARTING`，未執行為 `DOWN`，未安裝為 `NOT_INSTALLED`。執行代理長時間工作時心跳可能數十分鐘不更新，以 `HEALTHY` 與 `runner status` 一起判讀。
+- 升級引擎或改配置：`runner service uninstall` → `runner configure` → `runner service install`。其他作業系統回報 NOT_RUN，請以系統的服務管理器執行 `runner start --service`。
