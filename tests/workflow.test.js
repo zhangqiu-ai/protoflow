@@ -39,6 +39,16 @@ test('context requires mapped changes and remains dry without explicit execution
   assert.deepEqual(rest, { id: 'VER-x', status: 'FAIL', project: dry.request.project });
   assert.equal(git.head, 'abc'); assert.equal(git.diff, '');
   assert.equal(git.status, `${status.slice(0, 64 * 1024)}\n[truncated: ${status.length} characters, 10001 lines]`);
+  // Native build logs run to megabytes: the repair request keeps each stream's tail, where the failure is reported.
+  const log = `${'compiling module\n'.repeat(200000)}error: Cannot find module 'expo-notifications'\n`;
+  const failed = await executeContext(root, unordered, context.id, { repair: { attempt: 1, verification: { id: 'VER-y', status: 'FAIL', project: context.project, build: { status: 'FAIL', exitCode: 1, stdout: log, stderr: 'short', variants: { iphone: { status: 'FAIL', stdout: log }, android: { status: 'PASS', stdout: 'ok' } } }, functional: { status: 'NOT_RUN' }, artifactHashes: { a: 'x', b: 'y' } } } });
+  const { build, functional, artifactCount } = failed.request.repair.verification;
+  assert.equal(build.status, 'FAIL'); assert.equal(build.exitCode, 1); assert.equal(build.stderr, 'short');
+  assert.ok(build.stdout.length < 17 * 1024); assert.match(build.stdout, /^\[truncated: first \d+ of \d+ characters omitted\]\n/);
+  assert.ok(build.stdout.endsWith("error: Cannot find module 'expo-notifications'\n"));
+  assert.ok(build.variants.iphone.stdout.length < 17 * 1024); assert.equal(build.variants.android.stdout, 'ok');
+  assert.deepEqual(functional, { status: 'NOT_RUN' }); assert.equal(artifactCount, 2);
+  assert.ok(!('artifactHashes' in failed.request.repair.verification));
   await writeFile(path.join(root, 'app.html'), 'User edited');
   await assert.rejects(executeContext(root, unordered, context.id, { execute: true }), /stale/);
   const next = await startSession(root, unordered);
