@@ -23,7 +23,7 @@ const realGit = (await exec('which', ['git'])).stdout.trim();
 const fixtureUrl = 'https://github.com/protoflow-fixture/application.git';
 const fixtureRepository = 'github.com/protoflow-fixture/application';
 
-async function fixture(t, { merge = 'auto', versions = 1, generated = false, baseBranch = 'main' } = {}) {
+async function fixture(t, { merge = 'auto', versions = 1, generated = false, internalLink = false, baseBranch = 'main' } = {}) {
   const base = await fs.mkdtemp(path.join('/tmp', 'protoflow-delivery-review-fake-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   const remote = path.join(base, 'remote.git');
@@ -53,6 +53,11 @@ async function fixture(t, { merge = 'auto', versions = 1, generated = false, bas
   await fs.symlink(path.join(base, 'shared-node-modules'), path.join(worktree, 'node_modules'));
   await fs.mkdir(path.join(worktree, 'test-results'));
   await fs.writeFile(path.join(worktree, 'test-results/out.txt'), 'x');
+  if (internalLink) {
+    // A tool wrapper reached through a symlink inside the project (scripts/xcode-probe/clang -> wrapper.py).
+    await fs.writeFile(path.join(worktree, 'app/wrapper.sh'), '#!/bin/sh\n', { mode: 0o755 });
+    await fs.symlink('wrapper.sh', path.join(worktree, 'app/clang'));
+  }
   if (generated) {
     // React Native codegen / Expo CNG shape: generated native sources under a directory the app's own .gitignore ignores.
     await fs.writeFile(path.join(worktree, 'app/.gitignore'), 'build/\n');
@@ -155,6 +160,17 @@ test('git-ignored generated native sources are outside the bound application, so
   assert.equal(delivery.status, 'MERGED');
   assert.deepEqual((await git(worktree, 'show', '--name-only', '--format=', delivery.commit)).split('\n'), ['app/.gitignore', 'app/index.html']);
   await fs.access(path.join(worktree, generated));
+});
+
+test('a symlink inside the project is reviewed by the file it reaches, so the gated delivery merges', async t => {
+  const { root, worktree, config } = await fixture(t, { internalLink: true });
+  const report = await readJson(path.join(root, '.protoflow/verifications/VER-1.json'));
+  assert.equal(report.project.files['app/clang:target'], 'app/wrapper.sh');
+  const result = await syncDeliveries(root, config);
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const [delivery] = result.deliveries;
+  assert.equal(delivery.status, 'MERGED');
+  assert.equal((await git(worktree, 'ls-tree', delivery.commit, 'app/clang')).split(' ')[0], '120000');
 });
 
 test('FAKE provider: regenerating git-ignored output keeps a review valid; tracked or untracked content drift still blocks', async t => {
