@@ -678,6 +678,13 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "dynamicText": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

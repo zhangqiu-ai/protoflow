@@ -53,13 +53,16 @@ export function compareStructure(screen, state, prototype, application, { native
     return id === screenId;
   };
   const leaves = anchors.filter(item => !item.dynamic && !anchors.some(other => isUnder(other, item.id)));
+  // Separator glyphs standing alone ("Siyue · 0.0.1") are not read out by every platform: iOS leaves them out of a
+  // container's combined label. They carry no words, so both sides compare without them.
+  const words = text => text.split(' ').filter(word => !/^[·•‧∙・|—–-]+$/u.test(word)).join(' ');
   const occurrences = (text, part) => [...` ${text} `.matchAll(new RegExp(`(?<= )${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= )`, 'g'))].map(match => match.index - 1);
   const textOf = (capture, id) => {
-    let text = normalizeText(element(capture, id).text);
+    let text = words(normalizeText(element(capture, id).text));
     for (const item of anchors.filter(other => other.dynamic && isUnder(other, id))) {
-      const part = normalizeText(element(capture, item.id).text);
+      const part = words(normalizeText(element(capture, item.id).text));
       if (!part) continue;
-      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(normalizeText(element(capture, leaf.id).text), part).length, 0);
+      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(words(normalizeText(element(capture, leaf.id).text)), part).length, 0);
       for (const index of occurrences(text, part).slice(accounted).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
     }
     return text;
@@ -201,8 +204,11 @@ function dominantColor(png) {
     counts.set(key, entry);
   }
   const top = [...counts.values()].sort((a, b) => b.n - a.n)[0];
-  return top ? { r: top.r / top.n, g: top.g / top.n, b: top.b / top.n, a: 1 } : null;
+  return top ? { r: top.r / top.n, g: top.g / top.n, b: top.b / top.n, a: 1, share: top.n / (png.data.length / 4) } : null;
 }
+
+/** Share of an element's pixels its dominant colour must cover before sampling compares it. */
+const SAMPLE_SHARE = 0.5;
 
 /** T2: colours, typography and radius match by design-token name or within tolerance; native targets may be sampled. */
 export function compareTokens(screen, prototype, application, { tokens = [], deltaE = 3, fontSize = 1, radius = 1 } = {}) {
@@ -230,12 +236,15 @@ export function compareTokens(screen, prototype, application, { tokens = [], del
       if (weights.every(value => value !== null) && weights[0] !== weights[1]) reasons.push(`${anchor.id}: font weight ${weights[0]} vs ${weights[1]}`);
       const radii = [px(left.style.borderRadius), px(right.style.borderRadius)];
       if (radii.every(value => value !== null) && Math.abs(radii[0] - radii[1]) > radius) reasons.push(`${anchor.id}: border radius ${radii[0]} vs ${radii[1]}`);
-    } else if (protoPng && appPng && left.bounds && right.bounds) {
-      // Without platform style data, compare the dominant colour inside each side's own bounds.
+    } else if (protoPng && appPng && left.bounds && right.bounds && !anchor.dynamic) {
+      // Without platform style data, compare the dominant colour inside each side's own bounds. Dynamic content
+      // changes what fills the bounds, and an element without one prevailing colour (a gradient, a switch's track and
+      // knob) has no stable dominant colour, so neither is sampled.
       const a = crop(protoPng, left.bounds, prototype.viewport?.scale ?? 1), b = crop(appPng, right.bounds, application.viewport?.scale ?? 1);
       if (!a || !b) { skipped++; continue; }
-      sampled++;
       const colors = [dominantColor(a), dominantColor(b)];
+      if (colors.some(color => !color || color.share < SAMPLE_SHARE)) { skipped++; continue; }
+      sampled++;
       if (deltaE2000(colors[0], colors[1]) > deltaE) reasons.push(`${anchor.id}: sampled background differs (ΔE ${deltaE2000(colors[0], colors[1]).toFixed(1)})`);
     } else skipped++;
   }
@@ -262,13 +271,16 @@ export function compareLayout(screenId, screen, prototype, application, { positi
   const leftScreen = element(prototype, screenId).bounds, rightScreen = element(application, screenId).bounds;
   if (!leftScreen || !rightScreen || !leftScreen.width || !rightScreen.width) return result([`screen anchor ${screenId} has no bounds`], 0, 'FAIL');
   const normalized = (box, frame) => ({ x: (box.x - frame.x) / frame.width, y: (box.y - frame.y) / frame.height, width: box.width / frame.width, height: box.height / frame.height });
-  const compare = (label, left, right, leftFrame, rightFrame) => {
+  // Dynamic text sizes to its content, so its horizontal extent (and a trailing value's x) follows the data.
+  const compare = (label, left, right, leftFrame, rightFrame, dynamic = false, shift = 0) => {
     checked++;
     const a = normalized(left, leftFrame), b = normalized(right, rightFrame);
+    // Content in the flow moves with the dynamic block; a pinned footer does not. Either placement is correct.
+    if (shift && Math.abs(a.y - (b.y - shift)) < Math.abs(a.y - b.y)) b.y -= shift;
     const issues = [];
-    for (const key of ['x', 'y']) if (Math.abs(a[key] - b[key]) > position) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
-    for (const key of ['width', 'height']) if (Math.abs(a[key] - b[key]) > size) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
-    if (absolute !== null) for (const key of ['x', 'y', 'width', 'height']) if (Math.abs(left[key] - right[key]) > absolute) issues.push(`${key} ${left[key]} vs ${right[key]} (±${absolute})`);
+    for (const key of dynamic ? ['y'] : ['x', 'y']) if (Math.abs(a[key] - b[key]) > position) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
+    for (const key of dynamic ? ['height'] : ['width', 'height']) if (Math.abs(a[key] - b[key]) > size) issues.push(`${key} ${(a[key] * 100).toFixed(1)}% vs ${(b[key] * 100).toFixed(1)}%`);
+    if (absolute !== null) for (const key of dynamic ? ['y', 'height'] : ['x', 'y', 'width', 'height']) if (Math.abs(left[key] - right[key]) > absolute) issues.push(`${key} ${left[key]} vs ${right[key]} (±${absolute})`);
     if (issues.length) reasons.push(`${label}: ${issues.join(', ')}`);
   };
   // Each side's root is placed in its own capture viewport (equal to the requested one, see captureSizeIssues).
@@ -278,7 +290,17 @@ export function compareLayout(screenId, screen, prototype, application, { positi
   compare(`${screenId} (screen root, relative to the viewport)`, leftScreen, rightScreen, leftFrame, rightFrame);
   const anchors = uniqueAnchors(screen).filter(anchor => !anchor.repeat && anchor.id !== screenId);
   const visible = anchors.filter(anchor => element(prototype, anchor.id).visible && element(application, anchor.id).visible && element(prototype, anchor.id).bounds && element(application, anchor.id).bounds);
-  for (const anchor of visible) compare(anchor.id, element(prototype, anchor.id).bounds, element(application, anchor.id).bounds, leftScreen, rightScreen);
+  // Dynamic content takes the height its data needs (two lines of consequences instead of three), which moves what
+  // follows it. An anchor below dynamic content on both sides is compared after removing that height difference.
+  const dynamicBoxes = visible.filter(anchor => anchor.dynamic).map(anchor => [element(prototype, anchor.id).bounds, element(application, anchor.id).bounds]);
+  const below = (box, other) => other.y + other.height <= box.y + 1;
+  const shiftFor = (left, right) => dynamicBoxes
+    .filter(([l, r]) => below(left, l) && below(right, r))
+    .reduce((sum, [l, r]) => sum + r.height / rightScreen.height - l.height / leftScreen.height, 0);
+  for (const anchor of visible) {
+    const left = element(prototype, anchor.id).bounds, right = element(application, anchor.id).bounds;
+    compare(anchor.id, left, right, leftScreen, rightScreen, anchor.dynamic, shiftFor(left, right));
+  }
   const byParent = new Map();
   for (const anchor of visible) byParent.set(anchor.parent, [...(byParent.get(anchor.parent) ?? []), anchor.id]);
   for (const ids of byParent.values()) {
