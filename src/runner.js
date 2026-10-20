@@ -669,9 +669,10 @@ export async function startRunner(root, config, { once = false, service = false,
   const streams = streamTargets(config);
   const waiting = new Map();
   const startedAt = new Date().toISOString();
-  let lastEvent = null, lastPass = null;
+  // Consecutive passes that could not read the source or reach GitHub: a supervisor reports them as degraded.
+  let lastEvent = null, lastPass = null, failingPasses = 0, lastFailure = null, passIssueError = null;
   const beat = async () => {
-    try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), lastPass, lastEvent }); }
+    try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), lastPass, lastEvent, failingPasses, lastFailure }); }
     catch { /* liveness is advisory */ }
   };
   const onEvent = async event => {
@@ -683,6 +684,7 @@ export async function startRunner(root, config, { once = false, service = false,
     await beat();
     while (!signal?.aborted) {
       let scanError = null;
+      passIssueError = null;
       try { const scan = await withLock(root, () => scanSource(root, config)); await onEvent({ event: 'scanned', tip: scan.tip, added: scan.added }); }
       catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN' && !service) throw error; }
       if (signal?.aborted) return { status: 'STOPPED' };
@@ -702,7 +704,7 @@ export async function startRunner(root, config, { once = false, service = false,
             // Report why a planned issue waits once per change, so a waiting issue is never silent.
             if (waiting.get(stream) !== (issue.reason ?? null)) { waiting.set(stream, issue.reason ?? null); if (issue.status === 'IDLE' && issue.reason) await events({ event: 'issue-waiting', reason: issue.reason }); }
           }
-          catch (error) { await events({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+          catch (error) { passIssueError = error.message.slice(0, 300); await events({ event: 'issues-failed', error: passIssueError, transient: Boolean(error.transient) }); }
         }
         results[stream ?? ''] = result;
       }
@@ -710,10 +712,12 @@ export async function startRunner(root, config, { once = false, service = false,
       // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
       if (config.issues?.enabled && !signal?.aborted) {
         try { await syncIssues(root, config, { onEvent, signal }); }
-        catch (error) { await onEvent({ event: 'issues-failed', error: error.message.slice(0, 300), transient: Boolean(error.transient) }); }
+        catch (error) { passIssueError = error.message.slice(0, 300); await onEvent({ event: 'issues-failed', error: passIssueError, transient: Boolean(error.transient) }); }
       }
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
-      lastPass = { at: new Date().toISOString(), status: last.status, stuck, ...(scanError && { scanError: scanError.slice(0, 200) }), targets: Object.fromEntries(Object.entries(results).map(([key, result]) => [key || 'default', result.status])) };
+      const failure = scanError ?? passIssueError;
+      if (failure) { failingPasses++; lastFailure = { at: new Date().toISOString(), error: failure.slice(0, 300) }; } else failingPasses = 0;
+      lastPass = { at: new Date().toISOString(), status: last.status, stuck, ...(scanError && { scanError: scanError.slice(0, 200) }), ...(passIssueError && { issuesError: passIssueError.slice(0, 200) }), targets: Object.fromEntries(Object.entries(results).map(([key, result]) => [key || 'default', result.status])) };
       await beat();
       // A resident runner waits for a person to resolve a block instead of exiting into a supervisor restart loop.
       if (once || (stuck && !service)) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;
