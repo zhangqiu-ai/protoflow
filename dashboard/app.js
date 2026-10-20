@@ -92,7 +92,8 @@ function subscribe(url, render) {
   source = new EventSource(url);
   source.onopen = () => { conn.textContent = '即時'; conn.className = 'conn live'; };
   source.onerror = () => { conn.textContent = '重新連線中'; conn.className = 'conn'; };
-  source.onmessage = message => render(JSON.parse(message.data));
+  // Entrance motion plays once per view; later pushes redraw in place without replaying it.
+  source.onmessage = message => { render(JSON.parse(message.data)); setTimeout(() => document.body.classList.add('settled'), 900); };
   source.addEventListener('failure', message => toast(`讀取失敗：${JSON.parse(message.data).error}`, true));
 }
 async function act(projectId, body, label) {
@@ -136,18 +137,26 @@ function renderOverview(data) {
 
 // ---- project ----
 const selected = {}, done = new Map();
-function pipeline(stream) {
-  const { at, tone } = position(stream);
-  const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
-  const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
-  const sub = [stream.current?.summary, stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null, stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
-  return h('section.panel.pipe.rise', { 'aria-label': `${targetName(stream.target)} 進度` },
-    h('div.pipe-h', {}, h('div.sub', {}, h('h2', {}, targetName(stream.target)), sub ? h('span', {}, sub) : null),
-      h('span.timer', { 'data-since': active(stream) ? since ?? '' : '' }, active(stream) ? elapsed(since) : stream.lastEvent ? ago(stream.lastEvent.at) : '')),
-    h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset, 44px)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset, 44px)) * ${fraction})` }) : null,
-      h('ol', {}, STAGES.map(([, label], i) => h(`li${i < at ? '.done' : i === at ? `.${tone === 'bad' ? 'bad' : 'now'}${tone === 'idle' ? '.idle' : ''}` : ''}`, {},
-        h(`span.node${i === at && tone === 'now' ? '.live-dot' : ''}`, {}, i < at ? icon(ICON.check) : i === at && tone === 'bad' ? '!' : ''), label)))),
-    stream.current?.error ? h('p.why-line', {}, stream.current.error) : null);
+/** Every target in one panel: a row per target, the stage names once as column heads so the nodes line up. */
+function pipelines(streams) {
+  const lane = stream => {
+    const { at, tone } = position(stream);
+    const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
+    const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
+    const sub = [stream.current?.summary, stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null, stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
+    const state = stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+    return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
+      h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),
+      h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }) : null,
+        h('ol', {}, STAGES.map(([, label], i) => h(`li${i < at ? '.done' : i === at ? `.${tone === 'bad' ? 'bad' : 'now'}${tone === 'idle' ? '.idle' : ''}` : ''}`, { title: label },
+          h(`span.node${i === at && tone === 'now' ? '.live-dot' : ''}`, {}, i < at ? icon(ICON.check, 14) : i === at && tone === 'bad' ? '!' : ''), h('span.sr', {}, label))))),
+      h('div.lane-state', {}, h(`em${tone === 'now' ? '.now' : tone === 'bad' ? '.bad' : ''}`, {}, state),
+        h('span.timer', { 'data-since': active(stream) ? since ?? '' : '' }, active(stream) ? elapsed(since) : stream.lastEvent ? ago(stream.lastEvent.at) : '')),
+      stream.current?.error ? h('p.why-line', {}, stream.current.error) : null);
+  };
+  return h('section.panel.pipes.rise', { 'aria-label': '管線' },
+    h('div.lane.lane-head', { 'aria-hidden': 'true' }, h('span.label', {}, '管線'), h('ol', {}, STAGES.map(([, label]) => h('li', {}, label))), h('span')),
+    streams.map(lane));
 }
 function consoleCard(streams) {
   const stream = streams.find(item => item.live?.running) ?? streams.find(item => item.live) ?? null;
@@ -158,7 +167,7 @@ function consoleCard(streams) {
     h('span', { title: action.text }, action.text))),
     live?.running ? h('li.cursor', { 'aria-hidden': 'true' }, h('span', {}, '›'), h('i')) : null);
   requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
-  return h('div.console.rise', {},
+  return h(`div.console.rise${live ? '' : '.idle'}`, {},
     h('div.console-h', {}, h('div.lights', {}, h('i'), h('i'), h('i')),
       live ? h(`span.who${live.executor === 'codex' ? '.codex' : ''}`, {}, h('b', {}, live.executor === 'codex' ? 'C' : /opus/i.test(live.model ?? '') ? 'O' : 'S'), `${live.model ?? live.executor} · ${targetName(stream.target)}`) : h('span', {}, 'agent'),
       h('span', {}, live ? (live.running ? `編輯 ${live.totals.edits} · 命令 ${live.totals.commands}` : `上次 ${ago(live.updatedAt)}`) : '')),
@@ -182,7 +191,7 @@ function decisions(snapshot) {
     const body = buttons?.[0]?.body;
     const signed = body ? done.get(keyOf(body)) : null;
     const box = h(`div.ask.rise${signed ? '.done' : buttons ? '' : '.calm'}`, {},
-      h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', {}, sub) : null)), extra);
+      h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', { title: sub }, sub) : null)), extra);
     if (signed) box.append(h('div.signed', {}, icon(ICON.check, 16), h('span', {}, signed)));
     else if (buttons) box.append(h('div.btns', {}, buttons.map((button, i) => button.href ? h('a.btn', { href: button.href, target: '_blank', rel: 'noopener' }, button.label)
       : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result) }, button.label))));
@@ -193,7 +202,7 @@ function decisions(snapshot) {
     if (item.kind === 'manual-merge') return card(item, ICON.merge, `${where}${item.title} 可合併`, `已驗收並通過獨立審查 · ${item.commit?.slice(0, 7) ?? ''}`, null,
       [{ label: '核准並合併', body: { action: 'merge', target: item.target, deliveryId: item.deliveryId }, question: `確定以你的 GitHub 身分合併 ${item.title}？只會合併審查過的 commit。`, result: '已核准 · 合併中' }, item.pr ? { label: 'GitHub', href: item.pr } : null].filter(Boolean));
     if (item.kind === 'issue') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
-      item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', {}, question))) : null,
+      item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null,
       [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
     if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, `驗收 ${item.verificationId} 已通過`, null,
       [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`, result: '已核准' }]);
@@ -282,7 +291,7 @@ function renderProject(snapshot) {
         snapshot.adr ? h(`span.pill${snapshot.adr.status === 'approved' ? '.ok' : '.warn'}`, { title: snapshot.adr.path }, `ADR ${snapshot.adr.status === 'approved' ? '已核准' : '待核准'}`) : null,
         h(`span.pill${(STATUS[snapshot.service.status] ?? [])[1] ? `.${STATUS[snapshot.service.status][1]}` : ''}`, { title: snapshot.service.reason ?? '' }, (STATUS[snapshot.service.status] ?? [snapshot.service.status])[0]),
         h('span.pill.plain', { title: '交付與批准方式' }, `${project.delivery?.merge === 'manual' ? '你合併' : '自動合併'} · ${project.autoApprove ? 'AI 批准' : '人工批准'}`))),
-    ...snapshot.streams.map(pipeline),
+    pipelines(snapshot.streams),
     h('section.split', {}, consoleCard(snapshot.streams), decisions(snapshot)),
     evidence(snapshot) ?? '',
     lists(snapshot));
@@ -294,6 +303,7 @@ function route() {
   const match = /^#\/p\/([0-9a-f]{12})$/.exec(location.hash);
   lastProject = null;
   done.clear();
+  document.body.classList.remove('settled');
   window.scrollTo(0, 0);
   if (match) subscribe(`/api/projects/${match[1]}/stream`, renderProject);
   else subscribe('/api/stream', renderOverview);
