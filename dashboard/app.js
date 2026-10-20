@@ -1,35 +1,83 @@
 // ProtoFlow dashboard (proposal 0004). Plain DOM, no build step: every value is inserted as text, never as HTML.
 const TOKEN = document.querySelector('meta[name="protoflow-token"]').content;
-const app = document.getElementById('app'), crumb = document.getElementById('crumb'), conn = document.getElementById('conn');
+const app = document.getElementById('app'), crumb = document.getElementById('crumb'), conn = document.getElementById('conn'), ver = document.getElementById('ver');
 
-const STAGES = [['plan', '規劃'], ['execute', '實作'], ['verify', '驗收'], ['review', '獨立審查'], ['deliver', '交付']];
-const STAGE_LABEL = { idle: '閒置', blocked: '阻塞', plan: '規劃', execute: '實作', verify: '驗收', review: '獨立審查', deliver: '交付' };
-const STATUS = { PASS: ['通過', 'ok'], FAIL: ['未過', 'bad'], NOT_RUN: ['未執行', ''], BLOCKED: ['阻塞', 'bad'], RUNNING: ['進行中', 'now'], PENDING: ['等待', ''], STOPPED: ['已停止', 'warn'], MERGED: ['已合併', 'ok'], PR_OPEN_MANUAL: ['待你合併', 'warn'], REVOKED: ['已撤回', ''], COMMITTED: ['已提交', 'now'], HEALTHY: ['健康', 'ok'], DEGRADED: ['連線異常', 'bad'], DOWN: ['已停止', 'bad'], STARTING: ['啟動中', 'now'], NOT_INSTALLED: ['未常駐', 'warn'], HEARTBEAT: ['前景執行', 'now'], UNKNOWN: ['未知', ''], IDLE: ['閒置', ''] };
-const ISSUE = { planned: ['已規劃', 'now'], 'needs-info': ['需要資訊', 'warn'], 'needs-human': ['需要你決定', 'warn'], rejected: ['不處理', ''], 'in-progress': ['實作中', 'now'], blocked: ['阻塞', 'bad'], done: ['完成', 'ok'], new: ['新', ''], 'triage-failed': ['分流失敗', 'bad'], closed: ['已關閉', ''] };
+const STAGES = [['plan', '規劃'], ['execute', '實作'], ['verify', '驗收'], ['review', '審查'], ['deliver', '交付']];
+const STAGE_LABEL = { idle: '閒置', blocked: '阻塞', plan: '規劃', execute: '實作', verify: '驗收', review: '審查', deliver: '交付' };
+const STATUS = { PASS: ['通過', 'ok'], FAIL: ['未過', 'bad'], NOT_RUN: ['未執行', ''], BLOCKED: ['阻塞', 'bad'], RUNNING: ['進行中', 'ok'], PENDING: ['等待', ''], STOPPED: ['已停止', 'warn'], MERGED: ['已合併', 'ok'], PR_OPEN_MANUAL: ['待你合併', 'warn'], REVOKED: ['已撤回', ''], COMMITTED: ['已提交', 'ok'], HEALTHY: ['常駐', 'ok'], DEGRADED: ['連線異常', 'bad'], DOWN: ['已停止', 'bad'], STARTING: ['啟動中', 'ok'], NOT_INSTALLED: ['未常駐', ''], HEARTBEAT: ['前景執行', 'ok'], UNKNOWN: ['未知', ''] };
+const ISSUE = { planned: ['已規劃', 'ok'], 'needs-info': ['需要資訊', 'warn'], 'needs-human': ['需要你決定', 'warn'], rejected: ['不處理', ''], 'in-progress': ['實作中', 'ok'], blocked: ['阻塞', 'bad'], done: ['完成', 'ok'], new: ['新', ''], 'triage-failed': ['分流失敗', 'bad'], closed: ['已關閉', ''] };
 const PHASE = { execute: '執行者', build: '建置', functional: '功能測試', visual: '比對', 'visual-driver': '畫面擷取' };
-const ACT = { say: '說明', read: '讀取', edit: '編輯', write: '新增', run: '執行', search: '搜尋', tool: '工具', done: '結束' };
 const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面'], ['visual', '視覺']];
+const ICON = {
+  merge: 'M5 3v12M13 3v3a4 4 0 0 1-4 4H5', tag: 'M3 3h6l6 6-6 6-6-6zM6.5 6.5h.01', issue: 'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 6v3.5M9 12.2h.01',
+  retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4'
+};
 
 /** Element helper: h('div.card', {attr}, ...children); strings become text nodes. */
-function h(tag, attrs, ...children) {
-  const [name, ...classes] = tag.split('.');
-  const node = document.createElement(name);
-  if (classes.length) node.className = classes.join(' ');
+function h(tag, attrs, ...children) { return build(document.createElement(tag.split('.')[0]), tag, attrs, children); }
+/** The same for SVG. */
+function s(tag, attrs, ...children) { return build(document.createElementNS('http://www.w3.org/2000/svg', tag.split('.')[0]), tag, attrs, children); }
+function build(node, tag, attrs, children) {
+  const classes = tag.split('.').slice(1);
+  if (classes.length) node.setAttribute('class', classes.join(' '));
   for (const [key, value] of Object.entries(attrs ?? {})) {
     if (value === undefined || value === null || value === false) continue;
     if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
-    else if (key === 'text') node.textContent = value;
+    else if (key === 'class') node.setAttribute('class', [node.getAttribute('class'), value].filter(Boolean).join(' '));
     else node.setAttribute(key, value === true ? '' : value);
   }
   for (const child of children.flat()) if (child !== null && child !== undefined && child !== false) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 }
-const chip = (status, map = STATUS) => { const [label, tone] = map[status] ?? [status ?? '—', '']; return h(`span.chip${tone ? `.${tone}` : ''}`, {}, label); };
-const ago = iso => { if (!iso) return ''; const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return s < 60 ? `${s} 秒前` : s < 3600 ? `${Math.floor(s / 60)} 分前` : s < 86400 ? `${Math.floor(s / 3600)} 小時前` : `${Math.floor(s / 86400)} 天前`; };
-const clock = iso => iso ? new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) : '';
-const elapsed = iso => { if (!iso) return ''; const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return `已 ${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`; };
-const model = role => role ? `${role.provider === 'claude' ? 'Claude' : role.provider === 'codex' ? 'Codex' : role.provider}${role.model ? ` · ${role.model}` : ''}` : '未設定';
+const icon = (path, size = 18) => s('svg', { width: size, height: size, viewBox: '0 0 18 18', 'aria-hidden': 'true' }, s('path', { d: path, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+const pill = (status, map = STATUS) => { const [label, tone] = map[status] ?? [status ?? '—', '']; return h(`span.pill${tone ? `.${tone}` : ''}`, {}, label); };
+const ago = iso => { if (!iso) return '—'; const sec = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return sec < 60 ? '剛剛' : sec < 3600 ? `${Math.floor(sec / 60)} 分前` : sec < 86400 ? `${Math.floor(sec / 3600)} 小時前` : `${Math.floor(sec / 86400)} 天前`; };
+const clock = iso => iso ? new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+const elapsed = iso => { if (!iso) return ''; const sec = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); const m = Math.floor(sec / 60); return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}` : `${m}:${String(sec % 60).padStart(2, '0')}`; };
 const targetName = target => target ?? '應用';
+const initial = name => [...String(name ?? '?')][0].toUpperCase();
+const active = stream => !['idle', 'blocked'].includes(stream.stage);
+
+/** One avatar per distinct agent: the planner leads, then the executors by area. */
+function agents(roles) {
+  if (!roles) return [];
+  const glyph = role => /opus/i.test(role.model ?? '') ? 'O' : /sonnet/i.test(role.model ?? '') ? 'S' : /haiku/i.test(role.model ?? '') ? 'H' : role.provider === 'codex' ? 'C' : initial(role.provider);
+  const name = role => `${role.provider === 'claude' ? 'Claude' : role.provider === 'codex' ? 'Codex' : role.provider}${role.model ? ` · ${role.model}` : ''}`;
+  const out = [], seen = new Set();
+  for (const [role, label, lead] of [[roles.planner, '規劃', true], [roles.executors?.frontend, '前端', false], [roles.executors?.backend, '後端', false]]) {
+    if (!role?.provider) continue;
+    const key = `${role.provider}:${role.model ?? ''}`;
+    if (seen.has(key)) { out.find(item => item.key === key).labels.push(label); continue; }
+    seen.add(key); out.push({ key, glyph: glyph(role), kind: lead ? 'lead' : role.provider, name: name(role), labels: [label] });
+  }
+  return out;
+}
+const avatar = agent => h(`span.agent.${agent.kind}`, { title: `${agent.labels.join('／')}：${agent.name}` }, agent.glyph);
+
+/** Apple-Watch-like ring. */
+function gauge(label, value, fraction, color) {
+  const c = 2 * Math.PI * 34;
+  return h('div.gauge', {}, h('div.dial', {},
+    s('svg', { width: 84, height: 84, viewBox: '0 0 84 84', role: 'img', 'aria-label': `${label} ${value}` },
+      s('circle', { cx: 42, cy: 42, r: 34, fill: 'none', stroke: 'var(--line2)', 'stroke-width': 7 }),
+      s('circle.arc', { cx: 42, cy: 42, r: 34, fill: 'none', stroke: color, 'stroke-width': 7, 'stroke-linecap': 'round', 'stroke-dasharray': c.toFixed(1), 'stroke-dashoffset': (c * (1 - Math.min(1, Math.max(0, fraction)))).toFixed(1), transform: 'rotate(-90 42 42)', style: `--c:${c.toFixed(1)}` })),
+    h('b', {}, String(value))), h('span', {}, label));
+}
+/** Where a stream is on plan → deliver: index of the current node, and whether earlier nodes are done. */
+function position(stream) {
+  if (stream.stage === 'blocked') return { at: 0, tone: 'bad' };
+  if (stream.stage === 'idle') return { at: ['MERGED', 'COMMITTED'].includes(stream.deliveries?.[0]?.status ?? stream.lastDelivery?.status) || stream.versions?.[0]?.status === 'PASS' ? STAGES.length : -1, tone: 'idle' };
+  return { at: STAGES.findIndex(([key]) => key === stream.stage), tone: 'now' };
+}
+function miniTrack(stream) {
+  const { at, tone } = position(stream);
+  const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
+  const label = stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+  return h('div.mini', {}, h('span', {}, targetName(stream.target)),
+    h('div.rail', { role: 'img', 'aria-label': `${targetName(stream.target)}：${label}` }, h('i.bed'), h('i.fill', { style: `width:calc((100% - 12px) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 12px) * ${fraction})` }) : null,
+      h('div.dots', {}, STAGES.map(([, name], i) => h(`span.dot${i < at ? '.done' : i === at ? (tone === 'bad' ? '.bad' : '.now') : ''}${i === at && tone === 'now' ? '.live-dot' : ''}`, { title: name })))),
+    h(`em${tone === 'now' ? '.now' : tone === 'bad' ? '.bad' : ''}`, {}, label));
+}
 
 function toast(text, bad = false) {
   const box = document.getElementById('toast');
@@ -43,8 +91,9 @@ function subscribe(url, render) {
   source?.close();
   source = new EventSource(url);
   source.onopen = () => { conn.textContent = '即時'; conn.className = 'conn live'; };
-  source.onerror = () => { conn.textContent = '重新連線中…'; conn.className = 'conn'; };
-  source.onmessage = message => render(JSON.parse(message.data));
+  source.onerror = () => { conn.textContent = '重新連線中'; conn.className = 'conn'; };
+  // Entrance motion plays once per view; later pushes redraw in place without replaying it.
+  source.onmessage = message => { render(JSON.parse(message.data)); setTimeout(() => document.body.classList.add('settled'), 900); };
   source.addEventListener('failure', message => toast(`讀取失敗：${JSON.parse(message.data).error}`, true));
 }
 async function act(projectId, body, label) {
@@ -57,144 +106,195 @@ async function act(projectId, body, label) {
 
 // ---- overview ----
 function renderOverview(data) {
-  crumb.textContent = '所有專案';
-  if (!data.projects.length) {
-    app.replaceChildren(h('section.card', {}, h('h2', {}, '還沒有專案'), h('p.muted', {}, '在專案目錄執行 protoflow dashboard add --project .，或安裝常駐服務（runner service install）時會自動加入。')));
+  crumb.textContent = '';
+  const projects = data.projects;
+  ver.textContent = projects.find(project => project.engineVersion)?.engineVersion ? `v${projects.find(project => project.engineVersion).engineVersion}` : '';
+  if (!projects.length) {
+    app.replaceChildren(h('section.hero.rise', {}, h('div', {}, h('span.label', {}, '所有專案'), h('h1', {}, '還沒有專案'))),
+      h('p.empty', {}, '在專案目錄執行 protoflow dashboard add --project .'));
     return;
   }
+  const healthy = projects.filter(project => ['HEALTHY', 'HEARTBEAT'].includes(project.service?.status)).length;
+  const busy = projects.filter(project => project.streams?.some(active)).length;
+  const due = projects.reduce((sum, project) => sum + (project.attention ?? 0), 0);
   app.replaceChildren(
-    h('div.top', {}, h('div', {}, h('span.eyebrow', {}, 'ProtoFlow'), h('h1', {}, `${data.projects.length} 個專案`)),
-      h('div.tiles', {}, h('div.tile', {}, h('span', {}, '待你處理'), h('b', {}, String(data.projects.reduce((sum, project) => sum + (project.attention ?? 0), 0)))), h('div.tile', {}, h('span', {}, '進行中'), h('b', {}, String(data.projects.filter(project => project.streams?.some(stream => !['idle', 'blocked'].includes(stream.stage))).length))))),
-    h('div.grid', {}, data.projects.map(project => h('a.card.proj', { href: `#/p/${project.id}` },
-      h('div.card-h', {}, h('h2', {}, project.name), project.service ? chip(project.service.status) : null),
-      project.error ? h('p.muted', {}, `讀取失敗：${project.error}`) : [
-        h('div', {}, project.streams.map(stream => h('div.row', {}, h('b', {}, targetName(stream.target)), chip(stream.stage === 'idle' ? 'IDLE' : stream.stage === 'blocked' ? 'BLOCKED' : 'RUNNING'), h('span.muted', {}, stream.stage === 'idle' ? (stream.lastDelivery ? `最近交付 ${ago(stream.lastDelivery.updatedAt)}` : '') : `${STAGE_LABEL[stream.stage] ?? stream.stage}${stream.phase ? ` · ${PHASE[stream.phase] ?? stream.phase}` : ''}${stream.current?.summary ? ` · ${stream.current.summary}` : ''}`)))),
-        h('div.row', {}, project.attention ? h('span.chip.warn', {}, `待你處理 ${project.attention}`) : h('span.chip.ok', {}, '沒有待處理'), project.issues.open ? h('span.chip', {}, `Issue ${project.issues.open}`) : null, h('span.muted', {}, project.lastEvent ? `最後事件 ${ago(project.lastEvent.at)}` : ''))
+    h('section.hero.rise', {}, h('div', {}, h('span.label', {}, '所有專案'),
+      h('h1', {}, `${projects.length} 個專案`, h('br'), due ? [h('b', {}, `${due} 件`), '等你決定'] : ['一切', h('b', {}, '順暢')])),
+      h('div.gauges', {}, gauge('常駐', healthy, healthy / projects.length, 'var(--mint)'), gauge('進行中', busy, busy / projects.length, 'var(--ink)'),
+        gauge('等你', due, projects.filter(project => project.attention).length / projects.length, 'var(--amber)'))),
+    h('section.cards', {}, projects.map((project, index) => h('a.card.rise', { href: `#/p/${project.id}`, style: `animation-delay:${index * 60}ms` },
+      h('div.card-h', {}, h('div.ident', {}, h('span.tile', {}, initial(project.name)), h('div', {}, h('b', {}, project.name), h('small', {}, project.root?.split('/').slice(-2).join('/') ?? ''))),
+        project.service ? pill(project.service.status) : null),
+      project.error ? h('p.empty', {}, `讀取失敗：${project.error}`) : [
+        h('div.tracks', {}, project.streams.map(miniTrack)),
+        h('div.card-f', {}, h('div.agents', {}, agents(project.roles).map(avatar)),
+          h('div.meta', {}, project.attention ? h('span.due', {}, '待你', h('b', {}, String(project.attention))) : null,
+            project.issues?.open ? h('span', { title: '未結 Issue' }, `#${project.issues.open}`) : null,
+            h('span.when', {}, ago(project.lastEvent?.at))))
       ])))
   );
 }
 
 // ---- project ----
-let selected = {};
-function stageBar(stage) {
-  const index = STAGES.findIndex(([key]) => key === stage);
-  return h('ol.stages', {}, STAGES.map(([key, label], i) => h(`li${stage === 'blocked' && i === 0 ? '.bad' : index > i ? '.done' : index === i ? '.now' : ''}`, {}, h('i'), label)));
-}
-function liveLane(project, stream) {
-  const live = stream.live;
-  const executorRole = live ? { provider: live.executor, model: live.model } : null;
-  const role = stream.phase === 'execute' || live?.running ? model(executorRole) : stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : STAGE_LABEL[stream.stage];
-  const lane = h('div.lane', {},
-    h('div.lane-h', {}, h('h3', {}, targetName(stream.target)), chip(stream.stage === 'idle' ? 'IDLE' : stream.stage === 'blocked' ? 'BLOCKED' : 'RUNNING'),
-      stream.current?.summary ? h('span.muted', {}, stream.current.summary) : null),
-    stageBar(stream.stage),
-    h('div.who', {}, h(`div.avatar${stream.stage === 'idle' ? '.idle' : ''}`, {}, (role ?? '·').slice(0, 2)), h('div', {}, h('b', {}, role ?? '—'), h('div.muted', {}, stream.phase ? `${PHASE[stream.phase.split(':')[0]] ?? stream.phase}${stream.phase.includes(':') ? ` · ${stream.phase.split(':')[1]}` : ''}` : stream.lastEvent ? `最後事件：${stream.lastEvent.event}（${ago(stream.lastEvent.at)}）` : '尚無事件')),
-      h('span.timer', { 'data-since': stream.phaseStartedAt ?? stream.current?.attemptStartedAt ?? '' }, elapsed(stream.phaseStartedAt ?? stream.current?.attemptStartedAt))),
-    stream.current?.error ? h('p', { class: 'muted' }, `原因：${stream.current.error}`) : null);
-  if (live) {
-    lane.append(h('div.row', {}, h('span.eyebrow', {}, `執行者動作 · ${live.running ? '進行中' : `上次執行 ${ago(live.updatedAt)}`}`), h('span.muted', {}, `編輯 ${live.totals.edits} · 命令 ${live.totals.commands} · 讀取 ${live.totals.reads}`)),
-      live.actions.length ? h('ol.acts', {}, live.actions.slice().reverse().map(action => h('li', {}, h('span.k', {}, ACT[action.kind] ?? action.kind), h(`span.t${['run', 'edit', 'write', 'read'].includes(action.kind) ? '.code' : ''}${action.ok === false ? '.fail' : ''}`, {}, action.text)))) : h('p.muted', {}, '還沒有動作。'));
-  }
-  return lane;
-}
-function attentionCard(project, items) {
-  const card = h('section.card', { 'aria-labelledby': 'att-h' }, h('div.card-h', {}, h('h2', { id: 'att-h' }, '待你處理'), h('span.muted', {}, '核准會以你的身分執行，並記錄在 .protoflow/dashboard/actions.jsonl')));
-  if (!items.length) { card.append(h('div.empty', {}, '目前沒有需要你決定的事。')); return card; }
-  const run = async (button, body, label, question) => {
-    if (!confirm(question)) return;
-    button.disabled = true;
-    try { await act(project.project.id, body, label); } catch (error) { toast(`${label}失敗：${error.message}`, true); } finally { button.disabled = false; }
+const selected = {}, done = new Map();
+/** Every target in one panel: a row per target, the stage names once as column heads so the nodes line up. */
+function pipelines(streams) {
+  const lane = stream => {
+    const { at, tone } = position(stream);
+    const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
+    const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
+    const sub = [stream.current?.summary, stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null, stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
+    const state = stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+    return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
+      h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),
+      h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }) : null,
+        h('ol', {}, STAGES.map(([, label], i) => h(`li${i < at ? '.done' : i === at ? `.${tone === 'bad' ? 'bad' : 'now'}${tone === 'idle' ? '.idle' : ''}` : ''}`, { title: label },
+          h(`span.node${i === at && tone === 'now' ? '.live-dot' : ''}`, {}, i < at ? icon(ICON.check, 14) : i === at && tone === 'bad' ? '!' : ''), h('span.sr', {}, label))))),
+      h('div.lane-state', {}, h(`em${tone === 'now' ? '.now' : tone === 'bad' ? '.bad' : ''}`, {}, state),
+        h('span.timer', { 'data-since': active(stream) ? since ?? '' : '' }, active(stream) ? elapsed(since) : stream.lastEvent ? ago(stream.lastEvent.at) : '')),
+      stream.current?.error ? h('p.why-line', {}, stream.current.error) : null);
   };
-  card.append(h('div.att', {}, items.map(item => {
-    const box = h(`div.item${item.actions.length ? '.ask' : ''}`, {});
-    if (item.kind === 'manual-merge') {
-      box.append(h('h3', {}, `${targetName(item.target)}：交付 ${item.title} 待你合併`), h('p', {}, `已通過驗證與獨立審查；只會合併審查過的 commit ${item.commit?.slice(0, 7) ?? ''}。`),
-        h('div.btns', {}, h('button.btn.primary', { type: 'button', onclick: event => run(event.currentTarget, { action: 'merge', target: item.target, deliveryId: item.deliveryId }, '核准並合併', `確定以你的 GitHub 身分合併 ${item.title}？`) }, '核准並合併'), item.pr ? h('a.btn', { href: item.pr, target: '_blank', rel: 'noopener' }, '在 GitHub 查看') : null));
-    } else if (item.kind === 'issue') {
-      box.append(h('h3', {}, `#${item.number} ${item.title ?? ''}`), h('div.row', {}, chip(item.status, ISSUE)), item.reason ? h('p', {}, item.reason) : null,
-        item.questions?.length ? h('ul.why', {}, item.questions.map(question => h('li', {}, question))) : null,
-        h('div.btns', {}, h('button.btn.primary', { type: 'button', onclick: event => run(event.currentTarget, { action: 'handback', number: item.number }, '交回 AI', `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`) }, '核准：交回 AI'), item.url ? h('a.btn', { href: item.url, target: '_blank', rel: 'noopener' }, '在 GitHub 查看') : null));
-    } else if (item.kind === 'review') {
-      box.append(h('h3', {}, `${targetName(item.target)}：${item.title}`), h('p', {}, `驗收 ${item.verificationId} 已通過，等待人工核准。`),
-        h('div.btns', {}, h('button.btn.primary', { type: 'button', onclick: event => run(event.currentTarget, { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, '核准版本', `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`) }, '核准版本')));
-    } else if (item.kind === 'blocked-version') {
-      box.append(h('h3', {}, `${targetName(item.target)}：${item.title} 阻塞`), item.reason ? h('p', {}, item.reason) : null,
-        h('div.btns', {}, h('button.btn', { type: 'button', onclick: event => run(event.currentTarget, { action: 'retry', target: item.target }, '重試', '確定已處理阻塞原因並重試這個版本？') }, '重試')));
-    } else {
-      box.append(h('h3', {}, item.title ?? item.kind), item.reason ? h('p', {}, item.reason) : null, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, item.pr) : null);
-    }
-    return box;
-  })));
-  return card;
+  return h('section.panel.pipes.rise', { 'aria-label': '管線' },
+    h('div.lane.lane-head', { 'aria-hidden': 'true' }, h('span.label', {}, '管線'), h('ol', {}, STAGES.map(([, label]) => h('li', {}, label))), h('span')),
+    streams.map(lane));
 }
-function verificationCard(project, streams) {
-  const withVer = streams.filter(stream => stream.verification);
+function consoleCard(streams) {
+  const stream = streams.find(item => item.live?.running) ?? streams.find(item => item.live) ?? null;
+  const live = stream?.live;
+  const lines = live?.actions ?? [];
+  const list = h('ol.acts', { 'aria-label': '執行者動作' }, lines.map((action, i) => h(`li.${action.kind}${action.ok === false ? '.fail' : ''}`, { style: `animation-delay:${Math.min(i, 12) * 40}ms` },
+    h(`span.k-${action.kind}`, { 'aria-hidden': 'true' }, { say: '◆', read: '↗', edit: '✎', write: '+', run: '▸', search: '⌕', tool: '·', done: action.ok === false ? '✕' : '✓' }[action.kind] ?? '·'),
+    h('span', { title: action.text }, action.text))),
+    live?.running ? h('li.cursor', { 'aria-hidden': 'true' }, h('span', {}, '›'), h('i')) : null);
+  requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+  return h(`div.console.rise${live ? '' : '.idle'}`, {},
+    h('div.console-h', {}, h('div.lights', {}, h('i'), h('i'), h('i')),
+      live ? h(`span.who${live.executor === 'codex' ? '.codex' : ''}`, {}, h('b', {}, live.executor === 'codex' ? 'C' : /opus/i.test(live.model ?? '') ? 'O' : 'S'), `${live.model ?? live.executor} · ${targetName(stream.target)}`) : h('span', {}, 'agent'),
+      h('span', {}, live ? (live.running ? `編輯 ${live.totals.edits} · 命令 ${live.totals.commands}` : `上次 ${ago(live.updatedAt)}`) : '')),
+    live ? [list, live.files?.length ? h('div.files', {}, live.files.slice(-6).map(file => h('span', { title: file }, file.split('/').pop()))) : null]
+      : h('p.quiet', {}, '目前沒有代理在工作'));
+}
+function decisions(snapshot) {
+  const items = snapshot.attention;
+  const id = snapshot.project.id;
+  const run = async (box, body, label, question, result) => {
+    if (!confirm(question)) return;
+    box.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    try {
+      const response = await act(id, body, label);
+      done.set(keyOf(body), `${result}${response.next ? ` · ${response.next}` : ''}`);
+      rerender();
+    } catch (error) { toast(`${label}失敗：${error.message}`, true); box.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
+  };
+  const keyOf = body => JSON.stringify(body);
+  const card = (item, glyph, title, sub, extra, buttons) => {
+    const body = buttons?.[0]?.body;
+    const signed = body ? done.get(keyOf(body)) : null;
+    const box = h(`div.ask.rise${signed ? '.done' : buttons ? '' : '.calm'}`, {},
+      h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', { title: sub }, sub) : null)), extra);
+    if (signed) box.append(h('div.signed', {}, icon(ICON.check, 16), h('span', {}, signed)));
+    else if (buttons) box.append(h('div.btns', {}, buttons.map((button, i) => button.href ? h('a.btn', { href: button.href, target: '_blank', rel: 'noopener' }, button.label)
+      : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result) }, button.label))));
+    return box;
+  };
+  const cards = items.map(item => {
+    const where = snapshot.streams.length > 1 ? `${targetName(item.target)} · ` : '';
+    if (item.kind === 'manual-merge') return card(item, ICON.merge, `${where}${item.title} 可合併`, `已驗收並通過獨立審查 · ${item.commit?.slice(0, 7) ?? ''}`, null,
+      [{ label: '核准並合併', body: { action: 'merge', target: item.target, deliveryId: item.deliveryId }, question: `確定以你的 GitHub 身分合併 ${item.title}？只會合併審查過的 commit。`, result: '已核准 · 合併中' }, item.pr ? { label: 'GitHub', href: item.pr } : null].filter(Boolean));
+    if (item.kind === 'issue') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
+      item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null,
+      [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
+    if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, `驗收 ${item.verificationId} 已通過`, null,
+      [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`, result: '已核准' }]);
+    if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, null,
+      [{ label: '重試', body: { action: 'retry', target: item.target }, question: '確定已處理阻塞原因並重試這個版本？', result: '已重新排入' }]);
+    return card(item, ICON.alert, item.title ?? item.kind, item.reason, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, 'GitHub') : null, null);
+  });
+  const open = items.filter(item => item.actions?.length).length;
+  return h('div.decide', { 'aria-label': '需要你' },
+    h('div.decide-h', {}, h('span.label', {}, '需要你'), h('b', {}, String(open))),
+    cards.length ? cards : h('div.ask.calm', {}, h('div.ask-h', {}, h('span.glyph', {}, icon(ICON.check)), h('div', {}, h('b', {}, '沒有需要你決定的事')))),
+    h('div.calm-note', {}, icon(ICON.clock, 16), '以你的 GitHub 身分執行 · 記錄於 actions.jsonl'));
+}
+function frameOf(project, stream, variant) {
+  const name = `${variant ?? ''} ${project.targets?.find(target => target.id === stream.target)?.platform ?? ''} ${stream.target ?? ''}`.toLowerCase();
+  return /ipad|tablet/.test(name) ? 'tablet' : /iphone|ios|android|flutter|phone|mobile|react-native/.test(name) ? 'phone' : 'browser';
+}
+function evidence(snapshot) {
+  const withVer = snapshot.streams.filter(stream => stream.verification);
   if (!withVer.length) return null;
-  const key = 'ver';
-  const current = withVer.find(stream => String(stream.target) === selected[key]) ?? withVer[0];
-  const ver = current.verification;
-  const variants = [...new Set(ver.scenes.map(scene => scene.variant ?? ''))];
+  const current = withVer.find(stream => String(stream.target) === selected.ver) ?? withVer[0];
+  const report = current.verification;
+  const variants = [...new Set(report.scenes.map(scene => scene.variant ?? ''))];
   const vkey = `variant:${current.target}`;
   const variant = variants.includes(selected[vkey]) ? selected[vkey] : variants[0];
-  const scenes = ver.scenes.filter(scene => (scene.variant ?? '') === variant);
-  const image = file => file ? h('img', { src: `/api/projects/${project.project.id}/file?path=${encodeURIComponent(file)}`, alt: '', loading: 'lazy' }) : h('div.miss', {}, '沒有截圖');
-  const card = h('section.card', {},
-    h('div.card-h', {}, h('div', {}, h('h2', {}, '驗收'), h('span.muted.mono', {}, `${ver.id} · `), chip(ver.status), h('span.muted', {}, ` 建置 `), chip(ver.build), h('span.muted', {}, ` 功能測試 `), chip(ver.functional)),
-      withVer.length > 1 ? h('div.segs', { role: 'tablist' }, withVer.map(stream => h('button.seg', { type: 'button', role: 'tab', 'aria-selected': String(stream === current), onclick: () => { selected[key] = String(stream.target); rerender(); } }, targetName(stream.target)))) : null),
-    variants.length > 1 ? h('div.segs', { role: 'tablist' }, variants.map(name => h('button.seg', { type: 'button', role: 'tab', 'aria-selected': String(name === variant), onclick: () => { selected[vkey] = name; rerender(); } }, `${name}${ver.variants?.[name] ? `（建置${(STATUS[ver.variants[name]] ?? [ver.variants[name]])[0]}）` : ''}`))) : null,
-    h('div.scroll', {}, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, '畫面'), TIERS.map(([, label]) => h('th', {}, label)))),
-      h('tbody', {}, scenes.map(scene => h('tr', {}, h('th', {}, scene.screen, h('small', {}, `${scene.id}`)), TIERS.map(([tier]) => h('td', {}, tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? h('span.chip', {}, '參考') : chip(scene.tiers[tier])))))))),
-    h('p.muted', {}, '結構、配色、版面必須通過；視覺比對在原生平台只供參考。'),
-    h('div.shots', {}, scenes.slice(0, 24).map(scene => h('article.shot', {}, h('div.shot-h', {}, h('h4', {}, scene.id), chip(scene.status)),
-      h('div.pair', {}, h('figure', {}, image(scene.prototype), h('figcaption', {}, '原型')), h('figure', {}, image(scene.application), h('figcaption', {}, 'App'))),
-      scene.reasons.length ? h('ul.why', {}, scene.reasons.map(reason => h('li', {}, reason))) : null))));
-  return card;
+  const scenes = report.scenes.filter(scene => (scene.variant ?? '') === variant);
+  const pass = scenes.filter(scene => scene.status === 'PASS').length;
+  const c = 2 * Math.PI * 26, fraction = scenes.length ? pass / scenes.length : 0;
+  const frame = frameOf(snapshot.project, current, variant);
+  const shot = (file, label) => h('figure', {}, h(`div.device.${frame}`, {}, h('div.screen', {}, file ? h('img', { src: `/api/projects/${snapshot.project.id}/file?path=${encodeURIComponent(file)}`, alt: `${label}截圖`, loading: 'lazy' }) : h('div.miss', {}, '無截圖'))), h('figcaption', {}, label));
+  const segs = (list, isOn, pick, label) => h('div.segs', { role: 'tablist' }, list.map(item => h('button.seg', { type: 'button', role: 'tab', 'aria-selected': String(isOn(item)), onclick: () => { pick(item); rerender(); } }, label(item))));
+  return h('section.panel.rise', { 'aria-label': '驗收證據' },
+    h('div.panel-h', {}, h('div.ev-h', {},
+      h('div.donut', {}, s('svg', { width: 64, height: 64, viewBox: '0 0 64 64', role: 'img', 'aria-label': `通過 ${pass} / ${scenes.length}` },
+        s('circle', { cx: 32, cy: 32, r: 26, fill: 'none', stroke: 'var(--line2)', 'stroke-width': 6 }),
+        s('circle.arc', { cx: 32, cy: 32, r: 26, fill: 'none', stroke: fraction === 1 ? 'var(--mint)' : fraction ? 'var(--mint)' : 'var(--bad)', 'stroke-width': 6, 'stroke-linecap': 'round', 'stroke-dasharray': c.toFixed(1), 'stroke-dashoffset': (c * (1 - fraction)).toFixed(1), transform: 'rotate(-90 32 32)', style: `--c:${c.toFixed(1)}`, class: 'gauge-arc' })),
+        h('b', {}, `${Math.round(100 * fraction)}%`)),
+      h('div', {}, h('b', {}, '原型 ↔ App'), h('small', {}, `${pass} / ${scenes.length} 場景 · `, h('span.mono', {}, report.id)))),
+      h('div.checks', {}, withVer.length > 1 ? segs(withVer, stream => stream === current, stream => { selected.ver = String(stream.target); }, stream => targetName(stream.target)) : null,
+        variants.length > 1 ? segs(variants, name => name === variant, name => { selected[vkey] = name; }, name => name) : null)),
+    h('div.checks', {}, [['建置', report.variants?.[variant] ?? report.build], ['功能測試', report.functional], ['比對', report.visual ?? report.status]].map(([label, status]) => h(`span.pill${(STATUS[status] ?? [])[1] ? `.${STATUS[status][1]}` : ''}`, { title: status }, `${label} ${(STATUS[status] ?? [status])[0]}`))),
+    scenes.length ? h('div.scenes', {}, scenes.slice(0, 24).map(scene => h(`article.scene${scene.status === 'FAIL' ? '.fail' : ''}`, { 'aria-label': scene.id },
+      h('div.pair', {}, shot(scene.prototype, '原型'), shot(scene.application, 'App')),
+      h('div.scene-f', {}, h('b', { title: scene.id }, scene.id),
+        h('span.tiers', { role: 'img', 'aria-label': TIERS.map(([tier, label]) => `${label} ${(STATUS[scene.tiers[tier]] ?? [scene.tiers[tier]])[0]}`).join('，') },
+          TIERS.map(([tier, label]) => h(`i.${tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? 'ref' : scene.tiers[tier]}`, { title: `${label}：${tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? '參考' : (STATUS[scene.tiers[tier]] ?? [scene.tiers[tier]])[0]}` })))),
+      scene.reasons.length ? h('ul.why', {}, scene.reasons.map(reason => h('li', {}, reason))) : null))) : h('p.empty', {}, '這個版本沒有比對場景'));
 }
-function versionsCard(streams) {
-  const rows = streams.flatMap(stream => stream.versions.map(version => ({ ...version, target: stream.target })));
-  return h('section.card', {}, h('div.card-h', {}, h('h2', {}, '原型版本')),
-    rows.length ? h('div.scroll', {}, h('table', {}, h('thead', {}, h('tr', {}, ['target', '版本', '狀態', '嘗試', '說明'].map(label => h('th', {}, label)))),
-      h('tbody', {}, rows.slice(0, 24).map(row => h('tr', {}, h('td', {}, targetName(row.target)), h('td.mono', {}, row.sha?.slice(0, 7) ?? row.manifestId), h('td', {}, chip(row.status)), h('td', {}, String(row.attempts)), h('td', {}, row.summary ?? row.error ?? ''))))))
-      : h('div.empty', {}, '還沒有原型版本。'));
+function sparkline(events) {
+  const now = Date.now(), buckets = new Array(12).fill(0);
+  for (const event of events) { const age = (now - Date.parse(event.at)) / 300000; if (age >= 0 && age < 12) buckets[11 - Math.floor(age)] += 1; }
+  const max = Math.max(1, ...buckets);
+  return s('svg', { width: 120, height: 28, viewBox: '0 0 120 28', role: 'img', 'aria-label': `近一小時 ${buckets.reduce((a, b) => a + b, 0)} 個事件` },
+    s('polyline', { points: buckets.map((count, i) => `${(i * 120 / 11).toFixed(1)},${(25 - count / max * 21).toFixed(1)}`).join(' '), fill: 'none', stroke: 'var(--mint)', 'stroke-width': 1.8, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
 }
-function issuesCard(issues) {
-  return h('section.card', {}, h('div.card-h', {}, h('h2', {}, 'GitHub Issues')),
-    issues.length ? h('div.scroll', {}, h('table', {}, h('thead', {}, h('tr', {}, ['#', '標題', '狀態', '類型', 'target'].map(label => h('th', {}, label)))),
-      h('tbody', {}, issues.map(issue => h('tr', {}, h('td', {}, issue.url ? h('a', { href: issue.url, target: '_blank', rel: 'noopener' }, `#${issue.number}`) : `#${issue.number}`), h('td', {}, issue.title ?? ''), h('td', {}, chip(issue.status, ISSUE)), h('td', {}, issue.area ?? ''),
-        h('td', {}, Object.entries(issue.targets).map(([target, work]) => h('div.row', {}, h('span', {}, target), chip(work.status), work.pr ? h('a', { href: work.pr, target: '_blank', rel: 'noopener' }, 'PR') : null))))))))
-      : h('div.empty', {}, '沒有 Issue。'));
-}
-function deliveriesCard(streams) {
-  const rows = streams.flatMap(stream => stream.deliveries.map(delivery => ({ ...delivery, target: stream.target }))).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-  return h('section.card', {}, h('div.card-h', {}, h('h2', {}, '交付')),
-    rows.length ? h('ul.log', {}, rows.slice(0, 12).map(row => h('li', {}, h('time', {}, clock(row.updatedAt)), h('div.row', {}, h('b', {}, targetName(row.target)), chip(row.manualMerge ? 'MERGED' : row.status), row.pr ? h('a', { href: row.pr, target: '_blank', rel: 'noopener' }, `PR #${row.prNumber}`) : null, row.error ? h('span.muted', {}, row.error) : null))))
-      : h('div.empty', {}, '還沒有交付。'));
-}
-function eventsCard(events) {
-  return h('section.card', {}, h('div.card-h', {}, h('h2', {}, '事件'), h('span.muted', {}, '.protoflow/runner/events.jsonl')),
-    events.length ? h('ul.log', {}, events.slice(0, 30).map(event => h('li', {}, h('time', {}, clock(event.at)), h('span', {}, `${event.target ? `${event.target} · ` : ''}${event.event}${event.number ? ` #${event.number}` : ''}${event.status ? ` · ${event.status}` : ''}${event.reason ? ` · ${String(event.reason).slice(0, 160)}` : event.error ? ` · ${String(event.error).slice(0, 160)}` : ''}`)))) : h('div.empty', {}, '還沒有事件（Runner 自 v0.3.23 起記錄）。'));
+const TONE = status => (STATUS[status] ?? ISSUE[status] ?? [])[1] ?? '';
+function lists(snapshot) {
+  const many = snapshot.streams.length > 1;
+  const versions = snapshot.streams.flatMap(stream => stream.versions.map(version => ({ ...version, target: stream.target })));
+  const deliveries = snapshot.streams.flatMap(stream => stream.deliveries.map(delivery => ({ ...delivery, target: stream.target }))).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  const panel = (label, extra, body) => h('section.panel.rise', { 'aria-label': label }, h('div.panel-h', {}, h('span.label', {}, label), extra), body);
+  const eventTone = event => /fail|block|error|stop/i.test(`${event.event}${event.status ?? ''}`) ? 'bad' : /merged|pass|deliver|complete|done/i.test(`${event.event}${event.status ?? ''}`) ? 'ok' : /human|manual|needs/i.test(`${event.event}${event.status ?? ''}`) ? 'warn' : 'ink';
+  return h('div.quad', {},
+    panel('版本', null, versions.length ? h('ol.timeline', {}, versions.slice(0, 8).map(version => h(`li.${version.status === 'RUNNING' ? 'now' : TONE(version.status) || 'idle'}`, {},
+      h('div', {}, h('b', {}, `${many ? `${targetName(version.target)} · ` : ''}${version.sha?.slice(0, 7) ?? version.manifestId}`), h('span', { title: version.summary ?? version.error ?? '' }, version.summary ?? version.error ?? '')), pill(version.status)))) : h('p.empty', {}, '還沒有原型版本')),
+    panel('交付', null, deliveries.length ? h('ul.feed', {}, deliveries.slice(0, 8).map(delivery => h('li', {}, h('time', {}, clock(delivery.updatedAt)), h(`i.${delivery.manualMerge ? 'ok' : TONE(delivery.status) || 'ink'}`),
+      h('span', { title: delivery.error ?? '' }, `${many ? `${targetName(delivery.target)} · ` : ''}${(STATUS[delivery.manualMerge ? 'MERGED' : delivery.status] ?? [delivery.status])[0]}`),
+      delivery.pr ? h('a', { href: delivery.pr, target: '_blank', rel: 'noopener' }, `PR #${delivery.prNumber}`) : h('span')))) : h('p.empty', {}, '還沒有交付')),
+    panel('Issue', null, snapshot.issues.length ? h('ul.feed', {}, snapshot.issues.slice(0, 8).map(issue => h('li', {},
+      issue.url ? h('a.mono', { href: issue.url, target: '_blank', rel: 'noopener' }, `#${issue.number}`) : h('time', {}, `#${issue.number}`), h(`i.${TONE(issue.status) || 'ink'}`),
+      h('span', { title: issue.title ?? '' }, issue.title ?? ''), h('span.muted', {}, (ISSUE[issue.status] ?? [issue.status])[0])))) : h('p.empty', {}, '沒有 Issue')),
+    panel('動態', sparkline(snapshot.events), snapshot.events.length ? h('ul.feed', {}, snapshot.events.slice(0, 8).map(event => h('li', {}, h('time', {}, clock(event.at)), h(`i.${eventTone(event)}`),
+      h('span', { title: event.reason ?? event.error ?? '' }, `${event.target && many ? `${event.target} · ` : ''}${event.event}${event.number ? ` #${event.number}` : ''}${event.status ? ` · ${event.status}` : ''}`), h('span')))) : h('p.empty', {}, '還沒有事件')));
 }
 let lastProject = null;
 function renderProject(snapshot) {
   lastProject = snapshot;
   const project = snapshot.project;
   crumb.textContent = project.name;
-  const roles = snapshot.roles;
+  if (snapshot.engineVersion) ver.textContent = `v${snapshot.engineVersion}`;
+  const team = agents(snapshot.roles);
   app.replaceChildren(
-    h('div.top', {}, h('div', {}, h('span.eyebrow', {}, project.root), h('h1', {}, project.name),
-      h('dl.kv', {}, h('dt', {}, 'Runner'), h('dd', {}, chip(snapshot.service.status), snapshot.service.version ? ` v${snapshot.service.version}` : '', snapshot.service.reason ? ` · ${snapshot.service.reason}` : ''),
-        h('dt', {}, '規劃／驗收'), h('dd', {}, `${model(roles.planner)}／${model(roles.acceptor)}`),
-        h('dt', {}, '執行者'), h('dd', {}, `前端 ${model(roles.executors.frontend)} · 後端 ${model(roles.executors.backend)}${roles.executors.fallback ? ` · 備援 ${roles.executors.fallback}` : ''}`),
-        project.delivery ? [h('dt', {}, '交付'), h('dd', {}, `${project.delivery.baseBranch} · ${project.delivery.merge === 'manual' ? '由你合併' : '自動合併'}${project.autoApprove ? ' · 自動批准（AI）' : ' · 人工批准'}`)] : null)),
-      h('div.tiles', {}, h('div.tile', {}, h('span', {}, '待你處理'), h('b', {}, String(snapshot.attention.length))), h('div.tile', {}, h('span', {}, '進行中的 Issue'), h('b', {}, String(snapshot.issues.filter(issue => issue.status === 'in-progress').length))))),
-    h('section.card', {}, h('div.card-h', {}, h('div', {}, h('span.eyebrow', {}, '現在進行'), h('h2', {}, snapshot.streams.some(stream => !['idle', 'blocked'].includes(stream.stage)) ? '工作中' : '沒有進行中的工作')), h('span.muted', {}, `更新 ${clock(snapshot.generatedAt)}`)),
-      h('div.grid', {}, snapshot.streams.map(stream => liveLane(snapshot, stream)))),
-    attentionCard(snapshot, snapshot.attention),
-    verificationCard(snapshot, snapshot.streams),
-    h('div.two', {}, versionsCard(snapshot.streams), issuesCard(snapshot.issues)),
-    h('div.two', {}, deliveriesCard(snapshot.streams), eventsCard(snapshot.events)),
-    snapshot.adr ? h('section.card', {}, h('div.card-h', {}, h('h2', {}, '架構決策（ADR）'), chip(snapshot.adr.status === 'approved' ? 'PASS' : 'PENDING')), h('dl.kv', {}, h('dt', {}, '檔案'), h('dd.mono', {}, snapshot.adr.path), h('dt', {}, '審查者'), h('dd', {}, snapshot.adr.reviewer ?? '—'), h('dt', {}, '決策'), h('dd', {}, snapshot.adr.decision ?? '—')), h('p.muted', {}, 'ADR 的核准目前在檔案中進行；面板只顯示狀態。')) : null
-  );
+    h('header.head.rise', {}, h('div.ident', {}, h('a.back', { href: '#/', 'aria-label': '返回總覽' }, icon(ICON.back, 16)), h('span.tile', {}, initial(project.name)),
+      h('div', {}, h('h1', { style: 'font-size:22px;font-weight:600;letter-spacing:-.015em' }, project.name), h('small', { title: project.root }, project.root))),
+      h('div.roles', {}, team.map(agent => h('span.role', { title: agent.name }, avatar(agent), agent.labels.join('／'))),
+        snapshot.adr ? h(`span.pill${snapshot.adr.status === 'approved' ? '.ok' : '.warn'}`, { title: snapshot.adr.path }, `ADR ${snapshot.adr.status === 'approved' ? '已核准' : '待核准'}`) : null,
+        h(`span.pill${(STATUS[snapshot.service.status] ?? [])[1] ? `.${STATUS[snapshot.service.status][1]}` : ''}`, { title: snapshot.service.reason ?? '' }, (STATUS[snapshot.service.status] ?? [snapshot.service.status])[0]),
+        h('span.pill.plain', { title: '交付與批准方式' }, `${project.delivery?.merge === 'manual' ? '你合併' : '自動合併'} · ${project.autoApprove ? 'AI 批准' : '人工批准'}`))),
+    pipelines(snapshot.streams),
+    h('section.split', {}, consoleCard(snapshot.streams), decisions(snapshot)),
+    evidence(snapshot) ?? '',
+    lists(snapshot));
 }
 const rerender = () => { if (lastProject) renderProject(lastProject); };
 setInterval(() => document.querySelectorAll('[data-since]').forEach(node => { if (node.dataset.since) node.textContent = elapsed(node.dataset.since); }), 1000);
@@ -202,6 +302,9 @@ setInterval(() => document.querySelectorAll('[data-since]').forEach(node => { if
 function route() {
   const match = /^#\/p\/([0-9a-f]{12})$/.exec(location.hash);
   lastProject = null;
+  done.clear();
+  document.body.classList.remove('settled');
+  window.scrollTo(0, 0);
   if (match) subscribe(`/api/projects/${match[1]}/stream`, renderProject);
   else subscribe('/api/stream', renderOverview);
 }

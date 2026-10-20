@@ -2,7 +2,7 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 已接受（2026-10-20），D1–D3 已實作（v0.3.23，使用說明見 [docs/dashboard.md](../dashboard.md)）；D4（手機查看）待做 |
+| 狀態 | 已接受（2026-10-20），D1–D3 已實作（v0.3.23；v0.3.24 重新設計介面，使用說明見 [docs/dashboard.md](../dashboard.md)）；D4（手機查看）待做 |
 | 前置 | [提案 0003](0003-claude-plans-codex-builds.md)、v0.3.22 常駐 Runner 服務 |
 | 影響範圍 | Runner 事件持久化、執行代理即時 trace、`dashboard` 命令、本機網頁、面板上的核准操作 |
 

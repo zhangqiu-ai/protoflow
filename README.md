@@ -201,7 +201,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 ## 儀表板（提案 0004）
 
-`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：各 target 的階段與角色模型、執行代理正在做的事（讀檔、編輯、命令）、驗收矩陣與原型／App 截圖對照、Issue、交付與事件。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
+`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：圓環與管線呈現各 target 的階段，終端機即時顯示執行代理正在做的事（讀檔、編輯、命令），原型與 App 截圖並排放在仿真機框，另有角色模型、Issue、交付與事件；淺色／深色與手機寬度皆可用。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
 
 ## Claude 規劃與驗收、GitHub Issues（提案 0003）
 
