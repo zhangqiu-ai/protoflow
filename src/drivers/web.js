@@ -34,13 +34,23 @@ async function settle(page, timeout) {
 }
 
 /** Element facts for each anchor; runs in the page. */
-function inspect({ attribute, ids }) {
+function inspect({ attribute, ids, dynamicText = [] }) {
   const all = [...document.querySelectorAll(`[${attribute}]`)];
   const interactiveTags = ['BUTTON', 'SELECT', 'SUMMARY', 'TEXTAREA'];
   // Every input control a user can set counts as editable (text, checkbox, radio, range, file, colour...).
   const nonEditableTypes = ['hidden', 'button', 'submit', 'reset', 'image'];
   const textEntryTypes = ['text', 'email', 'password', 'search', 'tel', 'url', 'number', 'date', 'time', 'datetime-local', 'month', 'week'];
   const facts = {};
+  // Dynamic text outside any anchor (an unread badge in shared chrome), marked in the page or matched by the project's
+  // anchors.dynamicText selectors, is data the application may not have: leave it out of every anchor's text, as
+  // dynamic anchors are. Hidden only while text is read, so bounds and pixels keep it.
+  const loose = [...new Set([...document.querySelectorAll('[data-pf-text="dynamic"]'), ...dynamicText.flatMap(selector => [...document.querySelectorAll(selector)])])]
+    .filter(node => !node.hasAttribute(attribute));
+  const readText = node => {
+    const saved = loose.map(item => item.style.getPropertyValue('display'));
+    for (const item of loose) item.style.setProperty('display', 'none');
+    try { return node.innerText; } finally { loose.forEach((item, index) => saved[index] ? item.style.setProperty('display', saved[index]) : item.style.removeProperty('display')); }
+  };
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
     if (!nodes.length) { facts[id] = { count: 0, visible: false }; continue; }
@@ -61,7 +71,7 @@ function inspect({ attribute, ids }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : node.innerText,
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length ? readText(node) : node.innerText),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
   }
@@ -72,11 +82,11 @@ function inspect({ attribute, ids }) {
  * Replay a state on an already loaded page and collect anchor facts and a device-pixel screenshot.
  * Shared by the web and Electron drivers so both sides of a comparison use identical logic.
  */
-export async function captureOnPage(page, { attribute, anchors, steps = [], timeoutMs = 10000 }) {
+export async function captureOnPage(page, { attribute, anchors, steps = [], dynamicText = [], timeoutMs = 10000 }) {
   await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
   for (const step of steps) await perform(page, attribute, step);
   await settle(page, timeoutMs);
-  const elements = await page.evaluate(inspect, { attribute, ids: anchors });
+  const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText });
   const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
   return { elements, screenshot };
 }
@@ -85,7 +95,7 @@ export async function captureOnPage(page, { attribute, anchors, steps = [], time
  * Capture { viewport, screenshot, elements } for one screen state.
  * Throws when navigation or a step fails; the caller records that as the scene's failure.
  */
-export async function captureWeb(browser, { url, attribute, anchors, steps = [], fixture = {}, viewport, locale = 'en-US', colorScheme = 'light', timeoutMs = 10000 }) {
+export async function captureWeb(browser, { url, attribute, anchors, steps = [], dynamicText = [], fixture = {}, viewport, locale = 'en-US', colorScheme = 'light', timeoutMs = 10000 }) {
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: viewport.scale ?? 1,
     locale, colorScheme, timezoneId: 'UTC', reducedMotion: 'reduce'
@@ -99,7 +109,7 @@ export async function captureWeb(browser, { url, attribute, anchors, steps = [],
     const page = await context.newPage();
     page.setDefaultTimeout(timeoutMs);
     await page.goto(url, { waitUntil: 'networkidle' });
-    const { elements, screenshot } = await captureOnPage(page, { attribute, anchors, steps, timeoutMs });
+    const { elements, screenshot } = await captureOnPage(page, { attribute, anchors, steps, dynamicText, timeoutMs });
     return { viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale ?? 1 }, screenshot, elements };
   } finally {
     await context.close();

@@ -48,6 +48,18 @@ test('React Native flattens the tree: container text is collected by geometry, c
   assert.equal(elements['tasks.input'].text, 'New task');
 });
 
+test('a flattened container\'s own label is an accessible name, not text it shows', () => {
+  const tree = { type: 'application', frame: { x: 0, y: 0, width: 400, height: 800 }, children: [
+    { type: 'other', identifier: 'page', frame: { x: 0, y: 0, width: 400, height: 800 } },
+    { type: 'staticText', label: 'Settings', frame: { x: 20, y: 20, width: 100, height: 20 } },
+    { type: 'tabBar', label: 'Main navigation', frame: { x: 20, y: 720, width: 360, height: 60 } },
+    { type: 'button', label: 'Growth', frame: { x: 30, y: 730, width: 60, height: 40 } },
+    { type: 'button', label: 'Me', frame: { x: 300, y: 730, width: 60, height: 40 } },
+    { type: 'other', label: 'Z', frame: { x: 20, y: 60, width: 56, height: 56 } }
+  ] };
+  assert.equal(elementText(tree.children[0], tree), 'Settings Z Growth Me');
+});
+
 test('native controls: no text of their own, labels deduplicated inside containers, values never leak', () => {
   const row = { type: 'other', identifier: 'settings.notify', frame: { x: 20, y: 140, width: 362, height: 52 }, children: [
     { type: 'staticText', label: 'Daily reminder', frame: { x: 36, y: 156, width: 120, height: 20 } },

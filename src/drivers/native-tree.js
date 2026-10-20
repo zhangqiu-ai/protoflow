@@ -74,7 +74,11 @@ export function textWithin(tree, container) {
     for (const child of item.children ?? []) visit(child);
   };
   visit(tree);
-  const parts = readingOrder(found).map(item => item.label);
+  // A labelled leaf that encloses other text is a flattened container (a tab bar named "Main navigation"): its label
+  // is an accessible name, which the DOM's innerText leaves out as well.
+  const encloses = (outer, inner) => outer !== inner && inside(frameOf(inner), frameOf(outer));
+  const text = found.filter(item => LABELLED.has(item.type) || !found.some(other => encloses(item, other)));
+  const parts = readingOrder(text).map(item => item.label);
   return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
 }
 

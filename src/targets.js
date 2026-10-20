@@ -124,7 +124,7 @@ async function captureApplication(root, config, target, settings, browser, scene
   try { url = /^https?:/.test(filled) ? filled : await urlFor(root, filled); }
   catch (error) { return { status: 'FAIL', reason: `application screen ${scene.screen} is not reachable at ${filled}: ${error.message}` }; }
   try {
-    return { status: 'PASS', capture: await captureWeb(browser, { url, attribute: settings.locator.attribute, anchors: request.anchors, steps: request.steps, fixture: request.fixture.data, viewport: settings.viewport, timeoutMs: target.timeoutMs }) };
+    return { status: 'PASS', capture: await captureWeb(browser, { url, attribute: settings.locator.attribute, anchors: request.anchors, steps: request.steps, dynamicText: config.anchors?.dynamicText, fixture: request.fixture.data, viewport: settings.viewport, timeoutMs: target.timeoutMs }) };
   } catch (error) { return { status: 'FAIL', reason: `application could not reach ${scene.screen}.${scene.state}: ${error.message.split('\n')[0]}` }; }
 }
 
@@ -242,7 +242,7 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         prototype = reference.capture;
       } else {
         try {
-          prototype = await captureWeb(browser, { url: prototypeUrl, attribute, anchors, steps: state.steps, fixture: request.fixture.data, viewport: settings.viewport });
+          prototype = await captureWeb(browser, { url: prototypeUrl, attribute, anchors, steps: state.steps, dynamicText: config.anchors?.dynamicText, fixture: request.fixture.data, viewport: settings.viewport });
         } catch (error) {
           entry.reason = `prototype state is unreachable: ${error.message.split('\n')[0]}`;
           results.push(entry); continue;

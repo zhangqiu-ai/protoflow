@@ -129,6 +129,57 @@ test('T2 sampling compares dominant colour inside each side’s bounds when the 
   assert.equal(compareTokens(screen, left, right).status, 'NOT_RUN');
 });
 
+test('T2 sampling skips dynamic content and elements without one prevailing colour', () => {
+  const left = capture(), right = capture();
+  for (const element of Object.values(right.elements)) delete element.style;
+  // Four equal stripes (a gradient, a switch's track and knob): no colour covers half the element.
+  const stripes = (png, colours) => { colours.forEach((colour, i) => paint(png, box(20 + i * 25, 70, 25, 40), colour)); return png; };
+  left.screenshot = PNG.sync.write(stripes(solid(400, 300, [255, 255, 255]), [[13, 118, 110], [30, 64, 175], [185, 28, 28], [202, 138, 4]]));
+  right.screenshot = PNG.sync.write(stripes(solid(400, 300, [255, 255, 255]), [[202, 138, 4], [13, 118, 110], [30, 64, 175], [185, 28, 28]]));
+  assert.doesNotMatch(compareTokens(screen, left, right).reasons.join(), /home\.go/);
+  // A dynamic anchor's fill follows its data.
+  left.screenshot = PNG.sync.write(paint(solid(400, 300, [255, 255, 255]), box(300, 20, 80, 20), [13, 118, 110]));
+  right.screenshot = PNG.sync.write(paint(solid(400, 300, [255, 255, 255]), box(300, 20, 80, 20), [185, 28, 28]));
+  assert.doesNotMatch(compareTokens(screen, left, right).reasons.join(), /home\.clock/);
+});
+
+test('T1 structure ignores separator glyphs a platform leaves out of combined text', () => {
+  const page = { anchors: [
+    { id: 'about', role: 'screen', parent: null },
+    { id: 'about.version', role: 'element', parent: 'about', dynamic: true }
+  ] };
+  const shot = (container, version) => ({ elements: {
+    about: { count: 1, visible: true, bounds: box(0, 0, 400, 300), text: container },
+    'about.version': { count: 1, visible: true, bounds: box(0, 260, 400, 20), text: version }
+  } });
+  assert.equal(compareStructure(page, state, shot('Settings Siyue · prototype', 'Siyue · prototype'), shot('Settings Siyue 0.0.1', 'Siyue · 0.0.1')).status, 'PASS');
+  assert.deepEqual(compareStructure(page, state, shot('Settings · Siyue · prototype', 'Siyue · prototype'), shot('Setting Siyue 0.0.1', 'Siyue · 0.0.1')).reasons, ['about: text "Settings" vs "Setting"']);
+});
+
+test('T3 layout compares only the vertical extent of dynamic text', () => {
+  const moved = capture({ 'home.clock': { bounds: box(260, 20, 120, 20) } });
+  assert.equal(compareLayout('home', screen, capture(), moved).status, 'PASS');
+  assert.match(compareLayout('home', screen, capture(), capture({ 'home.clock': { bounds: box(300, 60, 80, 20) } })).reasons.join(), /home\.clock: y/);
+});
+
+test('T3 layout removes a dynamic block\'s height difference from the anchors below it', () => {
+  const page = { anchors: [
+    { id: 'del', role: 'screen', parent: null },
+    { id: 'del.list', role: 'element', parent: 'del', dynamic: true },
+    { id: 'del.ack', role: 'action', parent: 'del' }
+  ] };
+  const shot = (listHeight, ackY) => ({ viewport: { width: 400, height: 800, scale: 1 }, elements: {
+    del: { count: 1, visible: true, bounds: box(0, 0, 400, 800), text: '' },
+    'del.list': { count: 1, visible: true, bounds: box(20, 60, 360, listHeight), text: '' },
+    'del.ack': { count: 1, visible: true, interactive: true, bounds: box(20, 60 + listHeight + 12, 360, 44), text: '' }
+  } });
+  // Three lines of data in the prototype, two in the application: the checkbox follows the list.
+  assert.equal(compareLayout('del', page, shot(90, 0), shot(60, 0)).status, 'PASS');
+  // A gap that is not the dynamic block's doing still fails.
+  const moved = shot(60, 0); moved.elements['del.ack'].bounds.y += 80;
+  assert.match(compareLayout('del', page, shot(90, 0), moved).reasons.join(), /del\.ack: y/);
+});
+
 test('T3 layout: relative position and size, sibling relations and optional absolute tolerance', () => {
   assert.equal(compareLayout('home', screen, capture(), capture()).status, 'PASS');
   // A uniformly scaled screen (another device width) keeps relative layout.
