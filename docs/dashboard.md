@@ -28,12 +28,16 @@ protoflow dashboard serve [--port 7420]
 
 ## 畫面
 
-- **總覽**：每個專案一張卡：Runner 健康、各 target 的階段、待你處理的數量、Issue 數與最後事件。
+視覺為「清晨觀測台」：霧白底、單一薄荷綠表示健康與進度，琥珀色只用在需要你的地方，唯一的深色面是執行代理的終端機。文字精簡，狀態用圖形表達；動效只放在有即時狀態的地方（脈動、管線流光、圓環填充、終端機游標），系統開啟「減少動態效果」時全部停用。介面支援淺色與深色模式，手機寬度下單欄排列。
+
+- **總覽**：一句話標題（專案數、等你決定的件數）與三個圓環（常駐、進行中、等你）；每個專案一張卡：Runner 狀態、每個 target 一條迷你管線（規劃 → 實作 → 驗收 → 審查 → 交付，進行中的路段有流光）、規劃者與前後端執行者的頭像（O = Opus、S = Sonnet、C = Codex）、待你的數量、未結 Issue 數與最後事件時間。
 - **專案**：
-  - **現在進行**：各 target 的階段條（規劃、實作、驗收、獨立審查、交付）、目前的角色與模型、經過時間；執行代理工作時顯示它的實際動作（讀檔、編輯、執行的命令、它的說明），取自執行期間寫入 worktree 的 `.protoflow/live/execute.jsonl`。
-  - **待你處理**：見下節。
-  - **驗收**：最新驗收的每個場景在結構、配色、版面（必須通過）與視覺（原生平台僅供參考）的結果與原因，以及原型與 App 截圖對照；多 target 或多變體可切換。
-  - **原型版本、GitHub Issues、交付、事件**（`.protoflow/runner/events.jsonl`）與 ADR 狀態。
+  - **角色與狀態**：規劃、前端、後端各用哪個模型（滑過顯示完整名稱），Runner 狀態、ADR 狀態、合併與批准方式。
+  - **管線**：每個 target 一條大管線，已完成節點打勾、目前節點脈動，旁邊是目前版本摘要、階段與經過時間；阻塞時顯示原因。
+  - **終端機**：執行代理工作時逐行顯示它的實際動作（說明、讀檔、編輯、執行的命令、結束），底部列出改動的檔案；取自執行期間寫入 worktree 的 `.protoflow/live/execute.jsonl`。
+  - **需要你**：見下節；核准成功後卡片轉為已簽署狀態。
+  - **原型 ↔ App**：最新驗收的通過率圓環、建置／功能測試／比對狀態，以及每個場景的原型與 App 截圖並排放在仿真機框（手機、平板或瀏覽器，依變體與 target 平台判斷）；四個圓點依序代表結構、配色、版面（必須通過）與視覺（原生平台僅供參考）。多 target 或多變體可切換。
+  - **版本、交付、Issue、動態**：版本時間軸、交付與 PR、Issue 狀態，以及帶近一小時事件量曲線的事件流（`.protoflow/runner/events.jsonl`）。
 
 頁面以 server-sent events 即時更新，只在內容變化時重繪。`protoflow dashboard snapshot --project PATH` 輸出同一份資料（`protoflow.dashboard/1` JSON）。
 
@@ -42,7 +46,7 @@ protoflow dashboard serve [--port 7420]
 | 項目 | 何時出現 | 面板操作 | 綁定 |
 |---|---|---|---|
 | 交付 PR 待你合併 | `runner.delivery.merge: "manual"` 的交付已通過驗證與獨立審查 | 核准並合併 | PR 仍開啟、head 等於審查過的交付 commit 才以 `--match-head-commit` 合併；以你的 GitHub 身分執行，交付紀錄寫入 `manualMerge` |
-| Issue 需要你決定 | Issue 為 `needs-human`、`blocked` 或 `rejected` | 核准：交回 AI | 以你的 GitHub 身分移除狀態標籤；Runner 下一輪確認你有寫入權限後重新分流 |
+| Issue 需要你決定 | Issue 為 `needs-human`、`blocked` 或 `rejected` | 交回 AI | 以你的 GitHub 身分移除狀態標籤；Runner 下一輪確認你有寫入權限後重新分流 |
 | 版本待人工核准 | 沒有 `policy.autoApprove` 的專案，已 PASS 的版本 | 核准版本 | 在該 target 的 Runner worktree 建立並核准審查，綁定驗收 hash，複製回專案；審查者為 `dashboard.reviewer` |
 | 版本阻塞 | 目前版本 BLOCKED | 重試 | `runner retry`（先處理阻塞原因） |
 

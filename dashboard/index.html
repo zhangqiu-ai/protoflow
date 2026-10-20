@@ -9,11 +9,12 @@
 </head>
 <body>
 <header class="bar">
-  <a class="brand" href="#/">ProtoFlow</a>
+  <a class="brand" href="#/" aria-label="ProtoFlow 所有專案"><svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true"><rect x="2" y="2" width="17" height="17" rx="5" fill="currentColor"></rect><rect x="11" y="11" width="17" height="17" rx="5" fill="#0FA98F" fill-opacity=".9"></rect></svg>ProtoFlow</a>
   <span class="crumb" id="crumb"></span>
-  <span class="conn" id="conn" role="status" aria-live="polite">連線中…</span>
+  <span class="conn" id="conn" role="status" aria-live="polite">連線中</span>
+  <span class="ver" id="ver"></span>
 </header>
-<main id="app" class="wrap"><p class="muted">載入中…</p></main>
+<main id="app" class="wrap"></main>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script type="module" src="/assets/app.js"></script>
 </body>
