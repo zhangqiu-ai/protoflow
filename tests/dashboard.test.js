@@ -1,0 +1,123 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import http from 'node:http';
+import { traceActivity, roles, listProjects, addProject, removeProject, dashboardSnapshot, projectId } from '../src/dashboard-data.js';
+import { createDashboardServer } from '../src/dashboard-server.js';
+import { runAction } from '../src/dashboard-actions.js';
+import { dashboardFixture, PNG } from './helpers/dashboard-fixture.js';
+
+async function fixture(t, options) { const f = await dashboardFixture(options); t.after(f.cleanup); return f; }
+
+test('executor traces become readable actions for Claude stream-json and Codex JSONL', () => {
+  const claude = traceActivity([
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Looking at the settings screen.' }, { type: 'tool_use', name: 'Read', input: { file_path: '/w/app/a.js' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/w/app/a.js' } }, { type: 'tool_use', name: 'Write', input: { file_path: '/w/app/a.test.js' } }, { type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'Run tests' } }, { type: 'tool_use', name: 'Grep', input: { pattern: 'toggle' } }] } },
+    { type: 'result', is_error: false }
+  ], { root: '/w' });
+  assert.deepEqual(claude.actions.map(action => [action.kind, action.text]), [['say', 'Looking at the settings screen.'], ['read', 'app/a.js'], ['edit', 'app/a.js'], ['write', 'app/a.test.js'], ['run', 'Run tests: npm test'], ['search', 'toggle'], ['done', 'finished']]);
+  assert.deepEqual(claude.totals, { edits: 2, commands: 1, reads: 1, searches: 1 }); assert.deepEqual(claude.files, ['app/a.js', 'app/a.test.js']);
+  const codex = traceActivity([
+    { type: 'thread.started' }, { type: 'item.started', item: { type: 'command_execution', command: 'gradle test' } },
+    { type: 'item.completed', item: { type: 'command_execution', command: 'gradle test', exit_code: 1 } },
+    { type: 'item.completed', item: { type: 'file_change', changes: [{ path: '/w/src/Rule.kt', kind: 'add' }, { path: '/w/src/Screen.kt', kind: 'update' }] } },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'Extracted the rule.' } }, { type: 'turn.completed' }
+  ], { root: '/w' });
+  assert.deepEqual(codex.actions.map(action => [action.kind, action.text, action.ok]), [['run', 'gradle test', false], ['write', 'src/Rule.kt', undefined], ['edit', 'src/Screen.kt', undefined], ['say', 'Extracted the rule.', undefined], ['done', 'finished', true]]);
+});
+
+test('roles show the planner, the frontend and backend executors and the acceptor with their models', async t => {
+  const { root } = await fixture(t);
+  const config = JSON.parse(await fs.readFile(path.join(root, 'protoflow.config.json'), 'utf8'));
+  assert.deepEqual(roles(config), { planner: { provider: 'claude', model: 'claude-opus-5-5' }, executors: { frontend: { provider: 'claude', model: 'claude-sonnet-5-5' }, backend: { provider: 'codex', model: 'gpt-codex' }, fallback: 'codex' }, acceptor: { provider: 'claude', model: 'claude-opus-5-5' } });
+});
+
+test('projects register once by real path, with the configured name, and can be removed', async t => {
+  const { root, home } = await fixture(t);
+  const added = await addProject(root, { home });
+  assert.equal(added.project.name, 'Fixture App'); assert.equal(added.project.id, await projectId(root));
+  await addProject(path.join(root, '.'), { home });
+  assert.equal((await listProjects({ home })).length, 1);
+  assert.deepEqual(await removeProject(root, { home }), { status: 'PASS', removed: 1 });
+  assert.deepEqual(await listProjects({ home }), []);
+});
+
+test('a snapshot shows the live executor, its stage, the latest verification and what needs a person', async t => {
+  const { root, worktree, sha2 } = await fixture(t);
+  const view = await dashboardSnapshot(root, { service: false });
+  assert.equal(view.protocol, 'protoflow.dashboard/1'); assert.equal(view.project.name, 'Fixture App'); assert.equal(view.service.status, 'HEARTBEAT');
+  const [stream] = view.streams;
+  assert.equal(stream.stage, 'execute'); assert.equal(stream.phase, 'execute'); assert.equal(stream.current.manifestId, `git-${sha2}`); assert.equal(stream.current.summary, 'Settings toggle');
+  assert.equal(stream.live.running, true); assert.equal(stream.live.model, 'claude-sonnet-5-5'); assert.equal(stream.runner.worktree, worktree);
+  assert.deepEqual(stream.live.actions.map(action => action.kind), ['say', 'read', 'edit', 'run']); assert.deepEqual(stream.live.files, ['app/settings.js']);
+  assert.equal(stream.verification.id, 'VER-fixture-1'); assert.deepEqual(stream.verification.scenes[0].tiers, { structure: 'PASS', tokens: 'FAIL', layout: 'PASS', visual: 'FAIL' });
+  assert.equal(stream.verification.scenes[0].prototype, '.protoflow/artifacts/VER-fixture-1/web/settings.initial/prototype.png');
+  assert.match(stream.verification.scenes[0].reasons[0], /^tokens: settings\.save: color/);
+  assert.deepEqual(view.attention.map(item => item.kind), ['manual-merge', 'issue']);
+  assert.deepEqual(view.attention[0].actions, ['merge']); assert.equal(view.attention[1].number, 5); assert.deepEqual(view.attention[1].questions, ['Should Saved hide on any change?']);
+  assert.deepEqual(view.issues.map(issue => [issue.number, issue.status, issue.area]), [[6, 'in-progress', 'backend'], [5, 'needs-human', 'frontend']]);
+  assert.deepEqual(view.events.map(event => event.event), ['execute', 'planned']);
+  // Without a running executor process the stage follows the last event, and the trace is the previous run's.
+  const idle = await dashboardFixture({ executing: false }); t.after(idle.cleanup);
+  const after = (await dashboardSnapshot(idle.root, { service: false })).streams[0];
+  assert.equal(after.phase, null); assert.equal(after.stage, 'execute');
+});
+
+test('versions waiting for a person appear when the project does not approve automatically', async t => {
+  const { root } = await fixture(t, { autoApprove: false });
+  const view = await dashboardSnapshot(root, { service: false });
+  assert.deepEqual(view.attention.filter(item => item.kind === 'review').map(item => [item.verificationId, item.actions[0]]), [['VER-fixture-1', 'approve']]);
+});
+
+function request(url, { method = 'GET', headers = {}, body, encoding = 'utf8' } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method, headers }, response => {
+      let data = ''; response.setEncoding(encoding);
+      response.on('data', chunk => { data += chunk; if (response.headers['content-type']?.startsWith('text/event-stream') && data.includes('\n\n')) { req.destroy(); resolve({ status: response.statusCode, headers: response.headers, body: data }); } });
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: data }));
+    });
+    req.on('error', error => error.code === 'ECONNRESET' ? null : reject(error));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+test('the server answers only loopback hosts, serves only artifact screenshots and runs actions behind its token', async t => {
+  const { root, home } = await fixture(t);
+  await addProject(root, { home });
+  const calls = [];
+  const dashboard = createDashboardServer({ home, port: 0, service: false, pollMs: 50, actions: async (projectRoot, body) => { calls.push([projectRoot, body]); return { status: 'PASS', next: 'fixture' }; } });
+  const url = await dashboard.listen(); t.after(() => dashboard.close());
+  const id = await projectId(root);
+  const page = await request(url);
+  assert.equal(page.status, 200); assert.match(page.body, new RegExp(`name="protoflow-token" content="${dashboard.token}"`));
+  assert.equal((await request(url, { headers: { host: 'evil.example:80' } })).status, 403);
+  assert.equal((await request(`${url}api/projects`, { headers: { origin: 'https://evil.example' } })).status, 403);
+  const overview = JSON.parse((await request(`${url}api/projects`)).body);
+  assert.equal(overview.projects[0].name, 'Fixture App'); assert.equal(overview.projects[0].attention, 2); assert.equal(overview.projects[0].streams[0].stage, 'execute');
+  const snapshot = JSON.parse((await request(`${url}api/projects/${id}`)).body);
+  assert.equal(snapshot.streams[0].live.model, 'claude-sonnet-5-5');
+  const image = await request(`${url}api/projects/${id}/file?path=${encodeURIComponent('.protoflow/artifacts/VER-fixture-1/web/settings.initial/prototype.png')}`, { encoding: 'latin1' });
+  assert.equal(image.status, 200); assert.equal(image.headers['content-type'], 'image/png');
+  assert.ok(Buffer.from(image.body, 'latin1').equals(PNG), 'the exact screenshot bytes');
+  for (const bad of ['protoflow.config.json', '.protoflow/artifacts/../../protoflow.config.json', '.protoflow/runner/state.json']) assert.equal((await request(`${url}api/projects/${id}/file?path=${encodeURIComponent(bad)}`)).status, 400, bad);
+  assert.equal((await request(`${url}api/projects/000000000000`)).status, 404);
+  const post = token => request(`${url}api/projects/${id}/actions`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token && { 'x-protoflow-token': token }) }, body: JSON.stringify({ action: 'merge', deliveryId: 'DLV-fixture-1' }) });
+  assert.equal((await post(null)).status, 403); assert.equal((await post('wrong')).status, 403); assert.deepEqual(calls, []);
+  const done = await post(dashboard.token);
+  assert.equal(done.status, 200); assert.deepEqual(calls, [[await fs.realpath(root), { action: 'merge', deliveryId: 'DLV-fixture-1' }]]);
+  const events = await request(`${url}api/projects/${id}/stream`);
+  assert.match(events.headers['content-type'], /^text\/event-stream/); assert.match(events.body, /^data: \{"protocol":"protoflow\.dashboard\/1"/);
+});
+
+test('actions refuse unknown requests and record every attempt in the project audit log', async t => {
+  const { root } = await fixture(t);
+  await assert.rejects(runAction(root, { action: 'delete-everything' }), error => error.statusCode === 400);
+  await assert.rejects(runAction(root, { action: 'merge', deliveryId: 'DLV-missing' }), /is not a manual PR waiting to be merged/);
+  await assert.rejects(runAction(root, { action: 'approve', manifestId: 'x', verificationId: 'y' }), /approves automatically/);
+  await assert.rejects(runAction(root, { action: 'handback', number: 6 }), /not waiting for a person/);
+  const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['merge', 'FAIL'], ['approve', 'FAIL'], ['handback', 'FAIL']]);
+  assert.equal(log[0].via, 'dashboard'); assert.match(log[0].error, /DLV-missing/);
+});

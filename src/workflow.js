@@ -240,7 +240,11 @@ export async function executeContext(root, config, contextId, { execute = false,
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
   const command = executorCommand(config, provider);
   const before = await snapshot(root, config);
-  const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart });
+  // What the executor is doing right now, for observers (protoflow dashboard): its raw trace as it streams.
+  const live = await projectPath(root, '.protoflow/live/execute.jsonl');
+  const modelAt = command?.argv?.indexOf('--model') ?? -1;
+  await writeJson(await projectPath(root, '.protoflow/live/execute.json'), { contextId, executor: provider, model: modelAt >= 0 ? command.argv[modelAt + 1] : null, kind: request.kind, ...(context.issue && { issue: context.issue.number }), manifestId: context.manifestId, startedAt: date() });
+  const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart, tee: live });
   try { await loadVersion(root, config, manifest); }
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
   // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.

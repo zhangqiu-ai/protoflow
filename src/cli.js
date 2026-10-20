@@ -15,7 +15,9 @@ import { scanSource } from './source.js';
 import { sourceView } from './streams.js';
 import { startRunner, retryRunner, configureRunner, runnerStatus, doctor } from './runner.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
-import { installService, uninstallService, serviceStatus } from './runner-service.js';
+import { installService, uninstallService, serviceStatus, installDashboardService, uninstallDashboardService, dashboardServiceStatus } from './runner-service.js';
+import { dashboardSnapshot, addProject, removeProject, listProjects } from './dashboard-data.js';
+import { serveDashboard } from './dashboard-server.js';
 import { versionQueue } from './queue.js';
 import { syncDeliveries, deliveryStatus } from './delivery.js';
 import { syncIssues, issuesStatus } from './issues.js';
@@ -44,6 +46,11 @@ Usage: protoflow <command> [action] --project <path> [options]
   runner start --service                 Resident mode: keeps polling through blocks; stops only on SIGTERM/SIGINT
   runner service install [--env K=V] | uninstall | status
                                          macOS launchd LaunchAgent: start at login, restart on exit, heartbeat health
+  dashboard snapshot | add [--label name] | remove | list
+                                         Project state as JSON / register this project on the dashboard
+  dashboard serve [--port 7420]          Local dashboard on 127.0.0.1: every registered project, live, with approvals
+  dashboard service install [--port N] [--env K=V] | uninstall | status
+                                         The dashboard as a macOS launchd LaunchAgent (start at login, restart on exit)
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
   delivery sync --retry-review --delivery id --review AIR-id [--target id]
                                          Explicit fresh independent review of the selected current attempt:
@@ -75,7 +82,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, port: { type: 'string' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
     ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -86,6 +93,25 @@ try {
     const operation = async () => {
       if (command === 'init') return initProject(root, { prototypeDir: values['prototype-dir'], source: values.repository ? { kind: 'git', repository: values.repository, branch: requireOption('branch'), path: requireOption('path'), ...(values['start-sha'] ? { startSha: values['start-sha'] } : {}) } : undefined });
       if (command === 'install') return installSkill(root, { personal: values.personal, sourceDir: values['source-dir'], discoveryDir: values['discovery-dir'], integrations: values['skip-integrations'] ? false : undefined });
+      // Proposal 0004: the dashboard spans projects; only snapshot/add/remove act on --project.
+      if (command === 'dashboard') {
+        const port = values.port ? Number(values.port) : 7420;
+        if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('--port must be 1024-65535');
+        const extraEnv = Object.fromEntries((values.env ?? []).map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes KEY=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; }));
+        if (action === 'list') return { projects: await listProjects() };
+        if (action === 'serve') return serveDashboard({ port, onListen: url => console.log(JSON.stringify({ event: 'listening', url })) });
+        if (action === 'service') {
+          const [, , operation] = positionals;
+          if (operation === 'install') return installDashboardService({ port, extraEnv });
+          if (operation === 'uninstall') return uninstallDashboardService();
+          if (operation === 'status') return dashboardServiceStatus({ port });
+          throw new Error('Use dashboard service install|uninstall|status');
+        }
+        if (action === 'snapshot') return dashboardSnapshot(root);
+        if (action === 'add') return addProject(root, { name: values.label ?? null });
+        if (action === 'remove') return removeProject(root);
+        throw new Error('Use dashboard snapshot|add|remove|list|serve|service');
+      }
       const config = await loadConfig(root);
       if (config.source && ['watch', 'checkpoint', 'session'].includes(command) && !(command === 'session' && action === 'list')) throw new Error('Git source configured: use source scan and runner start; local prototype edits are not application triggers');
       switch (command) {
@@ -109,7 +135,12 @@ try {
           if (action === 'service') {
             const [, , operation] = positionals;
             const extraEnv = Object.fromEntries((values.env ?? []).map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes KEY=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; }));
-            if (operation === 'install') return installService(root, config, { extraEnv });
+            if (operation === 'install') {
+              const installed = await installService(root, config, { extraEnv });
+              // A resident runner appears on the dashboard without a separate step.
+              if (installed.status === 'PASS') installed.dashboard = (await addProject(root)).project;
+              return installed;
+            }
             if (operation === 'uninstall') return uninstallService(root);
             if (operation === 'status') return serviceStatus(root);
             throw new Error('Use runner service install|uninstall|status');
@@ -184,7 +215,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service';
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service' || command === 'dashboard';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));

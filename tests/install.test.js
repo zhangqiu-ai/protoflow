@@ -139,3 +139,13 @@ test('CLI help documents the Git source options accepted by init', async () => {
   const init = stdout.slice(stdout.indexOf('  init '), stdout.indexOf('  install '));
   for (const flag of ['--prototype-dir', '--repository', '--branch', '--path', '--start-sha']) assert.ok(init.includes(flag), `init help lacks ${flag}`);
 });
+
+test('the published package carries every script and asset the engine loads at run time', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { stdout } = await promisify(execFile)('npm', ['pack', '--dry-run', '--json'], { cwd: new URL('..', import.meta.url).pathname });
+  const packed = new Set(JSON.parse(stdout)[0].files.map(file => file.path));
+  for (const file of ['scripts/claude-adapter.js', 'scripts/claude-exec-adapter.js', 'scripts/claude-review-adapter.js', 'scripts/codex-adapter.js', 'scripts/codex-review-adapter.js', 'dashboard/index.html', 'dashboard/app.js', 'dashboard/app.css', 'src/dashboard-server.js']) {
+    assert.ok(packed.has(file), `${file} is missing from npm pack`);
+  }
+});

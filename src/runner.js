@@ -658,6 +658,18 @@ function aggregate(results) {
  * service status) compares it with the process it started; it is written best-effort and never stops the runner.
  */
 export const HEARTBEAT = '.protoflow/runner/heartbeat.json';
+/** Every runner event with its time, for the dashboard's timeline; rotated to events.1.jsonl past EVENTS_LIMIT bytes. */
+export const EVENTS = '.protoflow/runner/events.jsonl';
+export const EVENTS_LIMIT = 5 * 1024 * 1024;
+async function recordEvent(root, event) {
+  try {
+    const file = await projectPath(root, EVENTS);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const size = await fs.stat(file).then(stat => stat.size, () => 0);
+    if (size > EVENTS_LIMIT) await fs.rename(file, file.replace(/\.jsonl$/, '.1.jsonl'));
+    await fs.appendFile(file, `${JSON.stringify(event)}\n`);
+  } catch { /* the timeline is advisory */ }
+}
 const ENGINE_VERSION = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 /**
@@ -677,6 +689,7 @@ export async function startRunner(root, config, { once = false, service = false,
   };
   const onEvent = async event => {
     lastEvent = { event: event.event, target: event.target ?? null, at: new Date().toISOString() };
+    await recordEvent(root, { at: lastEvent.at, ...event });
     await beat(); await report(event);
   };
   return withLock(root, async () => {

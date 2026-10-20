@@ -1566,3 +1566,24 @@ test('the heartbeat counts consecutive passes that cannot reach the source or Gi
   const beat = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
   assert.ok(beat.failingPasses >= 2, JSON.stringify(beat)); assert.match(beat.lastFailure.error, /No such remote 'origin'/); assert.match(beat.lastPass.issuesError, /No such remote 'origin'/);
 });
+
+test('the runner records its events and the executor trace for the dashboard, and a dashboard retry reopens a blocked version', async t => {
+  const { root, config } = await fixture(t);
+  // An executor that prints a trace line before failing, like a provider that started working.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `process.stdin.resume();process.stdin.on('end',()=>{console.log(JSON.stringify({type:'item.completed',item:{type:'command_execution',command:'npm test',exit_code:1}}));process.exit(9)})`];
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  assert.equal((await startRunner(root, config)).status, 'BLOCKED');
+  const events = (await fs.readFile(path.join(root, '.protoflow/runner/events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.every(event => event.at && event.event), 'every event carries its time');
+  assert.ok(['scanned', 'execute'].every(name => events.some(event => event.event === name)), events.map(event => event.event).join(','));
+  const worktree = (await runnerStatus(root)).runner.worktree;
+  const live = JSON.parse(await fs.readFile(path.join(worktree, '.protoflow/live/execute.json'), 'utf8'));
+  assert.equal(live.executor, 'codex'); assert.equal(live.kind, 'implement');
+  assert.match(await fs.readFile(path.join(worktree, '.protoflow/live/execute.jsonl'), 'utf8'), /"command":"npm test"/);
+  const { runAction } = await import('../src/dashboard-actions.js');
+  await runAction(root, { action: 'retry' });
+  assert.notEqual((await sourceStatus(root)).entries[0].status, 'BLOCKED');
+  const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['retry', 'PASS']]);
+});

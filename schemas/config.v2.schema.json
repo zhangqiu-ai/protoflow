@@ -261,6 +261,25 @@
         }
       }
     },
+    "dashboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "not": {
+            "pattern": "^ai:"
+          }
+        }
+      }
+    },
     "adapters": {
       "type": "object",
       "additionalProperties": false,

@@ -17,6 +17,7 @@ const view = pr => ({ number: pr.number, url: 'https://' + pr.repository + '/pul
 const repo = name => ({ id: name.endsWith('/application') ? 101 : 202, full_name: name.replace('github.com/', ''), html_url: 'https://' + name });
 const rest = pr => ({ number: pr.number, html_url: view(pr).url, state: pr.state.toLowerCase(), head: { ref: pr.head, sha: pr.headSha ?? head(pr.head, pr.repository), repo: pr.headRepo ?? repo(pr.repository) }, base: { ref: pr.base, sha: pr.baseSha ?? head(pr.base, pr.repository), repo: repo(pr.repository) } });
 const [group, verb] = args;
+if (group === 'api' && verb === 'user') { save(); console.log(flag('--jq') === '.login' ? (process.env.FAKE_GH_VIEWER ?? 'fixture-person') : JSON.stringify({ login: process.env.FAKE_GH_VIEWER ?? 'fixture-person' })); process.exit(0); }
 if (process.env.FAKE_GH_FAIL === verb) { save(); console.error(process.env.FAKE_GH_FAIL_MESSAGE ?? 'simulated gh ' + verb + ' failure'); process.exit(1); }
 // One transient GitHub outage of the repository lookup, armed by a trigger file (written by the fake reviewer).
 const outage = process.env.FAKE_GH_UNAVAILABLE_AFTER;

@@ -1795,3 +1795,64 @@ test('FAKE providers only: worktree changes the base already has (runner configu
   assert.equal(await git(f.remote, 'show', 'main:README.md'), 'app\nFAKE FIXTURE: synced setting');
   assert.equal(await git(f.remote, 'show', 'main:app/index.html'), '<main>v1 fixed</main>');
 });
+
+test('FAKE gh only: the dashboard merges a manual delivery PR only at the reviewed commit, as the signed-in person', async t => {
+  const f = await fixture(t, { merge: 'manual' });
+  const { runAction } = await import('../src/dashboard-actions.js');
+  const { dashboardSnapshot } = await import('../src/dashboard-data.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  const [delivery] = (await deliveryStatus(f.root)).deliveries;
+  assert.equal(delivery.status, 'PR_OPEN_MANUAL');
+  let view = await dashboardSnapshot(f.root, { service: false });
+  assert.deepEqual(view.attention.filter(item => item.kind === 'manual-merge').map(item => item.deliveryId), [delivery.id]);
+  process.env.FAKE_GH_REAL_REMOTE = f.remote; process.env.FAKE_GH_ROOT = f.root;
+  const result = await runAction(f.root, { action: 'merge', deliveryId: delivery.id });
+  assert.equal(result.status, 'PASS'); assert.equal(result.actor, 'human:fixture-person'); assert.equal(result.commit, delivery.commit);
+  assert.equal((await f.gh()).prs.find(pr => pr.number === delivery.pr.number).state, 'MERGED');
+  const merged = (await f.gh()).calls.find(call => call[1] === 'merge');
+  assert.deepEqual(merged.slice(merged.indexOf('--match-head-commit'), merged.indexOf('--match-head-commit') + 2), ['--match-head-commit', delivery.commit]);
+  const saved = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(saved.status, 'PR_OPEN_MANUAL'); assert.equal(saved.manualMerge.mergedBy, 'human:fixture-person'); assert.equal(saved.manualMerge.via, 'dashboard');
+  view = await dashboardSnapshot(f.root, { service: false });
+  assert.equal(view.attention.filter(item => item.kind === 'manual-merge').length, 0, 'a merged PR no longer waits');
+  assert.deepEqual(await runAction(f.root, { action: 'merge', deliveryId: delivery.id }), { status: 'PASS', already: true, pr: saved.pr.url, mergeCommit: saved.manualMerge.mergeCommit });
+  const log = (await fs.readFile(path.join(f.root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['merge', 'PASS'], ['merge', 'PASS']]);
+});
+
+test('FAKE gh only: the dashboard refuses to merge a manual PR whose head moved after review', async t => {
+  const f = await fixture(t, { merge: 'manual' });
+  const { runAction } = await import('../src/dashboard-actions.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  const [delivery] = (await deliveryStatus(f.root)).deliveries;
+  // Someone pushes another commit to the delivery branch after the independent review.
+  const clone = path.join(f.base, 'late-push');
+  await git(f.base, 'clone', '-q', '--branch', 'protoflow/delivery', f.remote, clone); await git(clone, 'config', 'user.email', 'fixture@protoflow.test'); await git(clone, 'config', 'user.name', 'Fixture');
+  await fs.writeFile(path.join(clone, 'LATE.md'), 'unreviewed\n'); await git(clone, 'add', 'LATE.md'); await git(clone, 'commit', '-q', '-m', 'late'); await git(clone, 'push', '-q', 'origin', 'HEAD:protoflow/delivery');
+  await assert.rejects(runAction(f.root, { action: 'merge', deliveryId: delivery.id }), /is not the reviewed delivery commit/);
+  assert.equal((await f.gh()).prs.find(pr => pr.number === delivery.pr.number).state, 'OPEN');
+});
+
+test('the dashboard approves a verified version as the configured person, bound to its verification', async t => {
+  const f = await fixture(t);
+  const { runAction } = await import('../src/dashboard-actions.js');
+  const { dashboardSnapshot } = await import('../src/dashboard-data.js');
+  f.config.dashboard = { reviewer: 'Fixture Person' };
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  // The runner exports accepted evidence to the project root (exportEvidence); the fixture wrote it to the worktree.
+  await fs.cp(path.join(f.worktree, '.protoflow/artifacts'), path.join(f.root, '.protoflow/artifacts'), { recursive: true });
+  const view = await dashboardSnapshot(f.root, { service: false });
+  const item = view.attention.find(entry => entry.kind === 'review');
+  assert.ok(item, JSON.stringify(view.attention));
+  const result = await runAction(f.root, { action: 'approve', manifestId: item.manifestId, verificationId: item.verificationId });
+  assert.equal(result.status, 'PASS'); assert.equal(result.reviewer, 'Fixture Person');
+  const review = await readJson(path.join(f.root, `.protoflow/reviews/${result.reviewId}.json`));
+  assert.equal(review.status, 'approved'); assert.equal(review.reviewerKind ?? 'human', 'human'); assert.equal(review.verificationId, item.verificationId);
+  assert.equal((await dashboardSnapshot(f.root, { service: false })).attention.filter(entry => entry.kind === 'review').length, 0);
+  // A reviewer named in the request is ignored: the dashboard approves only as the configured person, never as an AI.
+  const again = await runAction(f.root, { action: 'approve', manifestId: item.manifestId, verificationId: item.verificationId, reviewer: 'ai:someone' });
+  assert.equal(again.reviewer, 'Fixture Person');
+  assert.equal((await fs.readdir(path.join(f.root, '.protoflow/reviews'))).filter(name => name.endsWith('.json')).length, 2);
+});
