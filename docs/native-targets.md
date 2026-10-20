@@ -226,7 +226,7 @@ React Native 與 Flutter 的同一份程式碼同時是 iOS 與 Android 應用�
 - target 仍是 FIFO、worktree、Codex 執行與交付的單位：一條交付分支，一次合併。
 - `driver` 與 `variants` 擇一。變體必須有 `id` 與 `driver`，可覆寫 `build`、`viewport`、`tiers`、`regression`、`visual`、`layout`、`tokens`、`deviations`、`locator`、`timeoutMs`；`functional`、`root`、`platform` 屬於 target。
 - build：先執行 target 的 `build`（若有），再依序執行每個變體的 `build`，記錄於 `build.variants`。
-- 驗收：依序擷取每個變體，證據在 `<target>/<variant>/<scene>`，報告在 `<target>/<variant>/report.html`；verification 的 `visual.variants` 列出各變體狀態，場景帶 `variant` 欄位。所有 `required`（預設）變體都 PASS 時 target 才 PASS；`"required": false` 的變體只記錄（例如仍在建置中的平台），失敗的 build 也不阻擋。至少要有一個必要變體。
+- 驗收：依序擷取每個變體，證據在 `<target>/<variant>/<scene>`，報告在 `<target>/<variant>/report.html`；verification 的 `visual.variants` 列出各變體狀態，場景帶 `variant` 欄位。所有 `required`（預設）變體都 PASS 時 target 才 PASS；`"required": false` 的變體只記錄（例如仍在建置中的平台），失敗的 build 也不阻擋。至少要有一個必要變體。建置沒有 PASS 的變體（或 target 自身的建置失敗時的所有變體）不執行擷取：App 無法啟動，每個場景只會等到驅動器的啟動逾時；該變體記為 NOT_RUN，原因寫明 `build:<變體> FAIL; captures skipped`，失敗原因在 `build` 的記錄中。
 - 給執行代理的 context 說明這份程式碼在哪些變體上驗收，要求修改在每個必要變體都成立。
 
 ## 平台慣例差異（deviations）

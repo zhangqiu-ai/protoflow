@@ -154,13 +154,26 @@ function summarize(scenes, policy) {
  * records: { status, mode: 'anchors', target, tiers, scenes, artifacts, prototypeSource: 'version' }. A target with
  * variants is verified on each variant; it passes when every required variant passes, and the result adds `variants`.
  */
-export async function verifyTarget(root, config, manifest, version, { target: targetId, ...options } = {}) {
+export async function verifyTarget(root, config, manifest, version, { target: targetId, build = null, ...options } = {}) {
   const variants = targetVariants(selectTarget(config, targetId));
-  if (!variants[0].variant) return verifyVariant(root, config, manifest, version, variants[0], options);
+  // Captures need a working build: an app whose build failed cannot start, and every scene would wait out the driver's
+  // launch timeout instead. A capture configuration whose build did not pass is skipped with the build's verdict.
+  const skipped = (variant, phase, result) => ({
+    status: 'NOT_RUN', mode: 'anchors', target: variant.id, platform: variant.platform,
+    reason: `${phase} ${result?.status ?? 'NOT_RUN'}; captures skipped`, scenes: [], artifacts: [], prototypeSource: 'version',
+    tiers: Object.fromEntries(TIERS.map(tier => [tier, { status: 'NOT_RUN', reasons: [`${phase} did not pass`] }]))
+  });
+  if (!variants[0].variant) {
+    if (build && build.status !== 'PASS') return skipped(variants[0], 'build', build);
+    return verifyVariant(root, config, manifest, version, variants[0], options);
+  }
   const results = [];
   for (const variant of variants) {
     if (options.signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
-    results.push({ variant, result: await verifyVariant(root, config, manifest, version, variant, options) });
+    // A failed target build leaves no variant builds; a variant without its own build relies on the target build.
+    const own = build?.variants?.[variant.variant];
+    const failed = build && (own ? own.status !== 'PASS' : build.status !== 'PASS' && !Object.keys(build.variants ?? {}).length);
+    results.push({ variant, result: failed ? skipped(variant, own ? `build:${variant.variant}` : 'build', own ?? build) : await verifyVariant(root, config, manifest, version, variant, options) });
   }
   const combine = statuses => statuses.includes('FAIL') ? 'FAIL' : statuses.length && statuses.every(status => status === 'PASS') ? 'PASS' : 'NOT_RUN';
   const required = results.filter(item => item.variant.required);

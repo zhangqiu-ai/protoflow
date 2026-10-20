@@ -286,7 +286,7 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
   const visual = isV2(config)
     // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
-    ? await verifyTarget(root, config, manifest, version, { target, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
+    ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
     : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
   const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
   const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
