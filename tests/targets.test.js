@@ -173,3 +173,22 @@ test('targetVariants: a plain target is its own capture; variants override the t
   assert.deepEqual(ios, { id: 'mobile', platform: 'react-native', root: 'app', viewport: { width: 402, height: 778, scale: 3 }, tiers: { visual: 'advisory' }, driver: { kind: 'external', command: { argv: ['ios'] } }, variant: 'ios', required: true });
   assert.deepEqual([android.variant, android.required, android.viewport.width, android.root, 'variants' in android], ['android', false, 360, 'app', false]);
 });
+
+test('verifyTarget skips the captures of a capture configuration whose build did not pass', async () => {
+  const { verifyTarget } = await import('../src/targets.js');
+  // No contract, driver or simulator is needed: skipped variants never reach a capture.
+  const config = { schemaVersion: 2, targets: [{ id: 'mobile', platform: 'react-native', root: 'app', variants: [
+    { id: 'iphone', driver: { kind: 'external', command: { argv: ['ios'] } } },
+    { id: 'android', required: false, driver: { kind: 'external', command: { argv: ['android'] } } }
+  ] }] };
+  const build = { status: 'FAIL', variants: { iphone: { required: true, status: 'FAIL', stderr: 'Unable to resolve module x' }, android: { required: false, status: 'FAIL' } } };
+  const result = await verifyTarget('/nonexistent', config, {}, {}, { target: 'mobile', build });
+  assert.equal(result.status, 'NOT_RUN');
+  assert.deepEqual(result.scenes, []);
+  assert.equal(result.variants.iphone.reason, 'build:iphone FAIL; captures skipped');
+  assert.equal(result.variants.android.reason, 'build:android FAIL; captures skipped');
+  assert.equal(result.tiers.structure.status, 'NOT_RUN');
+  // A failed target build (no variant builds ran) skips every variant too.
+  const base = await verifyTarget('/nonexistent', config, {}, {}, { target: 'mobile', build: { status: 'FAIL', variants: {} } });
+  assert.deepEqual(Object.values(base.variants).map(variant => variant.reason), ['build FAIL; captures skipped', 'build FAIL; captures skipped']);
+});
