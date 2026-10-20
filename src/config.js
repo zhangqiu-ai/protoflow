@@ -65,7 +65,8 @@ export const configSchemaV2 = {
     } },
     anchors: { type: 'object', additionalProperties: false, properties: {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
-      tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }, scopeExclude: { type: 'array', items: { type: 'string', minLength: 1 } }
+      tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }, scopeExclude: { type: 'array', items: { type: 'string', minLength: 1 } },
+      dynamicText: { type: 'array', items: { type: 'string', minLength: 1 } }
     } },
     // Each target advances through the same prototype versions independently (proposal 0001 §15.1).
     release: { type: 'object', additionalProperties: false, properties: { requireTargets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' } } } },
