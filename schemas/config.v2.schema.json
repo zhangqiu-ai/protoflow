@@ -661,7 +661,6 @@
           }
         },
         "dynamicText": {
-          "description": "CSS selectors for prototype text that is fixture data (an unread badge in shared chrome); left out of anchor text like dynamic anchors.",
           "type": "array",
           "items": {
             "type": "string",
