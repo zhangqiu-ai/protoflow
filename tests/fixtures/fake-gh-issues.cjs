@@ -11,6 +11,8 @@ state.calls = [...(state.calls ?? []), { method, endpoint: args[1], body, host: 
 const save = () => fs.writeFileSync(db, JSON.stringify(state, null, 2));
 const out = value => { save(); process.stdout.write(JSON.stringify(value)); process.exit(0); };
 const fail = (status, message) => { save(); process.stderr.write(`gh: ${message} (HTTP ${status})\n`); process.exit(1); };
+// The signed-in person, as `gh api user --jq .login` prints it.
+if (args[0] === 'api' && args[1] === 'user') { save(); process.stdout.write(flag('--jq') === '.login' ? `${state.viewer}\n` : JSON.stringify({ login: state.viewer })); process.exit(0); }
 if (args[0] !== 'api' || flag('--hostname') !== 'github.com') fail(400, `unsupported ${args.join(' ')}`);
 if (state.failNext && state.failNext.method === method && args[1].includes(state.failNext.match)) { const failure = state.failNext; delete state.failNext; fail(failure.status ?? 502, failure.message ?? 'Bad Gateway'); }
 const url = new URL(`https://api.github.com/${args[1]}`);
@@ -45,7 +47,7 @@ if (kind === 'issues' && sub === 'comments') {
 if (kind === 'issues' && sub === 'labels') {
   const item = issue();
   if (method === 'POST') { for (const label of body.labels) if (!item.labels.includes(label)) item.labels.push(label); out(item.labels.map(label => ({ name: label }))); }
-  if (method === 'DELETE') { item.labels = item.labels.filter(label => label !== extra); out(item.labels.map(label => ({ name: label }))); }
+  if (method === 'DELETE') { item.labels = item.labels.filter(label => label !== extra); item.events = [...(item.events ?? []), { event: 'unlabeled', label: { name: extra }, actor: { login: state.viewer } }]; out(item.labels.map(label => ({ name: label }))); }
 }
 if (kind === 'issues' && sub === 'events' && method === 'GET') out(issue().events ?? []);
 if (kind === 'collaborators' && sub === 'permission' && method === 'GET') out({ permission: state.permissions?.[number] ?? 'none', role_name: state.permissions?.[number] ?? 'none' });

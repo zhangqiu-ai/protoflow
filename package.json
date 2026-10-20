@@ -1,6 +1,6 @@
 {
   "name": "@zhangqiu-ai/protoflow",
-  "version": "0.3.22",
+  "version": "0.3.23",
   "description": "Shared prototype-driven engineering engine and Codex Skill",
   "type": "module",
   "engines": {
@@ -15,11 +15,15 @@
   "files": [
     "bin",
     "src",
+    "dashboard",
     "skills",
     "templates",
     "schemas",
     "scripts/codex-adapter.js",
     "scripts/codex-review-adapter.js",
+    "scripts/claude-adapter.js",
+    "scripts/claude-exec-adapter.js",
+    "scripts/claude-review-adapter.js",
     "scripts/acceptance-command.js",
     "scripts/ios-driver.js",
     "scripts/android-driver.js",

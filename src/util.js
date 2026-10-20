@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, lstat, stat, realpath, readdir, readlink, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -224,7 +225,11 @@ export function processGroupAlive(pid) {
   }
   return false;
 }
-export async function runCommand(root, command, input = null, { signal, onBeforeSpawn, onStart, env } = {}) {
+/**
+ * Run an argv command under process-group supervision. `tee` names a file that receives the child's stdout as it
+ * arrives (truncated first), so a dashboard can follow a long agent run; the result still carries the whole stdout.
+ */
+export async function runCommand(root, command, input = null, { signal, onBeforeSpawn, onStart, env, tee } = {}) {
   if (signal?.aborted) return { status: 'FAIL', aborted: true, spawned: false, exitCode: null, stdout: '', stderr: 'Stopped', processGroupActive: false };
   if (!command) return { status: 'NOT_RUN', spawned: false, exitCode: null, stdout: '', stderr: '' };
   if (!Array.isArray(command.argv) || !command.argv.length || command.argv.some(x => typeof x !== 'string')) throw new Error('Command must contain a non-empty argv array');
@@ -244,8 +249,12 @@ export async function runCommand(root, command, input = null, { signal, onBefore
     const abort = () => stop();
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => { timedOut = true; stop(); }, command.timeoutMs ?? 120000);
+    let teeFailed = false;
+    if (tee) { try { mkdirSync(path.dirname(tee), { recursive: true }); writeFileSync(tee, ''); } catch { teeFailed = true; } }
     const capture = key => chunk => {
       if (key === 'stdout') stdout += chunk; else stderr += chunk;
+      // Live trace for observers only: a failure to write it never affects the command.
+      if (key === 'stdout' && tee && !teeFailed) { try { appendFileSync(tee, chunk); } catch { teeFailed = true; } }
       if (stdout.length + stderr.length > 4 * 1024 * 1024) { overflow = true; stop(); }
     };
     child.stdout.setEncoding('utf8').on('data', capture('stdout'));

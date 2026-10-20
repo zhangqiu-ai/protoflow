@@ -228,3 +228,23 @@ test('FAKE gh and CLI only: with issues.all every open issue of an authorised au
   assert.ok(db.labels.includes('protoflow:skip'));
   assert.ok(db.calls.some(call => call.method === 'GET' && /\/issues\?state=open&/.test(call.endpoint)), 'lists open issues without a label filter');
 });
+
+test('FAKE gh and CLI only: approving a hand-back in the dashboard removes the label as the person and the issue is triaged again', async t => {
+  const { root, config, gh, edit } = await fixture(t, [issue(9, { labels: ['protoflow', 'protoflow:needs-human'] })]);
+  const { runAction } = await import('../src/dashboard-actions.js');
+  // A complete, valid project config: dashboard actions load it like the CLI does.
+  const project = { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], adapters: config.adapters, issues: { enabled: true } };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(project));
+  await fs.mkdir(path.join(root, '.protoflow/issues'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/issues/state.json'), JSON.stringify({ schemaVersion: 1, repository: { id: 101, nameWithOwner: 'protoflow-fixture/application' }, issues: { 9: { number: 9, status: 'needs-human', planId: 'PLN-old-9', history: [], commentCount: 0 } } }));
+  await edit(db => { db.permissions = { 'protoflow-bot': 'admin' }; });
+  const result = await runAction(root, { action: 'handback', number: 9 });
+  assert.deepEqual([result.status, result.removedLabel, result.actor], ['PASS', 'protoflow:needs-human', 'human:protoflow-bot']);
+  assert.deepEqual((await gh()).issues[0].labels, ['protoflow']);
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ targets: ['application'] });
+  await syncIssues(root, project);
+  const state = await issuesStatus(root);
+  assert.equal(state.issues[9].status, 'planned'); assert.equal(state.issues[9].confirmedBy, 'protoflow-bot');
+  const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.map(entry => [entry.action, entry.status, entry.result.actor]), [['handback', 'PASS', 'human:protoflow-bot']]);
+});

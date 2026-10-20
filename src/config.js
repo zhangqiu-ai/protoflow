@@ -20,6 +20,15 @@ export const configSchema = {
     classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
     policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, transientRetries: { type: 'integer', minimum: 0, maximum: 5 }, transientRetryDelayMs: { type: 'integer', minimum: 0, maximum: 600000 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' }, executor: { type: 'object', additionalProperties: false, required: ['primary'], properties: { primary: { enum: ['claude', 'codex'] }, fallback: { enum: ['claude', 'codex'] }, routes: { type: 'object', additionalProperties: false, properties: { frontend: { enum: ['claude', 'codex'] }, backend: { enum: ['claude', 'codex'] } } } } } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
+    // Proposal 0004: how the dashboard names the project and which person approves versions from it.
+    dashboard: { type: 'object', additionalProperties: false, properties: { name: { type: 'string', minLength: 1, maxLength: 80 }, reviewer: { type: 'string', minLength: 1, maxLength: 120, not: { pattern: '^ai:' } } } },
+    // Proposal 0003 §6: GitHub Issues intake, triage and implementation (schemaVersion 1 projects use one implicit target).
+    issues: { type: 'object', additionalProperties: false, required: ['enabled'], properties: {
+      enabled: { type: 'boolean' }, label: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$' },
+      authors: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] } },
+      targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
+      all: { type: 'boolean' }, maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
+    } },
     verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: functionalCommand } },
     adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'claude', 'planner', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command, ignoreUserConfig: { type: 'boolean' } } : key === 'independentReview' ? { provider: { enum: ['claude', 'codex'] }, command } : ['claude', 'planner'].includes(key) ? { command } : { command, install: command } }])) },
     visual: { type: 'object', additionalProperties: false, properties: {
@@ -55,14 +64,9 @@ export const configSchemaV2 = {
   type: 'object', required: ['schemaVersion', 'prototypeDir', 'targets'], additionalProperties: false,
   properties: {
     schemaVersion: { const: 2 }, prototypeDir: shared.prototypeDir, source: shared.source, runner: shared.runner,
-    classification: shared.classification, policy: shared.policy, watch: shared.watch, adapters: shared.adapters,
+    classification: shared.classification, policy: shared.policy, watch: shared.watch, dashboard: shared.dashboard, adapters: shared.adapters,
     // Proposal 0003 §6: GitHub Issues intake, triage and (P5) implementation.
-    issues: { type: 'object', additionalProperties: false, required: ['enabled'], properties: {
-      enabled: { type: 'boolean' }, label: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$' },
-      authors: { type: 'array', minItems: 1, uniqueItems: true, items: { enum: ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] } },
-      targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-      all: { type: 'boolean' }, maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
-    } },
+    issues: shared.issues,
     anchors: { type: 'object', additionalProperties: false, properties: {
       attribute: { type: 'string', pattern: '^data-[a-z0-9-]+$' }, requireScreenAnchor: { type: 'boolean' },
       tokens: { type: 'string', minLength: 1 }, ignore: { type: 'array', items: { type: 'string', minLength: 1 } }, scopeExclude: { type: 'array', items: { type: 'string', minLength: 1 } }

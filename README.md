@@ -197,6 +197,10 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 **沒有配置 `runner.delivery` 時，引擎不會 add、commit、push、合併或部署任何東西。**
 
+## 儀表板（提案 0004）
+
+`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：各 target 的階段與角色模型、執行代理正在做的事（讀檔、編輯、命令）、驗收矩陣與原型／App 截圖對照、Issue、交付與事件。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
+
 ## Claude 規劃與驗收、GitHub Issues（提案 0003）
 
 角色分開，原型對齊與 GitHub Issues 走同一條鏈：Claude 規劃 → 執行者實作 → 引擎分層驗證 → Claude 驗收 → 交付。
@@ -230,6 +234,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `source scan` / `source status` | 掃描並凍結 Git 提交／來源進度 |
 | `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、綁定新設定、回收 worktree |
 | `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（連續失敗時為 DEGRADED） |
+| `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准（見 [docs/dashboard.md](docs/dashboard.md)） |
 | `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |
 | `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |
 | `queue` / `status` | 版本佇列（含 `release`）／會話、Baseline、佇列與整合狀態 |
@@ -288,6 +293,7 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | 文件 | 內容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 模組邊界、路由、驗證可信度與限制 |
+| [docs/dashboard.md](docs/dashboard.md) | 多專案儀表板：畫面、核准與安全 |
 | [docs/git-runner.md](docs/git-runner.md) | Git 來源、Runner、多目標、自動交付與恢復 |
 | [docs/independent-review.md](docs/independent-review.md) | 獨立 AI 審查閘門與重用接口 |
 | [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Expo、Flutter 的需求、配置、deep link 啟動與約定 |
@@ -296,4 +302,4 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
-| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）提案與實作紀錄 |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）提案與實作紀錄 |
