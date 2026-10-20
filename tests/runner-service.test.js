@@ -16,7 +16,7 @@ async function fixture(t, { tools = ['git', 'gh', 'claude', 'codex'], print = nu
 require('fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n');
 if (process.argv[2] === 'print') { const text = process.env.FAKE_LAUNCHCTL_PRINT; if (!text) { console.error('Could not find service'); process.exit(113); } console.log(text); }
 `, { mode: 0o755 });
-  const env = { PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}`, JAVA_HOME: '/fake/jdk', ...(print && { FAKE_LAUNCHCTL_PRINT: print }) };
+  const env = { PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}`, JAVA_HOME: '/fake/jdk', HTTPS_PROXY: 'http://127.0.0.1:9', no_proxy: 'localhost', ...(print && { FAKE_LAUNCHCTL_PRINT: print }) };
   const options = { home, env, launchctl: path.join(bin, 'launchctl'), platform: 'darwin', uid: 501 };
   const config = { schemaVersion: 2, runner: { delivery: { branch: 'protoflow/delivery', baseBranch: 'main' } }, issues: { enabled: true }, policy: { executor: { primary: 'claude', fallback: 'codex' } }, adapters: { planner: { command: { argv: ['node', '/x/scripts/claude-adapter.js'] } } } };
   const launchctlCalls = async () => (await fs.readFile(calls, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -45,7 +45,8 @@ test('FAKE launchctl only: install resolves every tool to an absolute path, writ
   assert.deepEqual(result.tools, Object.fromEntries(['git', 'gh', 'claude', 'codex'].map(tool => [tool, path.join(bin, tool)])));
   const plist = await fs.readFile(result.plist, 'utf8');
   assert.ok(plist.includes(`<string>${await fs.realpath(process.execPath)}</string>`)); assert.ok(plist.includes('<string>--service</string>'));
-  for (const key of ['JAVA_HOME', 'FLUTTER_ROOT', 'HOME', 'PATH']) assert.ok(plist.includes(`<key>${key}</key>`), key);
+  // The proxy travels with the service, so it reaches GitHub exactly as the installing shell did.
+  for (const key of ['JAVA_HOME', 'FLUTTER_ROOT', 'HOME', 'PATH', 'HTTPS_PROXY', 'no_proxy']) assert.ok(plist.includes(`<key>${key}</key>`), key);
   assert.deepEqual(await launchctlCalls(), [['bootout', `gui/501/${label}`], ['bootstrap', 'gui/501', result.plist]]);
   const record = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/service.json'), 'utf8'));
   assert.equal(record.label, label); assert.equal(record.tools.claude, path.join(bin, 'claude'));
@@ -73,6 +74,11 @@ test('FAKE launchctl only: status is healthy only when launchd runs the pid that
   await beat();
   let status = await serviceStatus(root, options);
   assert.equal(status.status, 'HEALTHY'); assert.equal(status.pid, 4242); assert.equal(status.runs, 3); assert.ok(status.beatAgeSeconds <= 1);
+  await beat({ failingPasses: 2, lastFailure: { error: 'Get "https://api.github.com/...": EOF' } });
+  assert.equal((await serviceStatus(root, options)).status, 'HEALTHY', 'two failed passes are still transient');
+  await beat({ failingPasses: 3, lastFailure: { error: 'Get "https://api.github.com/...": EOF' } });
+  status = await serviceStatus(root, options);
+  assert.equal(status.status, 'DEGRADED'); assert.match(status.reason, /^3 consecutive passes failed: Get .*EOF$/);
   await beat({ pid: 1 });
   assert.equal((await serviceStatus(root, options)).status, 'STARTING');
   const down = await fixture(t, { print: 'gui/501/x = {\n\tstate = not running\n\tlast exit code = 1\n}' });

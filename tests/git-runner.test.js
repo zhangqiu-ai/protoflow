@@ -1552,4 +1552,17 @@ test('service mode keeps polling through blocks and heartbeats; the foreground r
   const beat = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
   assert.equal(beat.pid, process.pid); assert.equal(beat.service, true); assert.match(beat.version, /^\d+\.\d+\.\d+$/);
   assert.equal(beat.lastPass.stuck, true); assert.equal(beat.lastPass.status, 'BLOCKED'); assert.equal(beat.lastEvent.event, 'scanned');
+  assert.equal(beat.failingPasses, 0, 'a readable source and no issue failures');
+});
+
+test('the heartbeat counts consecutive passes that cannot reach the source or GitHub', async t => {
+  const { root, config } = await fixture(t);
+  config.runner = { ...config.runner, pollMs: 1000 };
+  await scanSource(root, config);
+  // A project without a GitHub remote: every issue pass fails, like a service without network access.
+  const controller = new AbortController();
+  let passes = 0;
+  await startRunner(root, { ...config, issues: { enabled: true } }, { service: true, signal: controller.signal, onEvent: event => { if (event.event === 'issues-failed' && ++passes === 3) controller.abort(); } });
+  const beat = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
+  assert.ok(beat.failingPasses >= 2, JSON.stringify(beat)); assert.match(beat.lastFailure.error, /No such remote 'origin'/); assert.match(beat.lastPass.issuesError, /No such remote 'origin'/);
 });

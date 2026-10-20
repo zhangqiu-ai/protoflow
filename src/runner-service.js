@@ -13,7 +13,11 @@ import { HEARTBEAT } from './runner.js';
  */
 const CLI = fileURLToPath(new URL('../bin/protoflow.js', import.meta.url));
 const COMMON_BINS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
-const PASSED_ENV = ['JAVA_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'CLAUDE_CODE_OAUTH_TOKEN_FILE', 'LANG'];
+// Toolchain locations and the network proxy: without the proxy a service could not reach GitHub where the shell could.
+const PROXY_ENV = ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'no_proxy', 'all_proxy'];
+const PASSED_ENV = ['JAVA_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'CLAUDE_CODE_OAUTH_TOKEN_FILE', 'LANG', ...PROXY_ENV];
+/** Consecutive passes without the source or GitHub before status reports DEGRADED. */
+export const DEGRADED_AFTER = 3;
 
 export async function serviceLabel(root) { return `dev.protoflow.runner.${hash(await fs.realpath(root)).slice(0, 12)}`; }
 
@@ -136,6 +140,8 @@ export async function serviceStatus(root, options = {}) {
   const field = name => new RegExp(`^\\s*${name} = (.+)$`, 'm').exec(printed.stdout)?.[1]?.trim() ?? null;
   const state = field('state'), pid = Number(field('pid')) || null, runs = Number(field('runs')) || null, lastExit = field('last exit code');
   const running = state === 'running' && pid !== null;
-  const healthy = running && heartbeat?.pid === pid && heartbeat.service === true;
-  return { status: healthy ? 'HEALTHY' : running ? 'STARTING' : 'DOWN', label, state, pid, runs, lastExitCode: lastExit, heartbeat, beatAgeSeconds };
+  const alive = running && heartbeat?.pid === pid && heartbeat.service === true;
+  // A live runner that cannot read its source or reach GitHub does no work: that is not healthy.
+  const degraded = alive && (heartbeat.failingPasses ?? 0) >= DEGRADED_AFTER;
+  return { status: degraded ? 'DEGRADED' : alive ? 'HEALTHY' : running ? 'STARTING' : 'DOWN', label, state, pid, runs, lastExitCode: lastExit, heartbeat, beatAgeSeconds, ...(degraded && { reason: `${heartbeat.failingPasses} consecutive passes failed: ${heartbeat.lastFailure?.error ?? 'unknown error'}` }) };
 }
