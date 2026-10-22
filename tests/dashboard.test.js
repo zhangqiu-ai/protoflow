@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import { traceActivity, roles, listProjects, addProject, removeProject, dashboardSnapshot, projectId } from '../src/dashboard-data.js';
-import { createDashboardServer } from '../src/dashboard-server.js';
+import { createDashboardServer, overviewStream } from '../src/dashboard-server.js';
 import { runAction } from '../src/dashboard-actions.js';
 import { dashboardFixture, PNG } from './helpers/dashboard-fixture.js';
 
@@ -120,4 +120,21 @@ test('actions refuse unknown requests and record every attempt in the project au
   const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['merge', 'FAIL'], ['approve', 'FAIL'], ['handback', 'FAIL']]);
   assert.equal(log[0].via, 'dashboard'); assert.match(log[0].error, /DLV-missing/);
+});
+
+test('the overview carries each working target\'s version, phase, timer start and the executor\'s latest action', async t => {
+  const f = await fixture(t);
+  const [stream] = (await dashboardSnapshot(f.root)).streams;
+  const card = overviewStream(stream);
+  assert.equal(card.stage, 'execute');
+  assert.equal(card.phase, 'execute');
+  assert.ok(card.phaseStartedAt);
+  assert.equal(card.current.summary, 'Settings toggle');
+  assert.equal(card.current.attempts, 1);
+  assert.deepEqual(card.live.last, { kind: 'run', text: 'Run unit tests: npm test' });
+  assert.deepEqual(card.live.totals, { edits: 1, commands: 1, reads: 1, searches: 0 });
+  assert.equal(card.lastEvent.event, 'execute');
+  // An idle target sends no live activity, so the card stays quiet.
+  const idle = await fixture(t, { executing: false });
+  assert.equal(overviewStream((await dashboardSnapshot(idle.root)).streams[0]).live, null);
 });

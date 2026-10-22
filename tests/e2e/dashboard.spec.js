@@ -25,8 +25,17 @@ test('the overview lists every registered project with its stage and what needs 
   await expect(page.getByRole('img', { name: '等你 2' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 1 })).toContainText('2 件等你決定');
   // Agents behind the project: the planner, then the executors by area.
-  await expect(card.locator('.agent')).toHaveText(['O', 'S', 'C']);
+  await expect(card.locator('.card-f .agent')).toHaveText(['O', 'S', 'C']);
   await expect(page.locator('#conn')).toHaveText('即時');
+  // A working project shows its live progress on the card: version, phase, a running timer and the executor's latest action.
+  await expect(card).toHaveClass(/busy/);
+  const strip = card.locator('.strip');
+  await expect(strip).toContainText('Settings toggle');
+  await expect(strip).toContainText('執行者');
+  await expect(strip.locator('.agent.working')).toHaveText('S');
+  await expect(strip.locator('.strip-act')).toContainText('Run unit tests: npm test');
+  const first = await strip.locator('.timer').textContent();
+  await expect.poll(() => strip.locator('.timer').textContent(), { timeout: 3000 }).not.toBe(first);
 });
 
 test('a project shows the live executor, the decisions waiting for a person and the verification evidence', async ({ page }) => {
@@ -87,4 +96,21 @@ test('the layout fits a phone width without horizontal scroll', async ({ page })
     await page.waitForTimeout(200);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   }
+});
+
+test('a comparison opens full size, side by side or overlaid, and closes with Escape', async ({ page }) => {
+  await page.goto(`${url}#/p/${id}`);
+  await page.getByRole('button', { name: '放大查看App' }).click();
+  const viewer = page.getByRole('dialog', { name: '原型與 App 對照' });
+  await expect(viewer).toBeVisible();
+  await expect(viewer).toContainText('settings.initial');
+  await expect(viewer).toContainText('配色 未過');
+  await expect(viewer.getByRole('img', { name: '原型截圖' })).toBeVisible();
+  await expect(viewer.getByRole('img', { name: 'App截圖' })).toBeVisible();
+  await viewer.getByRole('tab', { name: '疊圖' }).click();
+  const divider = viewer.getByRole('slider', { name: '原型與 App 分界' });
+  await divider.fill('20');
+  await expect(viewer.locator('.v-top')).toHaveAttribute('style', /inset\(0(px)? 80% 0(px)? 0(px)?\)/);
+  await page.keyboard.press('Escape');
+  await expect(viewer).toHaveCount(0);
 });
