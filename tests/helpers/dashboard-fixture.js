@@ -7,7 +7,7 @@ const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recu
 // A 1×1 PNG.
 export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
-export async function dashboardFixture({ executing = true, autoApprove = true } = {}) {
+export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false } = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-dashboard-')));
   const root = path.join(base, 'project'), worktree = path.join(root, '.protoflow/runner/worktree-fixture'), home = path.join(base, 'home');
   await write(path.join(root, 'protoflow.config.json'), { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], dashboard: { name: 'Fixture App', reviewer: 'Fixture Person' },
@@ -40,7 +40,15 @@ export async function dashboardFixture({ executing = true, autoApprove = true } 
     artifactHashes: { [`${art}/prototype.png`]: 'x', [`${art}/application.png`]: 'y' } });
   await write(path.join(root, `${art}/prototype.png`), PNG);
   await write(path.join(root, `${art}/application.png`), PNG);
-  await write(path.join(root, '.protoflow/delivery/state.json'), { schemaVersion: 1, deliveries: [{ id: 'DLV-fixture-1', status: 'PR_OPEN_MANUAL', versions: [`git-${sha1}`], commit: 'a'.repeat(40), pr: { number: 7, url: 'https://github.com/protoflow-fixture/application/pull/7' }, updatedAt: new Date().toISOString() }] });
+  // Either a manual PR waiting to be merged, or a delivery the independent review rejected with a finding.
+  const delivery = reviewRejected
+    ? { id: 'DLV-fixture-1', status: 'BLOCKED', versions: [`git-${sha1}`], commit: 'a'.repeat(40), independentReviewId: 'AIR-fixture-1', error: 'Independent review FAIL', updatedAt: new Date().toISOString() }
+    : { id: 'DLV-fixture-1', status: 'PR_OPEN_MANUAL', versions: [`git-${sha1}`], commit: 'a'.repeat(40), pr: { number: 7, url: 'https://github.com/protoflow-fixture/application/pull/7' }, updatedAt: new Date().toISOString() };
+  await write(path.join(root, '.protoflow/delivery/state.json'), { schemaVersion: 1, deliveries: [delivery] });
+  if (reviewRejected) {
+    await write(path.join(root, '.protoflow/delivery/independent-reviews/AIR-fixture-1.json'), { id: 'AIR-fixture-1', status: 'FAIL', runFile: '.protoflow/delivery/independent-reviews/AIR-fixture-1/run.json' });
+    await write(path.join(root, '.protoflow/delivery/independent-reviews/AIR-fixture-1/run.json'), { verdict: { status: 'FAIL', summary: 'FAKE FIXTURE: one visible defect.', findings: [{ severity: 'normal', file: 'app/settings.js', description: 'FAKE FIXTURE: the folder icon is only 8px wide.' }] } });
+  }
   await write(path.join(root, '.protoflow/issues/state.json'), { schemaVersion: 1, repository: { id: 101, nameWithOwner: 'protoflow-fixture/application' }, issues: {
     5: { number: 5, status: 'needs-human', snapshotId: 'ISS-5-000000000000', planId: 'PLN-issue-5', reason: 'FAKE FIXTURE: contradicts the prototype', history: [] },
     6: { number: 6, status: 'in-progress', snapshotId: 'ISS-6-000000000000', planId: 'PLN-issue-6', history: [], targets: { application: { status: 'RUNNING', attempts: [{}], executorRoute: { primary: 'codex' } } } }

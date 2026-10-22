@@ -5,6 +5,7 @@ import { hash, readJson, writeJson, projectPath } from './util.js';
 import { loadConfig } from './config.js';
 import { streamTargets, loadProgress, runnerStatePath } from './streams.js';
 import { deliveryStatus } from './delivery.js';
+import { recordedVerdict } from './delivery-review.js';
 import { HEARTBEAT, EVENTS } from './runner.js';
 import { serviceStatus } from './runner-service.js';
 
@@ -162,7 +163,15 @@ async function streamSnapshot(root, config, stream, events) {
     const manifest = await manifestOf(entry.manifestId);
     versions.push({ manifestId: entry.manifestId, sha: entry.sha, ordinal: entry.ordinal ?? null, summary: manifest?.summary ?? manifest?.source?.message ?? null, level: manifest?.level ?? null, status: entry.status, attempts: entry.attempts?.length ?? 0, planId: entry.planId ?? null, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, error: entry.error ? short(entry.error, 300) : null });
   }
-  const deliveries = (await deliveryStatus(root, config, stream).catch(() => ({ deliveries: [] }))).deliveries.slice(-8).reverse().map(delivery => ({ id: delivery.id, status: delivery.status, pr: delivery.pr?.url ?? null, prNumber: delivery.pr?.number ?? null, commit: delivery.commit ?? null, mergeCommit: delivery.mergeCommit ?? null, versions: delivery.versions ?? [], error: delivery.error ? short(delivery.error, 300) : null, manualMerge: delivery.manualMerge ?? null, updatedAt: delivery.updatedAt ?? delivery.createdAt ?? null }));
+  const deliveries = (await deliveryStatus(root, config, stream).catch(() => ({ deliveries: [] }))).deliveries.slice(-8).reverse().map(delivery => ({ id: delivery.id, status: delivery.status, pr: delivery.pr?.url ?? null, prNumber: delivery.pr?.number ?? null, commit: delivery.commit ?? null, mergeCommit: delivery.mergeCommit ?? null, versions: delivery.versions ?? [], error: delivery.error ? short(delivery.error, 300) : null, manualMerge: delivery.manualMerge ?? null, independentReviewId: delivery.independentReviewId ?? null, updatedAt: delivery.updatedAt ?? delivery.createdAt ?? null }));
+  // A delivery the independent review rejected carries its findings, so a person can send the version back for repair.
+  for (const delivery of deliveries) {
+    const id = delivery.independentReviewId;
+    if (!['BLOCKED', 'FAIL'].includes(delivery.status) || !/^AIR-[A-Za-z0-9-]+$/.test(id ?? '')) continue;
+    const record = await readJson(path.join(root, `.protoflow/delivery/independent-reviews/${id}.json`), null);
+    const verdict = record ? await recordedVerdict(root, record).catch(() => null) : null;
+    if (verdict) delivery.review = { id, status: verdict.status, summary: verdict.summary ? short(verdict.summary, 400) : null, findings: (verdict.findings ?? []).slice(0, 8).map(item => ({ severity: item.severity ?? 'normal', file: item.file ?? null, description: short(item.description ?? item.reason ?? '', 600) })) };
+  }
   return {
     target: stream, runner: runner ? { status: runner.status, worktree: runner.worktree, branch: runner.branch } : null, stage, phase: running?.phase ?? null, phaseStartedAt: running?.startedAt ?? null,
     current: current && { manifestId: current.manifestId, sha: current.sha, status: current.status, attempts: current.attempts?.length ?? 0, attemptStartedAt: attempt?.startedAt ?? null, planId: current.planId ?? null, error: current.error ? short(current.error, 400) : null, summary: (await manifestOf(current.manifestId))?.summary ?? null, level: (await manifestOf(current.manifestId))?.level ?? null },
@@ -193,9 +202,12 @@ async function pendingReviews(root, config, streams) {
   const approved = new Set();
   for (const name of reviews.filter(item => item.endsWith('.json'))) {
     const review = await readJson(path.join(root, '.protoflow/reviews', name), null);
-    if (review?.status === 'approved') approved.add(review.verificationId);
+    // Decided either way: approved needs nothing more, a rejection reopens the version on the runner's next pass.
+    if (review && review.status !== 'pending') approved.add(review.verificationId);
   }
-  return streams.flatMap(stream => stream.versions.filter(version => version.status === 'PASS' && version.verificationId && !approved.has(version.verificationId)).map(version => ({ ...version, target: stream.target })));
+  // A version whose delivery the independent review rejected is not offered for approval: it goes back for repair.
+  const rejected = stream => new Set(stream.deliveries.filter(delivery => delivery.review?.status === 'FAIL').flatMap(delivery => delivery.versions));
+  return streams.flatMap(stream => { const sentBack = rejected(stream); return stream.versions.filter(version => version.status === 'PASS' && version.verificationId && !approved.has(version.verificationId) && !sentBack.has(version.manifestId)).map(version => ({ ...version, target: stream.target })); });
 }
 
 /** What needs a person: blocked versions, manual merges, issues handed to a person, reviews and service health. */
@@ -205,7 +217,11 @@ function attention({ streams, issues, reviews, service, config }) {
     if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, actions: ['retry'] });
     for (const delivery of stream.deliveries) {
       if (delivery.status === 'PR_OPEN_MANUAL' && !delivery.manualMerge) items.push({ kind: 'manual-merge', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, prNumber: delivery.prNumber, commit: delivery.commit, title: `PR #${delivery.prNumber ?? '?'}`, actions: ['merge'] });
-      if (['BLOCKED', 'FAIL'].includes(delivery.status)) items.push({ kind: 'delivery-blocked', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, title: delivery.id, reason: delivery.error, actions: [] });
+      if (['BLOCKED', 'FAIL'].includes(delivery.status)) {
+        const sendBack = delivery.review?.status === 'FAIL' && delivery.review.findings.length > 0;
+        const version = stream.versions.find(item => item.manifestId === delivery.versions.at(-1));
+        items.push({ kind: sendBack ? 'review-rejected' : 'delivery-blocked', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, title: sendBack ? version?.summary ?? delivery.id : delivery.id, reason: sendBack ? delivery.review.summary : delivery.error, findings: sendBack ? delivery.review.findings : undefined, reviewId: delivery.review?.id, actions: sendBack ? ['request-changes'] : [] });
+      }
     }
   }
   for (const issue of issues) {
