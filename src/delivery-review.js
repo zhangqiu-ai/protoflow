@@ -9,7 +9,7 @@ import { loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, deliveryBranch, isMultiTarget } from './streams.js';
 import { loadVersion } from './versions.js';
 import { verificationRevocation } from './queue.js';
-import { deliveryGit as git, resolveDeliveryDestination } from './delivery-scope.js';
+import { deliveryGit as git, deliveryBlobDigests, resolveDeliveryDestination } from './delivery-scope.js';
 import { defaultIssueTarget } from './issues.js';
 
 const directory = '.protoflow/delivery/independent-reviews';
@@ -207,6 +207,9 @@ async function capture(root, config, options, ownedMerge = null) {
   const treeFiles = new Map((await git(worktree, ['ls-tree', '-r', '-z', head])).split('\0').filter(Boolean).map(row => {
     const [meta, file] = row.split('\t'); return [file, meta.split(' ')];
   }));
+  // Every regular file's committed bytes, hashed in one batch read instead of one Git process per file.
+  const regular = Object.keys(application.files).filter(key => !key.endsWith(':link') && !key.endsWith(':target')).map(key => treeFiles.get(application.files[`${key}:target`] ?? key)).filter(entry => entry && ['100644', '100755'].includes(entry[0]));
+  const committed = await deliveryBlobDigests(worktree, regular.map(entry => entry[2]));
   for (const [key, expected] of Object.entries(application.files)) {
     // A symlink that leaves the project is bound by its link text; the committed tree must hold the same symlink.
     if (key.endsWith(':link')) {
@@ -223,7 +226,7 @@ async function capture(root, config, options, ownedMerge = null) {
     const target = application.files[`${key}:target`];
     const file = target ?? key;
     const entry = treeFiles.get(file);
-    if (!entry || !['100644', '100755'].includes(entry[0]) || ((await fs.lstat(await projectPath(worktree, file))).mode & 0o111 ? '100755' : '100644') !== entry[0] || hash(await gitBytes(worktree, ['cat-file', 'blob', entry[2]])) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
+    if (!entry || !['100644', '100755'].includes(entry[0]) || ((await fs.lstat(await projectPath(worktree, file))).mode & 0o111 ? '100755' : '100644') !== entry[0] || committed.get(entry[2]) !== expected) throw blocked('Reviewed application bytes/modes do not match the committed tree');
   }
   for (const file of treeFiles.keys()) if (!file.split('/').some(part => RUNTIME_DIRS.includes(part)) && !outside.some(prefix => file === prefix || file.startsWith(`${prefix}/`)) && !Object.hasOwn(application.files, file) && !Object.hasOwn(application.files, `${file}:link`)) throw blocked('Committed application content was removed after commit');
   const source = await loadProgress(root, config, target);

@@ -235,7 +235,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `doctor` | 接入環境診斷 |
 | `source scan` / `source status` | 掃描並凍結 Git 提交／來源進度 |
 | `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、綁定新設定、回收 worktree |
-| `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（連續失敗時為 DEGRADED） |
+| `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（執行中每分鐘心跳；連續失敗時為 DEGRADED，心跳停止 5 分鐘以上為 STALLED） |
 | `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准（見 [docs/dashboard.md](docs/dashboard.md)） |
 | `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |
 | `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |

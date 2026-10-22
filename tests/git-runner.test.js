@@ -1555,6 +1555,21 @@ test('service mode keeps polling through blocks and heartbeats; the foreground r
   assert.equal(beat.failingPasses, 0, 'a readable source and no issue failures');
 });
 
+test('the heartbeat keeps beating during a long step, so a supervisor can tell it from a hung runner', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config);
+  const file = path.join(root, '.protoflow/runner/heartbeat.json');
+  const seen = new Set();
+  // The step after the scan takes 400 ms; the runner beats every 50 ms meanwhile.
+  const result = await startRunner(root, config, { once: true, beatIntervalMs: 50, onEvent: async event => {
+    if (event.event !== 'scanned') return;
+    for (let i = 0; i < 8; i++) { await new Promise(resolve => setTimeout(resolve, 50)); seen.add(JSON.parse(await fs.readFile(file, 'utf8')).at); }
+  } });
+  assert.ok(result.status);
+  assert.ok(seen.size >= 3, `heartbeat refreshed ${seen.size} times during the step`);
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).beatIntervalMs, 50);
+});
+
 test('the heartbeat counts consecutive passes that cannot reach the source or GitHub', async t => {
   const { root, config } = await fixture(t);
   config.runner = { ...config.runner, pollMs: 1000 };

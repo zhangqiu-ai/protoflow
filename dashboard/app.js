@@ -4,7 +4,7 @@ const app = document.getElementById('app'), crumb = document.getElementById('cru
 
 const STAGES = [['plan', '規劃'], ['execute', '實作'], ['verify', '驗收'], ['review', '審查'], ['deliver', '交付']];
 const STAGE_LABEL = { idle: '閒置', blocked: '阻塞', plan: '規劃', execute: '實作', verify: '驗收', review: '審查', deliver: '交付' };
-const STATUS = { PASS: ['通過', 'ok'], FAIL: ['未過', 'bad'], NOT_RUN: ['未執行', ''], BLOCKED: ['阻塞', 'bad'], RUNNING: ['進行中', 'ok'], PENDING: ['等待', ''], STOPPED: ['已停止', 'warn'], MERGED: ['已合併', 'ok'], PR_OPEN_MANUAL: ['待你合併', 'warn'], REVOKED: ['已撤回', ''], COMMITTED: ['已提交', 'ok'], HEALTHY: ['常駐', 'ok'], DEGRADED: ['連線異常', 'bad'], DOWN: ['已停止', 'bad'], STARTING: ['啟動中', 'ok'], NOT_INSTALLED: ['未常駐', ''], HEARTBEAT: ['前景執行', 'ok'], UNKNOWN: ['未知', ''] };
+const STATUS = { PASS: ['通過', 'ok'], FAIL: ['未過', 'bad'], NOT_RUN: ['未執行', ''], BLOCKED: ['阻塞', 'bad'], RUNNING: ['進行中', 'ok'], PENDING: ['等待', ''], STOPPED: ['已停止', 'warn'], MERGED: ['已合併', 'ok'], PR_OPEN_MANUAL: ['待你合併', 'warn'], REVOKED: ['已撤回', ''], COMMITTED: ['已提交', 'ok'], HEALTHY: ['常駐', 'ok'], DEGRADED: ['連線異常', 'bad'], STALLED: ['無回應', 'bad'], DOWN: ['已停止', 'bad'], STARTING: ['啟動中', 'ok'], NOT_INSTALLED: ['未常駐', ''], HEARTBEAT: ['前景執行', 'ok'], UNKNOWN: ['未知', ''] };
 const ISSUE = { planned: ['已規劃', 'ok'], 'needs-info': ['需要資訊', 'warn'], 'needs-human': ['需要你決定', 'warn'], rejected: ['不處理', ''], 'in-progress': ['實作中', 'ok'], blocked: ['阻塞', 'bad'], done: ['完成', 'ok'], new: ['新', ''], 'triage-failed': ['分流失敗', 'bad'], closed: ['已關閉', ''] };
 const PHASE = { execute: '執行者', build: '建置', functional: '功能測試', visual: '比對', 'visual-driver': '畫面擷取' };
 const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面'], ['visual', '視覺']];

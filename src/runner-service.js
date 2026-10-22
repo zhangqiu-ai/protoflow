@@ -18,6 +18,8 @@ const PROXY_ENV = ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'ALL_PROXY', 'https_
 const PASSED_ENV = ['JAVA_HOME', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'CLAUDE_CODE_OAUTH_TOKEN_FILE', 'LANG', ...PROXY_ENV];
 /** Consecutive passes without the source or GitHub before status reports DEGRADED. */
 export const DEGRADED_AFTER = 3;
+/** A live runner beats every minute; a heartbeat older than this means the process stopped responding. */
+export const STALLED_AFTER_SECONDS = 300;
 
 export async function serviceLabel(root) { return `dev.protoflow.runner.${hash(await fs.realpath(root)).slice(0, 12)}`; }
 
@@ -162,7 +164,10 @@ export async function serviceStatus(root, options = {}) {
   const alive = running && heartbeat?.pid === pid && heartbeat.service === true;
   // A live runner that cannot read its source or reach GitHub does no work: that is not healthy.
   const degraded = alive && (heartbeat.failingPasses ?? 0) >= DEGRADED_AFTER;
-  return { status: degraded ? 'DEGRADED' : alive ? 'HEALTHY' : running ? 'STARTING' : 'DOWN', label, state, pid, runs, lastExitCode: lastExit, heartbeat, beatAgeSeconds, ...(degraded && { reason: `${heartbeat.failingPasses} consecutive passes failed: ${heartbeat.lastFailure?.error ?? 'unknown error'}` }) };
+  // Runners from before the per-minute heartbeat only beat between passes, so staleness is judged on current ones.
+  const stalled = alive && !degraded && heartbeat.beatIntervalMs && beatAgeSeconds > STALLED_AFTER_SECONDS;
+  const reason = degraded ? `${heartbeat.failingPasses} consecutive passes failed: ${heartbeat.lastFailure?.error ?? 'unknown error'}` : stalled ? `No heartbeat for ${beatAgeSeconds} s; last event ${heartbeat.lastEvent?.event ?? 'none'}` : null;
+  return { status: degraded ? 'DEGRADED' : stalled ? 'STALLED' : alive ? 'HEALTHY' : running ? 'STARTING' : 'DOWN', label, state, pid, runs, lastExitCode: lastExit, heartbeat, beatAgeSeconds, ...(reason && { reason }) };
 }
 
 /** Proposal 0004: the dashboard as a LaunchAgent (one per machine), serving every registered project. */

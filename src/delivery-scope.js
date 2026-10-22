@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -40,6 +41,58 @@ export async function deliveryGit(root, args, { encoding = 'utf8' } = {}) {
     }
   }
   return encoding === 'buffer' ? result.stdout : result.stdout.trim();
+}
+
+
+/**
+ * The SHA-256 of many committed blobs, read through one `git cat-file --batch` under the same configuration and
+ * environment as deliveryGit. One process per file took over 30 minutes for a 9,600-file application, and the
+ * delivery gate checks the tree several times per delivery.
+ */
+export async function deliveryBlobDigests(root, oids) {
+  const wanted = [...new Set(oids)];
+  const digests = new Map();
+  if (!wanted.length) return digests;
+  if (wanted.some(oid => !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(oid))) throw blocked('Malformed blob id');
+  const env = environment();
+  const prefix = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+  const graft = (await exec('git', [...prefix, 'rev-parse', '--git-path', 'info/grafts'], { cwd: root, env, timeout: 60000 })).stdout.trim();
+  try { await fs.lstat(path.resolve(root, graft)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await new Promise((resolve, reject) => {
+    const child = spawn('git', [...prefix, 'cat-file', '--batch'], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(blocked('git cat-file --batch timed out')); }, Math.max(60000, wanted.length * 50));
+    let pending = Buffer.alloc(0), current = null, stderr = '', failed = null;
+    child.stdout.on('data', chunk => {
+      pending = Buffer.concat([pending, chunk]);
+      for (;;) {
+        if (!current) {
+          const end = pending.indexOf(10);
+          if (end === -1) return;
+          const header = pending.subarray(0, end).toString().split(' ');
+          pending = pending.subarray(end + 1);
+          if (header[1] !== 'blob' || !/^\d+$/.test(header[2] ?? '')) { failed = blocked(`Committed object ${header[0]} is not a readable blob`); child.kill(); return; }
+          current = { oid: header[0], size: Number(header[2]), hash: createHash('sha256'), read: 0 };
+        }
+        const take = Math.min(current.size - current.read, pending.length);
+        current.hash.update(pending.subarray(0, take)); current.read += take; pending = pending.subarray(take);
+        if (current.read < current.size || !pending.length) return;
+        // Each blob ends with a newline after its bytes.
+        pending = pending.subarray(1);
+        digests.set(current.oid, current.hash.digest('hex')); current = null;
+      }
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (failed) return reject(failed);
+      if (code !== 0 || digests.size !== wanted.length) return reject(blocked(`git cat-file --batch failed: ${stderr.trim().slice(0, 300) || `read ${digests.size} of ${wanted.length} blobs`}`));
+      resolve();
+    });
+    child.stdin.end(`${wanted.join('\n')}\n`);
+  });
+  return digests;
 }
 
 /**
