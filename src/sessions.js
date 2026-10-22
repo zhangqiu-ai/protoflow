@@ -133,7 +133,11 @@ function inferredLevel(file, before, after) {
   const extension = path.extname(file).toLowerCase();
   if (extension === '.css') return 'L0';
   if (before !== undefined && after !== undefined && /\.(?:html?|vue|svelte)$/.test(file) && stripStyles(before) === stripStyles(after)) return 'L0';
-  const { added, removed } = changedLines(before, after);
+  // Markup is compared tag by tag: generated pages often sit on one line, and the whole line would otherwise
+  // count as changed, so an untouched `go:settings.storage` in the sidebar could raise a visual edit to L2.
+  const markup = /\.(?:html?|vue|svelte)$/i.test(file);
+  const tags = text => markup && typeof text === 'string' ? text.replace(/>\s*</g, '>\n<') : text;
+  const { added, removed } = changedLines(tags(before), tags(after));
   const delta = [...removed, ...added].join('\n').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ');
   if (/\b(auth(?:entication|orization)?|oauth|permission|rbac|password|secret|jwt|csrf|encryption|security|architecture|migration|middleware)\b/i.test(delta)) return 'L3';
   if (/\b(fetch|api|graphql|database|schema|endpoint|websocket|axios|storage|persist|indexedDB|localStorage|data-model|server|sql)\b|https?:\/\//i.test(delta)) return 'L2';

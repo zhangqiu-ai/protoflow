@@ -181,7 +181,7 @@ protoflow verify  --project /path/to/app --manifest MANIFEST_ID
 protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗證 → 修復 → 再驗證，有次數上限
 ```
 
-- **分級**：L0 是樣式細節；L1 是局部結構與互動；L2 是資料、API 等功能變更，需 `--spec`（新增或未知的 JavaScript 通常屬 L2）；L3 涉及架構或安全，另需綁定 `manifestHash`、`status: approved` 與真實 reviewer 的 ADR。`--level` 與分類規則只能提高等級。
+- **分級**：L0 是樣式細節；L1 是局部結構與互動；L2 是資料、API 等功能變更，需 `--spec`（新增或未知的 JavaScript 通常屬 L2）；L3 涉及架構或安全，另需綁定 `manifestHash`、`status: approved` 與真實 reviewer 的 ADR。HTML、Vue、Svelte 以標籤為單位比對，只依真正改動的標籤判斷（整頁擠在一行時，不會因同一行裡未改動的 `storage` 等字眼升級）。`--level` 與分類規則只能提高等級。
 - **驗證**：固定 viewport、DPR、locale、theme、timezone、fixture、互動步驟與遮罩。任何錨點或映射失敗、未映射的變更、缺少的覆蓋，都不能靠整頁平均值通過。報告輸出到 `.protoflow/artifacts/VER_ID/`，包含截圖、overlay、diff 與逐元件結果。沒有配置或沒有執行的驗證記為 `NOT_RUN`，不算通過。
 
 ## 自動交付與獨立 AI 審查
