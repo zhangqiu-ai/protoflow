@@ -114,6 +114,14 @@ test('classification separates CSS, DOM, data, security and unknown changes; rul
     const after = await snapshot(root, config);
     assert.equal(classifyChanges(before, after, config).level, level, file);
   }
+  // A page on one line is compared tag by tag: an untouched data word elsewhere on the line does not raise the edit.
+  await fs.writeFile(path.join(root, 'prototype/one-line.html'), '<nav><a data-act="go:settings.storage">Storage</a></nav><main><button>Open folder</button></main>');
+  const oneLine = await snapshot(root, config);
+  await fs.writeFile(path.join(root, 'prototype/one-line.html'), '<nav><a data-act="go:settings.storage">Storage</a></nav><main><button aria-label="Open folder">📁</button></main>');
+  assert.equal(classifyChanges(oneLine, await snapshot(root, config), config).level, 'L1');
+  const touched = await snapshot(root, config);
+  await fs.writeFile(path.join(root, 'prototype/one-line.html'), '<nav><a data-act="go:settings.storage">Storage</a></nav><main><button data-act="fetch:/api/folder">📁</button></main>');
+  assert.equal(classifyChanges(touched, await snapshot(root, config), config).level, 'L2');
   const before = await snapshot(root, config);
   await fs.writeFile(path.join(root, 'prototype/auth.js'), 'const password = "new value"');
   const after = await snapshot(root, config);
