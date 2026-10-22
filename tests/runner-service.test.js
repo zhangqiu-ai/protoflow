@@ -79,6 +79,16 @@ test('FAKE launchctl only: status is healthy only when launchd runs the pid that
   await beat({ failingPasses: 3, lastFailure: { error: 'Get "https://api.github.com/...": EOF' } });
   status = await serviceStatus(root, options);
   assert.equal(status.status, 'DEGRADED'); assert.match(status.reason, /^3 consecutive passes failed: Get .*EOF$/);
+  // A runner that beats every minute but has been silent for over 5 minutes stopped responding.
+  const old = new Date(Date.now() - 6 * 60000).toISOString();
+  await beat({ at: old, beatIntervalMs: 60000, lastEvent: { event: 'execute' } });
+  status = await serviceStatus(root, options);
+  assert.equal(status.status, 'STALLED'); assert.match(status.reason, /^No heartbeat for 3\d\d s; last event execute$/);
+  await beat({ at: new Date(Date.now() - 4 * 60000).toISOString(), beatIntervalMs: 60000 });
+  assert.equal((await serviceStatus(root, options)).status, 'HEALTHY', 'a beat within 5 minutes is healthy');
+  // Runners from before the per-minute heartbeat only beat between passes and are not judged stale.
+  await beat({ at: old });
+  assert.equal((await serviceStatus(root, options)).status, 'HEALTHY');
   await beat({ pid: 1 });
   assert.equal((await serviceStatus(root, options)).status, 'STARTING');
   const down = await fixture(t, { print: 'gui/501/x = {\n\tstate = not running\n\tlast exit code = 1\n}' });

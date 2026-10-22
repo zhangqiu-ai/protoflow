@@ -658,6 +658,8 @@ function aggregate(results) {
  * service status) compares it with the process it started; it is written best-effort and never stops the runner.
  */
 export const HEARTBEAT = '.protoflow/runner/heartbeat.json';
+/** How often a running runner refreshes its heartbeat, between and during passes. */
+export const BEAT_INTERVAL_MS = 60000;
 /** Every runner event with its time, for the dashboard's timeline; rotated to events.1.jsonl past EVENTS_LIMIT bytes. */
 export const EVENTS = '.protoflow/runner/events.jsonl';
 export const EVENTS_LIMIT = 5 * 1024 * 1024;
@@ -677,14 +679,14 @@ const ENGINE_VERSION = JSON.parse(await fs.readFile(new URL('../package.json', i
  * keeps alive: it never returns because every target is blocked or the source cannot be read; it keeps polling
  * until a person resolves the block, and returns only when stopped.
  */
-export async function startRunner(root, config, { once = false, service = false, signal, onEvent: report = () => {} } = {}) {
+export async function startRunner(root, config, { once = false, service = false, signal, onEvent: report = () => {}, beatIntervalMs = BEAT_INTERVAL_MS } = {}) {
   const streams = streamTargets(config);
   const waiting = new Map();
   const startedAt = new Date().toISOString();
   // Consecutive passes that could not read the source or reach GitHub: a supervisor reports them as degraded.
   let lastEvent = null, lastPass = null, failingPasses = 0, lastFailure = null, passIssueError = null;
   const beat = async () => {
-    try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), lastPass, lastEvent, failingPasses, lastFailure }); }
+    try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), beatIntervalMs, lastPass, lastEvent, failingPasses, lastFailure }); }
     catch { /* liveness is advisory */ }
   };
   const onEvent = async event => {
@@ -692,6 +694,10 @@ export async function startRunner(root, config, { once = false, service = false,
     await recordEvent(root, { at: lastEvent.at, ...event });
     await beat(); await report(event);
   };
+  // A pass can run for an hour (execution, native visual capture); the heartbeat keeps beating while the process is
+  // responsive, so a supervisor tells a long step from a hung runner.
+  const pulse = setInterval(() => { beat(); }, beatIntervalMs);
+  pulse.unref?.();
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
     await beat();
@@ -737,7 +743,7 @@ export async function startRunner(root, config, { once = false, service = false,
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
     }
     return { status: 'STOPPED' };
-  }, 'runner');
+  }, 'runner').finally(() => clearInterval(pulse));
 }
 
 export async function doctor(root, config) {

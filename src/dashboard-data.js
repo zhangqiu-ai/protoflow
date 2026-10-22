@@ -228,7 +228,7 @@ function attention({ streams, issues, reviews, service, config }) {
     if (['needs-human', 'blocked', 'rejected'].includes(issue.status)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, actions: ['handback'] });
   }
   for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, actions: ['approve'] });
-  if (service && ['DEGRADED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, actions: [] });
+  if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, actions: [] });
   return items;
 }
 
