@@ -1,5 +1,5 @@
 // ProtoFlow dashboard (proposal 0004). Plain DOM, no build step: every value is inserted as text, never as HTML.
-const TOKEN = document.querySelector('meta[name="protoflow-token"]').content;
+let token = document.querySelector('meta[name="protoflow-token"]').content;
 const app = document.getElementById('app'), crumb = document.getElementById('crumb'), conn = document.getElementById('conn'), ver = document.getElementById('ver');
 
 const STAGES = [['plan', '規劃'], ['execute', '實作'], ['verify', '驗收'], ['review', '審查'], ['deliver', '交付']];
@@ -114,8 +114,19 @@ function subscribe(url, render) {
   source.onmessage = message => { render(JSON.parse(message.data)); setTimeout(() => document.body.classList.add('settled'), 900); };
   source.addEventListener('failure', message => toast(`讀取失敗：${JSON.parse(message.data).error}`, true));
 }
+// The service mints a new token each time it starts, so a page left open across a restart (an upgrade, a launchd
+// relaunch) holds a stale one: on that refusal, read the current token from a fresh copy of the page and send once more.
+async function freshToken() {
+  const page = await (await fetch('/', { cache: 'no-store' })).text();
+  return new DOMParser().parseFromString(page, 'text/html').querySelector('meta[name="protoflow-token"]')?.content ?? token;
+}
 async function act(projectId, body, label) {
-  const response = await fetch(`/api/projects/${projectId}/actions`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-protoflow-token': TOKEN }, body: JSON.stringify(body) });
+  const post = () => fetch(`/api/projects/${projectId}/actions`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-protoflow-token': token }, body: JSON.stringify(body) });
+  let response = await post();
+  if (response.status === 403 && (await response.clone().json().catch(() => ({}))).error === 'Missing or wrong dashboard token') {
+    token = await freshToken();
+    response = await post();
+  }
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
   toast(`${label}：完成${result.next ? `。${result.next}` : ''}`);

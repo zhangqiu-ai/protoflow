@@ -81,6 +81,23 @@ test('approving from the dashboard asks for confirmation and sends the bound act
   expect(calls.length).toBe(before);
 });
 
+test('a page left open across a service restart picks up the new token instead of failing the action', async ({ page }) => {
+  await page.goto(`${url}#/p/${id}`);
+  await expect(page.getByRole('button', { name: '核准並合併' })).toBeVisible();
+  // Restart on the same port: the new service mints a different token than the one in the open page.
+  const port = new URL(url).port, before = dashboard.token;
+  await dashboard.close();
+  dashboard = createDashboardServer({ home: fixture.home, port: Number(port), service: false, pollMs: 200, actions: async (root, body) => { calls.push(body); return { status: 'PASS' }; } });
+  await dashboard.listen();
+  expect(dashboard.token).not.toBe(before);
+  const sent = calls.length;
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '核准並合併' }).click();
+  await expect(page.locator('#toast')).toContainText('核准並合併：完成');
+  expect(calls.length).toBe(sent + 1);
+  expect(calls.at(-1)).toEqual({ action: 'merge', target: null, deliveryId: 'DLV-fixture-1' });
+});
+
 test('motion is switched off when the system asks for reduced motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(`${url}#/p/${id}`);
