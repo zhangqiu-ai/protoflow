@@ -1333,6 +1333,37 @@ test('FAKE provider: under autoApprove the runner turns a reviewer FAIL into an 
   await assertNoPublication(f);
 });
 
+test('FAKE provider: without autoApprove a person sends a reviewer-rejected version back for repair from the dashboard', async t => {
+  const { runAction } = await import('../src/dashboard-actions.js');
+  const { dashboardSnapshot } = await import('../src/dashboard-data.js');
+  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  f.config.dashboard = { reviewer: 'Fixture Person' };
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  await fs.cp(path.join(f.worktree, '.protoflow/artifacts'), path.join(f.root, '.protoflow/artifacts'), { recursive: true });
+  const blocked = (await deliveryStatus(f.root)).deliveries[0];
+  // The dashboard offers to send it back with the reviewer's findings, and no longer offers to approve it.
+  let view = await dashboardSnapshot(f.root, { service: false });
+  const item = view.attention.find(entry => entry.kind === 'review-rejected');
+  assert.ok(item, JSON.stringify(view.attention));
+  assert.deepEqual(item.actions, ['request-changes']); assert.equal(item.deliveryId, blocked.id); assert.equal(item.reviewId, blocked.independentReviewId);
+  assert.match(item.findings[0].description, /Synthetic fixture finding/);
+  assert.equal(view.attention.filter(entry => entry.kind === 'review' || entry.kind === 'delivery-blocked').length, 0, JSON.stringify(view.attention));
+  const result = await runAction(f.root, { action: 'request-changes', deliveryId: blocked.id, reviewer: 'ai:someone' });
+  assert.equal(result.status, 'PASS'); assert.equal(result.reviewer, 'Fixture Person'); assert.equal(result.findings, 1);
+  const review = await readJson(path.join(f.root, `.protoflow/reviews/${result.reviewId}.json`));
+  assert.equal(review.status, 'changes_requested'); assert.equal(review.reviewerKind ?? 'human', 'human'); assert.equal(review.reviewer, 'Fixture Person'); assert.equal(review.verificationId, 'VER-1');
+  assert.match(review.findings[0].description, /Synthetic fixture finding/);
+  // The next pass reopens the version and retires the rejected delivery; nothing was published.
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'REVOKED');
+  assert.equal((await sourceStatus(f.root)).entries[0].status, 'PENDING');
+  view = await dashboardSnapshot(f.root, { service: false });
+  assert.equal(view.attention.filter(entry => entry.kind === 'review-rejected').length, 0);
+  await assert.rejects(runAction(f.root, { action: 'request-changes', deliveryId: blocked.id }), /not blocked by an independent review/);
+  await assertNoPublication(f);
+});
+
 test('FAKE provider: a single-target runner keeps going after an automated rejection instead of stopping as stuck', async t => {
   const { startRunner } = await import('../src/runner.js');
   const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_REVIEW_MODE = 'fail';

@@ -190,6 +190,10 @@ button{font:inherit;cursor:pointer}
 .glyph{width:38px;height:38px;flex:none;border-radius:12px;background:var(--amber-soft);color:var(--amber-ink);display:grid;place-items:center}
 .ask.done .glyph{background:var(--mint-soft);color:var(--mint-ink)}
 .ask.calm .glyph{background:var(--line2);color:var(--ink2)}
+.findings{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:13.5px;color:var(--ink2)}
+.findings li{border-left:2px solid var(--amber-edge);padding-left:10px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
+.findings li.critical,.findings li.high{border-left-color:var(--bad)}
+.findings code{font:12px var(--mono);margin-right:6px;padding:1px 6px;border-radius:6px;background:var(--line2);color:var(--ink)}
 .qs{margin:0;padding:0;list-style:none;font-size:13.5px;color:var(--ink2);display:flex;flex-direction:column;gap:4px}
 .qs li{border-left:2px solid var(--amber-edge);padding-left:10px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 .btns{display:flex;gap:10px;flex-wrap:wrap}

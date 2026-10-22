@@ -10,7 +10,7 @@ const PHASE = { execute: '執行者', build: '建置', functional: '功能測試
 const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面'], ['visual', '視覺']];
 const ICON = {
   merge: 'M5 3v12M13 3v3a4 4 0 0 1-4 4H5', tag: 'M3 3h6l6 6-6 6-6-6zM6.5 6.5h.01', issue: 'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 6v3.5M9 12.2h.01',
-  retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4'
+  retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', review: 'M7.5 3a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM11 11l4 4', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4'
 };
 
 /** Element helper: h('div.card', {attr}, ...children); strings become text nodes. */
@@ -225,6 +225,9 @@ function decisions(snapshot) {
       [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
     if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, `驗收 ${item.verificationId} 已通過`, null,
       [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`, result: '已核准' }]);
+    if (item.kind === 'review-rejected') return card(item, ICON.review, `${where}${item.title} 審查未過`, item.reason,
+      h('ul.findings', {}, item.findings.map(finding => h(`li.${finding.severity}`, { title: finding.description }, finding.file ? h('code', {}, finding.file.split('/').pop()) : null, finding.description))),
+      [{ label: '退回重修', body: { action: 'request-changes', target: item.target, deliveryId: item.deliveryId }, question: `同意獨立審查的 ${item.findings.length} 項發現，把這個版本退回給執行代理重修？會以你的名字記錄「要求修改」，綁定這次驗收。`, result: '已退回 · 下一輪重修' }]);
     if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, null,
       [{ label: '重試', body: { action: 'retry', target: item.target }, question: '確定已處理阻塞原因並重試這個版本？', result: '已重新排入' }]);
     return card(item, ICON.alert, item.title ?? item.kind, item.reason, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, 'GitHub') : null, null);

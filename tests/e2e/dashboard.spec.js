@@ -114,3 +114,23 @@ test('a comparison opens full size, side by side or overlaid, and closes with Es
   await page.keyboard.press('Escape');
   await expect(viewer).toHaveCount(0);
 });
+
+test('a delivery the independent review rejected offers to send the version back for repair, with the findings', async ({ page }) => {
+  const rejected = await dashboardFixture({ reviewRejected: true, autoApprove: false });
+  await addProject(rejected.root, { home: rejected.home });
+  const sent = [];
+  const server = createDashboardServer({ home: rejected.home, port: 0, service: false, pollMs: 200, actions: async (root, body) => { sent.push(body); return { status: 'PASS', next: 'FAKE FIXTURE action recorded' }; } });
+  const base = await server.listen();
+  try {
+    await page.goto(`${base}#/p/${await projectId(rejected.root)}`);
+    const card = page.locator('.ask', { hasText: '審查未過' });
+    await expect(card).toContainText('Login screen');
+    await expect(card.locator('.findings')).toContainText('the folder icon is only 8px wide');
+    await expect(card.locator('.findings code')).toHaveText('settings.js');
+    await expect(page.getByRole('button', { name: '核准版本' })).toHaveCount(0);
+    page.once('dialog', dialog => dialog.accept());
+    await card.getByRole('button', { name: '退回重修' }).click();
+    await expect(card.locator('.signed')).toContainText('已退回 · 下一輪重修');
+    expect(sent.at(-1)).toEqual({ action: 'request-changes', target: null, deliveryId: 'DLV-fixture-1' });
+  } finally { await server.close(); await rejected.cleanup(); }
+});

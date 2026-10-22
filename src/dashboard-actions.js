@@ -5,7 +5,8 @@ import { loadConfig } from './config.js';
 import { retryRunner } from './runner.js';
 import { createReview, decideReview } from './workflow.js';
 import { deliveryStatus, ghJson } from './delivery.js';
-import { deliveryStatePath, runnerStatePath } from './streams.js';
+import { recordedVerdict } from './delivery-review.js';
+import { deliveryStatePath, runnerStatePath, loadProgress } from './streams.js';
 import { resolveDeliveryDestination, deliveryGit as git, deliveryGh as gh } from './delivery-scope.js';
 import { openIssues, issuesStatus } from './issues.js';
 
@@ -15,7 +16,7 @@ import { openIssues, issuesStatus } from './issues.js';
  * attempt is appended to .protoflow/dashboard/actions.jsonl. The dashboard user is the local person; an AI never
  * approves as a person here.
  */
-export const ACTIONS = ['merge', 'handback', 'approve', 'retry'];
+export const ACTIONS = ['merge', 'handback', 'approve', 'request-changes', 'retry'];
 const LOG = '.protoflow/dashboard/actions.jsonl';
 
 async function audit(root, record) {
@@ -94,6 +95,30 @@ async function approveVersion(root, config, { target = null, manifestId, verific
   return { status: 'PASS', reviewId: decided.id, reviewer: decided.reviewer, verificationId, verificationHash: decided.verificationHash ?? review.verificationHash };
 }
 
+/**
+ * A person agrees with the independent review that rejected a delivery and sends the version back for repair: a human
+ * changes_requested review bound to the version's verification, carrying the reviewer's findings. The runner reopens
+ * the version on its next pass and the executor repairs it with those findings (under policy.autoApprove the runner
+ * records this on its own as a model rejection).
+ */
+async function requestChanges(root, config, { target = null, deliveryId }) {
+  const reviewer = await reviewerName(root, config);
+  const delivery = (await deliveryStatus(root, config, target)).deliveries.find(item => item.id === deliveryId);
+  if (!delivery || !['BLOCKED', 'FAIL'].includes(delivery.status) || !/^AIR-[A-Za-z0-9-]+$/.test(delivery.independentReviewId ?? '')) throw new Error(`Delivery ${deliveryId} is not blocked by an independent review`);
+  const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}.json`), null);
+  const verdict = record ? await recordedVerdict(root, record).catch(() => null) : null;
+  if (verdict?.status !== 'FAIL' || !verdict.findings?.length) throw new Error(`Independent review ${delivery.independentReviewId} did not reject the delivery with findings`);
+  const entry = (await loadProgress(root, config, target)).entries.find(item => item.manifestId === delivery.versions?.at(-1));
+  if (!entry?.verificationId) throw new Error(`Version ${delivery.versions?.at(-1)} has no verification to send back; it may already be reopened`);
+  const findings = verdict.findings.map(item => ({ severity: ['critical', 'high', 'normal', 'low'].includes(item.severity) ? item.severity : 'normal', description: [item.file && (item.line ? `${item.file}:${item.line}` : item.file), item.description ?? item.reason].filter(Boolean).join(': ') }));
+  const runner = await readJson(await projectPath(root, runnerStatePath(config, target)), null);
+  const where = runner?.worktree ?? root;
+  const review = await createReview(where, config, entry.manifestId, entry.verificationId);
+  const decided = await decideReview(where, config, review.id, { status: 'changes_requested', reviewer, reviewerKind: 'human', findings, notes: `Sent back for repair from the ProtoFlow dashboard, agreeing with independent review ${delivery.independentReviewId}.` });
+  if (where !== root) await writeJson(await projectPath(root, `.protoflow/reviews/${decided.id}.json`), await readJson(path.join(where, `.protoflow/reviews/${decided.id}.json`)));
+  return { status: 'PASS', reviewId: decided.id, reviewer: decided.reviewer, manifestId: entry.manifestId, findings: findings.length, next: 'The runner reopens the version and repairs it on its next pass' };
+}
+
 async function retry(root, config, { target = null }) {
   return withLock(root, () => retryRunner(root, config, { target }));
 }
@@ -108,6 +133,7 @@ export async function runAction(root, request, { now = () => new Date().toISOStr
     const result = action === 'merge' ? await mergeDelivery(root, config, args)
       : action === 'handback' ? await handBack(root, config, { number: Number(args.number) })
       : action === 'approve' ? await approveVersion(root, config, args)
+      : action === 'request-changes' ? await requestChanges(root, config, args)
       : await retry(root, config, args);
     await audit(root, { ...record, status: result.status ?? 'PASS', result });
     return result;
