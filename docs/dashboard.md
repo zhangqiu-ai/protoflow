@@ -55,7 +55,7 @@ protoflow dashboard serve [--port 7420]
 
 ## 安全
 
-伺服器只監聽 127.0.0.1，拒絕其他 `Host` 與跨來源的 `Origin`；寫入操作需要每次啟動時隨機產生、只內嵌在頁面裡的權杖。截圖只提供專案 `.protoflow/artifacts/` 內的 PNG／JPEG。
+伺服器只監聽 127.0.0.1，拒絕其他 `Host` 與跨來源的 `Origin`；寫入操作需要每次啟動時隨機產生、只內嵌在頁面裡的權杖；服務重啟後仍開著的頁面送出舊權杖被拒時，會從頁面重新取得目前的權杖再送一次。截圖只提供專案 `.protoflow/artifacts/` 內的 PNG／JPEG。
 
 ## 尚未支援
 
