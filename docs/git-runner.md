@@ -120,7 +120,7 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 ```
 
 1. 在隔離 worktree commit 應用改動，排除 `RUNTIME_DIRS`（`.protoflow/`、`node_modules`（含 symlink）、`test-results/`、`playwright-report/`、DerivedData、Pods、`.gradle`、xcuserdata）；Git 忽略的未追蹤檔（React Native codegen、Expo CNG 的 `ios/`／`android/` 等）不會被 stage，也不在 application hash 中，見 [Git 忽略的檔案](independent-review.md#git-忽略的檔案)。訊息列出 source、manifest 和 verification，獨立 review 尚未執行時不宣稱批准。
-2. 使用新 Codex read-only session review 已 commit 的完整應用；session 必須不同於原 executor JSONL 中的所有 session 與已知作者 thread。嚴格 structured verdict PASS 且無 findings 才能通過，綁定 HEAD/tree、完整內容、source/manifest/new VER/hash 和當前 remote base SHA。缺配置、缺原始 execution provenance、FAIL／NOT_RUN 或漂移一律 BLOCKED。
+2. 使用新 Codex read-only session review 已 commit 的完整應用；session 必須不同於原 executor JSONL 中的所有 session 與已知作者 thread。嚴格 structured verdict PASS 且無 findings 才能通過，綁定 HEAD/tree、完整內容、source/manifest/new VER/hash 和當前 remote base SHA。缺配置、缺原始 execution provenance、FAIL／NOT_RUN 或漂移一律 BLOCKED。重開過的版本只核對最近一次重開之後的 executions（之前的屬於被否決的結果，可能在重建 stream 時已封存的 worktree 裡）；缺少 execution 記錄時，錯誤會指出缺少的 `.protoflow/contexts/EXEC-….json`，從執行它的 worktree 原樣補回後再重試審查。
 3. `policy.autoApprove: true` 時才建立 `reviewerKind: automated` 的本地 Review／Baseline，明確引用独立 session 與 trace/hash；不冒充真人 ADR 或 GitHub review。接著普通推送至專用 `delivery.branch`，不推 main/base、不強推、不跟隨 tag。推送前、恢復時和合併前都重核對證據與 remote refs；只容許合法推送令 branch tip 精確成為被 review 的 commit。
 4. 重用或建立 PR 並留言證據。PR 的目標分支是 `baseBranch`，可為任何分支（例如 `feature/mobile-rewrite`），不限 `main`；交付分支不得等於 `baseBranch`、`main` 或 `master`。`merge: "auto"` 以 `gh pr merge --merge --match-head-commit <commit>` 合併；不使用 `gh pr review --approve` 或 `--admin`，保留 branch protection。`"manual"`（兼容 `"none"`）留給人合併；draft PR 的後續 auto 版本必須通過自身 gate 才 ready 和 merge。已記錄 MERGED 的版本不重複處理。
 
