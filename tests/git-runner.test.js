@@ -574,6 +574,42 @@ test('synthetic PASS crash recovery saves runner IDLE and permits configuration 
   assert.equal(state.completedSha, entry.sha); assert.equal(runner.status, 'IDLE'); assert.equal(runner.current, null);
   assert.equal((await configureRunner(root, config)).status, 'PASS');
 });
+test('a rejection spent by a later accepted repair does not reopen the version from a rebuilt worktree', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config); await runOnce(root, config); await retryRunner(root);
+  let { source: state, runner } = await runnerStatus(root);
+  const [first] = state.entries;
+  const manifest = JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/manifests', `${first.manifestId}.json`), 'utf8'));
+  const evidence = async (id, createdAt) => ({ id, createdAt, manifestId: manifest.id, manifestHash: hash(manifest), prototypeHash: manifest.afterHash,
+    project: await fingerprint(runner.worktree, { exclude: [config.prototypeDir], gitIgnore: true }), artifactHashes: {}, build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'PASS', artifacts: [] }, status: 'PASS' });
+  const rejected = await evidence('VER-rejected', new Date(Date.now() - 60000).toISOString());
+  await fs.mkdir(path.join(runner.worktree, '.protoflow/verifications'), { recursive: true });
+  await fs.writeFile(path.join(runner.worktree, '.protoflow/verifications', `${rejected.id}.json`), JSON.stringify(rejected));
+  const review = await createReview(runner.worktree, config, first.manifestId, rejected.id);
+  await decideReview(runner.worktree, config, review.id, { status: 'changes_requested', reviewer: 'Fixture reviewer', findings: [{ severity: 'normal', description: 'Icon too small' }] });
+  // The repair passed after that rejection and was delivered; its verification was exported to the project, and the
+  // runner worktree was later rebuilt without it (as after a reconfiguration).
+  const repaired = await evidence('VER-repaired', new Date(Date.now() + 1000).toISOString());
+  await fs.mkdir(path.join(root, '.protoflow/verifications'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/verifications', `${repaired.id}.json`), JSON.stringify(repaired));
+  await fs.rm(path.join(runner.worktree, '.protoflow/verifications', `${rejected.id}.json`));
+  ({ source: state } = await runnerStatus(root));
+  Object.assign(state.entries[0], { status: 'PASS', verificationId: repaired.id, completedAt: new Date().toISOString(), error: null });
+  state.completedSha = state.entries[0].sha;
+  await fs.writeFile(path.join(root, '.protoflow/source/state.json'), JSON.stringify(state));
+  runner.status = 'IDLE'; delete runner.current;
+  await fs.writeFile(path.join(root, '.protoflow/runner/state.json'), JSON.stringify(runner));
+  const events = [];
+  await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(events.filter(event => event.event === 'reopened').length, 0, JSON.stringify(events));
+  ({ source: state } = await runnerStatus(root));
+  assert.equal(state.entries[0].status, 'PASS'); assert.equal(state.entries[0].verificationId, repaired.id);
+  assert.equal(state.entries[0].reopenings, undefined);
+  // The accepted verification is back in the worktree, so its queue moves on to the next version.
+  assert.equal(JSON.parse(await fs.readFile(path.join(runner.worktree, '.protoflow/verifications', `${repaired.id}.json`), 'utf8')).id, repaired.id);
+  assert.equal((await versionQueue(runner.worktree, config)).current.id, state.entries[1].manifestId);
+});
+
 test('a review rejection after PASS reopens the same version in the runner and keeps its history', async t => {
   const { root, config } = await fixture(t);
   await scanSource(root, config); await runOnce(root, config); await retryRunner(root);

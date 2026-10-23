@@ -107,7 +107,23 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   runner.status = 'IDLE'; await saveRunner(root, runner, statePath);
   return runner;
 }
+/**
+ * A rebuilt runner worktree starts from committed content only, so it lacks the verifications that accepted earlier
+ * versions. Without them its queue would treat those versions as unaccepted: an old rejection could reopen a version
+ * that was already repaired and delivered, and the next version would not be current. Each PASS entry's accepted
+ * verification is copied back from the project, where exportEvidence keeps it.
+ */
+async function shareAcceptedEvidence(root, worktree, state) {
+  for (const entry of state.entries) {
+    if (entry.status !== 'PASS' || !/^VER-[A-Za-z0-9-]+$/.test(entry.verificationId ?? '')) continue;
+    const target = await projectPath(worktree, `.protoflow/verifications/${entry.verificationId}.json`);
+    if (await readJson(target, null)) continue;
+    const report = await readJson(await projectPath(root, `.protoflow/verifications/${entry.verificationId}.json`), null);
+    if (report?.id === entry.verificationId && report.manifestId === entry.manifestId) await writeJson(target, report);
+  }
+}
 async function syncCheckpoints(root, worktree, state, config) {
+  await shareAcceptedEvidence(root, worktree, state);
   for (const entry of state.entries) {
     const manifest = await loadArtifact(root, 'manifests', entry.manifestId);
     await loadVersion(root, config, manifest);
@@ -158,16 +174,30 @@ async function shareRejections(root, worktree) {
  * A rejection recorded after a version passed reopens it for this stream: its PASS entry returns to PENDING and the
  * previous verification, delivery and completion are kept in `reopenings`. Other targets' progress is not touched.
  */
+/** A verification as recorded in the runner worktree or exported to the project. */
+async function recordedVerification(root, worktree, id) {
+  for (const base of [worktree, root].filter(Boolean)) {
+    const found = await readJson(await projectPath(base, `.protoflow/verifications/${id}.json`), null);
+    if (found) return found;
+  }
+  return null;
+}
 async function reopenRejected(root, config, stream) {
   const worktree = (await readJson(await projectPath(root, runnerStatePath(config, stream)), null))?.worktree ?? null;
   if (worktree) await shareRejections(root, worktree);
   const state = await loadProgress(root, config, stream);
+  if (worktree) await shareAcceptedEvidence(root, worktree, state);
   const queue = await versionQueue(worktree ?? root, config, { target: stream ?? undefined });
   const reopened = [];
   for (const entry of state.entries) {
     if (entry.status !== 'PASS') continue;
     const version = queue.versions.find(item => item.id === entry.manifestId);
     if (!version || version.acceptedBy || !version.rejections?.length) continue;
+    // A rejection reopens the verification it judged, or one made before it. When the entry already records a newer
+    // PASS (the repair after that rejection), the old rejection is spent: a rebuilt runner worktree that lacks the newer
+    // verification must not send an accepted, delivered version back.
+    const recorded = /^VER-[A-Za-z0-9-]+$/.test(entry.verificationId ?? '') ? await recordedVerification(root, worktree, entry.verificationId) : null;
+    if (recorded && !version.rejections.some(rejection => rejection.verificationId === recorded.id || !(recorded.createdAt > rejection.at))) continue;
     entry.reopenings = [...(entry.reopenings ?? []), { at: new Date().toISOString(), previousStatus: entry.status, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, completedAt: entry.completedAt ?? null, rejections: version.rejections }];
     Object.assign(entry, { status: 'PENDING', verificationId: null, deliveryId: null, completedAt: null, error: null });
     reopened.push(entry.manifestId);
