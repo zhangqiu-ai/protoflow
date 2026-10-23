@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
-import { git, scanSource, sourceStatus, validateSource } from './source.js';
+import { git, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
 import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interruptedProvider } from './delivery-review.js';
@@ -588,6 +588,35 @@ async function recoverUnknownStarts(root, config, target, current) {
   const recovery = { by: 'runner retry --recover-unknown-start', checkedAt: new Date().toISOString(), worktree: runner.worktree, method: 'lsof cwd and ps command lines', liveProcesses: [] };
   for (const child of unknown) { child.status = 'NOT_STARTED'; child.spawned = false; child.completedAt = recovery.checkedAt; child.error = 'Launch intent without a PID; no live process used the runner worktree'; child.recovery = recovery; }
   return { phases: unknown.map(child => child.phase), ...recovery };
+}
+/**
+ * A person decided that a later prototype version fixes the blocked current one: fold them into the later version
+ * (supersedeVersions) and keep the runner worktree, so the next run plans and verifies the combined change on top of
+ * the implementation already there. Single-target streams only; the version must be blocked or stopped, with nothing
+ * running.
+ */
+export async function supersedeRunner(root, config = {}, { target = null } = {}) {
+  if (isMultiTarget(config)) throw new Error('runner supersede supports single-target streams only');
+  const state = await loadProgress(root, config, target);
+  const current = state.entries.find(entry => entry.status !== 'PASS');
+  if (!current || !['BLOCKED', 'STOPPED'].includes(current.status)) throw new Error('runner supersede needs a blocked or stopped current version');
+  for (const entry of state.entries) assertNoActiveProcesses(entry);
+  const statePath = runnerStatePath(config, target);
+  const runner = await readJson(await projectPath(root, statePath), null);
+  if (runner?.status === 'RUNNING') throw new Error('Stop the runner before superseding its current version');
+  const result = await supersedeVersions(root, config, { from: current.manifestId });
+  if (runner?.worktree) {
+    // The worktree keeps its application changes; its frozen copies of the replaced manifests are synced again.
+    for (const id of [...result.superseded, result.manifest.id]) {
+      await fs.rm(await projectPath(runner.worktree, `.protoflow/manifests/${id}.json`), { force: true });
+      await fs.rm(await projectPath(runner.worktree, `.protoflow/versions/${id}`), { recursive: true, force: true });
+    }
+    runner.status = 'IDLE'; runner.current = null;
+    await saveRunner(root, runner, statePath);
+  }
+  return { status: 'PASS', superseded: result.superseded, manifestId: result.manifest.id, level: result.manifest.level,
+    manifestHash: hash(result.manifest), archive: result.archive,
+    next: result.manifest.requires?.architecture ? 'bind the ADR to manifestHash, then runner start' : 'runner start' };
 }
 export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false } = {}) {
   const state = await loadProgress(root, config, target);

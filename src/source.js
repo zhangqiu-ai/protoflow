@@ -311,7 +311,7 @@ export async function gitSnapshot(repository, sha, config, { allowEmpty = false 
   Object.defineProperty(result, 'bytes', { value: bytes });
   return result;
 }
-async function publishCheckpoint(root, config, repository, sha, before, after, ordinal) {
+async function publishCheckpoint(root, config, repository, sha, before, after, ordinal, extra = {}) {
   const manifestId = `git-${sha}`;
   const target = await projectPath(root, `.protoflow/manifests/${manifestId}.json`);
   const existing = await readJson(target, null);
@@ -327,13 +327,44 @@ async function publishCheckpoint(root, config, repository, sha, before, after, o
   await freezeVersion(root, manifestId, after);
   const subject = (await git(repository, ['show', '-s', '--format=%s', sha])).trim();
   const manifest = { schemaVersion: 1, version: 1, id: manifestId, sessionId: null, createdAt: new Date().toISOString(),
-    summary: subject, beforeHash: before.hash, afterHash: after.hash, ...classification,
+    summary: subject, beforeHash: before.hash, afterHash: after.hash, ...classification, ...extra,
     source: { kind: 'git', identity: sourceIdentity(config.source), repository: config.source.repository, branch: config.source.branch, path: config.source.path, sha, ordinal },
     requires: { spec: ['L2', 'L3'].includes(classification.level), architecture: classification.level === 'L3', humanReview: config.policy?.requireHumanReview !== false },
     git: { available: true, head: sha, status: '', diff: classification.changes.map(change => change.diff).join('\n') },
     review: { required: config.policy?.requireHumanReview !== false, status: 'pending' } };
   await writeJson(target, manifest);
   return manifest;
+}
+
+/**
+ * Fold a blocked version, and every version after it, into the newest one: a person decided that the later prototype
+ * fixes the blocked one. The newest commit's manifest is rebuilt against the blocked version's base, so its scope and
+ * classification cover every folded change. The folded entries leave the queue; their manifests and progress are kept
+ * under an archive and `state.superseded` for the record.
+ */
+export async function supersedeVersions(root, config, { from }) {
+  const state = await sourceStatus(root);
+  const index = state.entries.findIndex(entry => entry.manifestId === from);
+  if (index === -1) throw new Error(`Unknown source version ${from}`);
+  const later = state.entries.slice(index + 1);
+  if (!later.length) throw new Error(`No later prototype version can supersede ${from}; commit the prototype fix and let the source scan pick it up first`);
+  if (state.entries.slice(index).some(entry => entry.status === 'PASS')) throw new Error('An accepted version cannot be superseded');
+  const into = later.at(-1), folded = state.entries.slice(index, -1);
+  const repository = await repositoryFor(root, config.source);
+  const baseSha = index > 0 ? state.entries[index - 1].sha : config.source.startSha ?? null;
+  const before = baseSha ? await gitSnapshot(repository, baseSha, config, { allowEmpty: true }) : { files: {}, hash: snapshotHash({}) };
+  const after = await gitSnapshot(repository, into.sha, config, { allowEmpty: true });
+  const at = new Date().toISOString(), archive = `.protoflow/superseded/${at.replace(/[:.]/g, '-')}`;
+  for (const entry of [...folded, into]) {
+    const target = await projectPath(root, `${archive}/${entry.manifestId}.json`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.rename(await projectPath(root, `.protoflow/manifests/${entry.manifestId}.json`), target).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
+  const manifest = await publishCheckpoint(root, config, repository, into.sha, before, after, into.ordinal, { supersedes: folded.map(entry => entry.manifestId) });
+  state.superseded = [...(state.superseded ?? []), { at, into: manifest.id, archive, entries: folded }];
+  state.entries = [...state.entries.slice(0, index), { sha: into.sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: into.ordinal, status: 'PENDING', attempts: [] }];
+  await saveSourceState(root, state);
+  return { manifest, superseded: folded.map(entry => entry.manifestId), archive };
 }
 
 /** Scan the first-parent branch stream. Advance the durable cursor only after each frozen checkpoint exists. */
