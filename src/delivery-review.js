@@ -157,13 +157,19 @@ const reviewScope = (config, target) => ({
 // ProtoFlow <= 0.2.0 exported the main-root VER with a top-level runnerWorktree path; that key is not evidence.
 const contentReport = ({ runnerWorktree, ...report }) => report;
 async function executorRecords(root, worktree, entries, external, issue = null) {
-  const locations = external ?? (issue ? issue.executionIds.map(executionId => ({ path: `.protoflow/contexts/${executionId}.json`, manifestId: issue.manifestId })) : null) ?? entries.flatMap(entry => (entry.attempts ?? []).filter(attempt => attempt.executionStatus === 'PASS' && attempt.executionId).map(attempt => ({ path: `.protoflow/contexts/${attempt.executionId}.json`, manifestId: entry.manifestId })));
+  // A reopened version is delivered from the executions after its latest reopening; earlier ones (possibly in an
+  // archived worktree of a rebuilt stream) produced the rejected result and are history, not this delivery's provenance.
+  const current = entry => { const since = entry.reopenings?.at(-1)?.at; return (entry.attempts ?? []).filter(attempt => !since || !(attempt.startedAt < since)); };
+  const locations = external ?? (issue ? issue.executionIds.map(executionId => ({ path: `.protoflow/contexts/${executionId}.json`, manifestId: issue.manifestId })) : null) ?? entries.flatMap(entry => current(entry).filter(attempt => attempt.executionStatus === 'PASS' && attempt.executionId).map(attempt => ({ path: `.protoflow/contexts/${attempt.executionId}.json`, manifestId: entry.manifestId })));
   if (!locations.length) throw blocked('Missing executor session provenance; bare session IDs do not authorize review');
   const records = [];
   for (const reference of locations) {
     if (!reference || Object.keys(reference).some(key => !['path', 'hash', 'manifestId'].includes(key)) || typeof reference.path !== 'string' || (external && !digest.test(reference.hash ?? ''))) throw blocked('Executor evidence must contain private record path and complete file SHA256');
     if (!reference.path.startsWith('.protoflow/')) throw blocked('Executor evidence must remain in private project evidence');
-    const location = await projectPath(external ? root : worktree, reference.path), bytes = await fs.readFile(location);
+    const location = await projectPath(external ? root : worktree, reference.path);
+    let bytes;
+    try { bytes = await fs.readFile(location); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; throw blocked(`Executor provenance ${reference.path} is missing from the ${external ? 'project' : 'runner worktree'}; restore it unchanged from the worktree that ran it (for example an archived worktree), then retry the review`); }
     if (external && hash(bytes) !== reference.hash) throw blocked('Executor provenance file changed');
     const record = JSON.parse(bytes), manifestId = record.request?.manifest?.id;
     if (!/^EXEC-[A-Za-z0-9-]+$/.test(record.id ?? '') || record.status !== 'PASS' || record.result?.status !== 'PASS' || record.result?.exitCode !== 0 || record.result?.spawned === false || record.result?.processGroupActive || !['implement', 'repair'].includes(record.request?.kind) || record.request.manifestHash !== hash(record.request.manifest) || !entries.some(entry => entry.manifestId === manifestId) || (reference.manifestId && reference.manifestId !== manifestId)) throw blocked('Executor provenance is not a successful execution of the accepted manifest');

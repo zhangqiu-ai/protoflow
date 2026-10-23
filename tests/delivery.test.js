@@ -117,6 +117,26 @@ async function acceptVersion({ root, worktree, config, sha, ordinal, verificatio
   await writeJson(path.join(worktree, `.protoflow/contexts/${executionId}.json`), { id: executionId, status: 'PASS', request: { kind: 'implement', manifest, manifestHash: hash(manifest) }, result: { status: 'PASS', exitCode: 0, stdout: trace, processGroupActive: false } });
 }
 
+test('a reopened version is delivered from the executions after its reopening; a missing record names itself', async t => {
+  const { root, config } = await fixture(t);
+  const state = await sourceStatus(root);
+  // An execution before the reopening ran in a worktree that was archived when its stream was rebuilt.
+  const archived = { executionId: 'EXEC-archived', executionStatus: 'PASS', status: 'FAIL', startedAt: '2026-01-01T00:00:00.000Z' };
+  state.entries[0].attempts = [archived, { ...state.entries[0].attempts[0], startedAt: '2026-01-03T00:00:00.000Z' }];
+  await saveSourceState(root, state);
+  const missing = await syncDeliveries(root, config);
+  assert.equal(missing.status, 'BLOCKED');
+  assert.match(JSON.stringify(missing), /Executor provenance \.protoflow\/contexts\/EXEC-archived\.json is missing from the runner worktree; restore it unchanged/);
+  // After the reopening, only the repair's executions are this delivery's provenance.
+  const reopened = await fixture(t);
+  const later = await sourceStatus(reopened.root);
+  later.entries[0].attempts = [archived, { ...later.entries[0].attempts[0], startedAt: '2026-01-03T00:00:00.000Z' }];
+  later.entries[0].reopenings = [{ at: '2026-01-02T00:00:00.000Z', previousStatus: 'PASS' }];
+  await saveSourceState(reopened.root, later);
+  const result = await syncDeliveries(reopened.root, reopened.config);
+  assert.equal(result.status, 'PASS', JSON.stringify(result).slice(0, 1500));
+});
+
 test('delivery commits only application files, pushes, opens a PR with evidence and merges the exact head', async t => {
   const { root, worktree, remote, config, shas, gh } = await fixture(t);
   const result = await syncDeliveries(root, config);
