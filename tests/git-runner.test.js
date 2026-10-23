@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { scanSource, sourceStatus, git, gitSnapshot } from '../src/source.js';
-import { runOnce, retryRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
+import { runOnce, retryRunner, supersedeRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
 import { verify, createReview, decideReview } from '../src/workflow.js';
 import { loadVersion } from '../src/versions.js';
@@ -105,6 +105,48 @@ test('runner unit fixture (failing argv, no Codex provider): blocks FIFO, preser
   await retryRunner(root); await runOnce(root, config); state = await sourceStatus(root);
   assert.equal(state.entries[0].attempts.length, 2); assert.equal(state.entries[1].attempts.length, 0);
 });
+test('runner supersede folds the blocked version into the newest one and keeps the worktree\'s changes', async t => {
+  const { root, config, shas } = await fixture(t);
+  // Both prototype versions are queued; the first one runs and blocks.
+  await scanSource(root, config);
+  assert.equal((await runOnce(root, config)).status, 'BLOCKED');
+  let state = await sourceStatus(root);
+  const [blocked, later] = state.entries;
+  await assert.rejects(supersedeRunner(root, { ...config, schemaVersion: 2, targets: [{ id: 'a' }, { id: 'b' }] }), /single-target/);
+  const runner = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/state.json'), 'utf8'));
+  await fs.writeFile(path.join(runner.worktree, 'app.html'), '<button id="button">Work in progress</button>');
+
+  const result = await supersedeRunner(root, config);
+  assert.equal(result.status, 'PASS');
+  assert.deepEqual(result.superseded, [blocked.manifestId]);
+  assert.equal(result.manifestId, later.manifestId);
+  state = await sourceStatus(root);
+  assert.deepEqual(state.entries.map(entry => [entry.sha, entry.status, entry.attempts.length]), [[shas[1], 'PENDING', 0]]);
+  assert.equal(state.superseded[0].entries[0].manifestId, blocked.manifestId);
+  // The rebuilt manifest is diffed from the blocked version's base, so it covers both prototype changes.
+  const manifest = JSON.parse(await fs.readFile(path.join(root, `.protoflow/manifests/${later.manifestId}.json`), 'utf8'));
+  const baseline = await gitSnapshot(path.join(root, '.protoflow/source/repository.git'), config.source.startSha, config, { allowEmpty: true });
+  assert.equal(manifest.beforeHash, baseline.hash);
+  assert.deepEqual(manifest.supersedes, [blocked.manifestId]);
+  assert.equal(result.manifestHash, hash(manifest));
+  await assert.rejects(fs.access(path.join(root, `.protoflow/manifests/${blocked.manifestId}.json`)));
+  await fs.access(path.join(root, result.archive, `${blocked.manifestId}.json`));
+  assert.equal((await versionQueue(root, config)).current.id, later.manifestId);
+  assert.equal(await fs.readFile(path.join(runner.worktree, 'app.html'), 'utf8'), '<button id="button">Work in progress</button>');
+
+  // The next run takes the combined version from the kept worktree; nothing is left to supersede.
+  assert.equal((await runOnce(root, config)).status, 'BLOCKED');
+  state = await sourceStatus(root);
+  assert.equal(state.entries[0].attempts.length, 1);
+  await assert.rejects(supersedeRunner(root, config), /No later prototype version/);
+});
+
+test('runner supersede refuses a version that is not blocked', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config);
+  await assert.rejects(supersedeRunner(root, config), /blocked or stopped/);
+});
+
 test('runner seeds committable content only and keeps a tracked symlink that leaves the project', async t => {
   const { root, config } = await fixture(t);
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-skills-'));
