@@ -213,6 +213,22 @@ esac`,
   assert.match(absent.reason, /missing\.apk does not exist; the target's build must produce it/);
 });
 
+test('an emulator whose package service is down cannot install: the device is unavailable (NOT_RUN), not the app', async t => {
+  const sdk = await fakeSdk(t, {
+    adb: `case "$*" in
+  devices) printf 'List of devices attached\\nemulator-5554\\tdevice\\n\\n' ;;
+  *"emu avd name"*) printf 'ProtoFlow Pixel\\nOK\\n' ;;
+  *install*) echo "Performing Streamed Install"; echo "adb: failed to install app.apk: cmd: Can't find service: package" >&2; exit 1 ;;
+  *) exit 0 ;;
+esac`,
+    emulator: 'echo "ProtoFlow Pixel"'
+  });
+  await writeFile(path.join(sdk, 'app.apk'), 'apk');
+  const down = await driver(['--package', 'dev.example', '--avd', 'ProtoFlow Pixel', '--apk', path.join(sdk, 'app.apk'), '--cache', path.join(sdk, 'cache')], { ANDROID_HOME: sdk });
+  assert.equal(down.status, 'NOT_RUN');
+  assert.match(down.reason, /emulator could not install .*Can't find service: package/s);
+});
+
 test('an installed copy signed with another key is uninstalled and replaced by the verified APK', async t => {
   const sdk = await fakeSdk(t, {
     adb: `echo "$*" >> "$ANDROID_HOME/adb.log"
