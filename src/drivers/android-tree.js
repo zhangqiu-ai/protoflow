@@ -49,24 +49,34 @@ const scrolls = node => node.scrollable === true || /(?:Horizontal)?ScrollView$|
 /**
  * UiAutomator clips a node's screen bounds to each ancestor and reports content a scroll view has scrolled out of
  * sight as not visible to the user, though it is rendered (the web counts it as visible below the fold). The driver
- * also reports the node's own size, so its bounds are restored: an edge clamped to the nearest scroll view's edge
- * moves out by the missing size (a node below keeps its true top, a node above its true bottom), and a node that was
- * clipped away is visible again. A node hidden inside a scroll view is not clipped and stays hidden.
+ * also reports the node's own size, so its bounds are restored and a node that was clipped away is visible again.
+ * The clamp line is the scroll view's edge or its padding edge (React Native clips to padding, 18 px inside the edge in
+ * the siyue capture), so the clamped side is the one nearer its scroll view edge: a node below the fold keeps its true
+ * top, a node scrolled above (or under the top padding) its true bottom. With both sides equally near it is left as
+ * reported. A node hidden inside a scroll view is not clipped and stays hidden.
  */
 export function restoreScrolled(node, clip = null) {
-  let restored = node;
+  let restored = node, clipped = { vertical: false, horizontal: false };
   if (clip && node.size && node.bounds) {
     const bounds = { ...node.bounds };
     const extend = (start, end, length) => {
       if (bounds[end] - bounds[start] >= length) return false;
-      if (bounds[start] === clip[start] && bounds[end] !== clip[end]) bounds[start] = bounds[end] - length;
-      else bounds[end] = bounds[start] + length;
+      const before = bounds[start] - clip[start], after = clip[end] - bounds[end];
+      if (before === after) return false;
+      if (after < before) bounds[end] = bounds[start] + length;
+      else bounds[start] = bounds[end] - length;
       return true;
     };
-    const vertical = extend('top', 'bottom', node.size.height), horizontal = extend('left', 'right', node.size.width);
-    if (vertical || horizontal) restored = { ...node, bounds, visible: true };
+    clipped = { vertical: extend('top', 'bottom', node.size.height), horizontal: extend('left', 'right', node.size.width) };
+    if (clipped.vertical || clipped.horizontal) restored = { ...node, bounds, visible: true };
   }
-  const children = node.children?.map(child => restoreScrolled(child, scrolls(node) ? node.bounds : clip));
+  // A scroll view clips its content along both axes, except where it is itself clipped: a horizontal row below the fold
+  // is clipped vertically by the outer scroll view, so its items keep that outer edge.
+  const inner = !scrolls(node) ? clip : {
+    ...(clipped.vertical ? { top: clip.top, bottom: clip.bottom } : { top: node.bounds.top, bottom: node.bounds.bottom }),
+    ...(clipped.horizontal ? { left: clip.left, right: clip.right } : { left: node.bounds.left, right: node.bounds.right })
+  };
+  const children = node.children?.map(child => restoreScrolled(child, inner));
   return children ? { ...restored, children } : restored;
 }
 function onlyText(children) {

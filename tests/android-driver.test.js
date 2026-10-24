@@ -94,7 +94,13 @@ test('content a scroll view has scrolled out of sight keeps its own size and cou
     node({ className: 'android.view.ViewGroup', resourceId: 'goal.title', text: 'Run 10K', bounds: box(0, 298, 1080, 400), size: { width: 1080, height: 150 }, visible: true }),
     node({ className: 'android.view.ViewGroup', resourceId: 'goal.chart', bounds: box(48, 1969, 1032, 2328), size: { width: 984, height: 432 } }),
     node({ className: 'android.widget.Button', resourceId: 'goal.discuss', text: 'Discuss with AI', clickable: true, visible: false, bounds: box(174, 2678, 547, 2328), size: { width: 373, height: 108 } }),
-    node({ className: 'android.widget.TextView', resourceId: 'goal.hint', text: 'Saved', visible: false, bounds: box(60, 600, 400, 660), size: { width: 340, height: 60 } })
+    node({ className: 'android.widget.TextView', resourceId: 'goal.hint', text: 'Saved', visible: false, bounds: box(60, 600, 400, 660), size: { width: 340, height: 60 } }),
+    // Clamped to the scroll view's 18 px top padding rather than its edge: still the top, so the true bottom is kept.
+    node({ className: 'android.view.ViewGroup', resourceId: 'goal.segments', bounds: box(48, 316, 1032, 454), size: { width: 984, height: 156 } }),
+    // A horizontal row below the fold: the row and its items are clipped by the outer scroll view's bottom edge.
+    node({ className: 'android.widget.HorizontalScrollView', scrollable: true, visible: false, bounds: box(48, 2900, 1032, 2328), size: { width: 984, height: 360 } }, [
+      node({ className: 'android.widget.Button', resourceId: 'goal.recent', text: 'Ordering cards', clickable: true, visible: false, bounds: box(48, 2900, 528, 2328), size: { width: 480, height: 360 } })
+    ])
   ]);
   const screen = { status: 'PASS', density: 3, screen: { width: 1080, height: 2400 }, insets: { left: 0, top: 72, right: 0, bottom: 63 }, keyboardVisible: false,
     tree: node({ className: 'android.widget.FrameLayout', bounds: box(0, 0, 1080, 2400) }, [
@@ -107,11 +113,13 @@ test('content a scroll view has scrolled out of sight keeps its own size and cou
   assert.deepEqual([restored[2].bounds, restored[2].visible], [box(174, 2678, 547, 2786), true]);
   // Hidden inside the scroll view, not clipped: stays hidden.
   assert.equal(restored[3].visible, false);
-  const { response } = androidResponse(screen, screenshot(), { anchors: ['goal', 'goal.chart', 'goal.discuss', 'goal.hint'], screen: 'goal' });
+  assert.deepEqual(restored[4].bounds, box(48, 298, 1032, 454));
+  assert.deepEqual([restored[5].children[0].bounds, restored[5].children[0].visible], [box(48, 2900, 528, 3260), true]);
+  const { response } = androidResponse(screen, screenshot(), { anchors: ['goal', 'goal.chart', 'goal.discuss', 'goal.hint', 'goal.recent'], screen: 'goal' });
   const facts = Object.fromEntries(response.elements.map(item => [item.anchor, item]));
   assert.deepEqual([facts['goal.discuss'].visible, facts['goal.discuss'].bounds.height, facts['goal.chart'].bounds.height], [true, 36, 144]);
-  assert.equal(facts['goal.hint'].visible, false);
-  assert.equal(facts.goal.text, 'Run 10K Discuss with AI');
+  assert.deepEqual([facts['goal.hint'].visible, facts['goal.recent'].visible], [false, true]);
+  assert.equal(facts.goal.text, 'Run 10K Discuss with AI Ordering cards');
 });
 
 test('typed text, keyboards and failed captures', () => {
