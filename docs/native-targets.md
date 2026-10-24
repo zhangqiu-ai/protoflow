@@ -30,7 +30,7 @@ AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-wi
 
 **Flutter**：Flutter SDK 在 `PATH` 上（3.19 以上，`Semantics(identifier:)`）。Codex 執行者要能跑 `flutter test`，adapter argv 需加 `--add-dir <Flutter SDK> --add-dir ~/.dart-tool（絕對路徑） --network`，見 [整合：專案工具鏈的沙箱權限](integrations.md#專案工具鏈的沙箱權限--add-dir--network)。
 
-沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。擷取沒有產出結果（`NOT_RUN`，例如 XCUITest 偶發的 `xcodebuild exit null`）時，引擎自動重擷取一次，場景記錄 `captureRetry`（第一次的原因）；兩次都沒有結果才記為 `NOT_RUN`。`FAIL` 不重擷取。
+沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。擷取沒有產出結果（`NOT_RUN`，例如 XCUITest 偶發的 `xcodebuild exit null`）時，引擎自動重擷取一次，場景記錄 `captureRetry`（第一次的原因）；兩次都沒有結果才記為 `NOT_RUN`。`FAIL` 不重擷取。Android 安裝時模擬器的套件服務不在（`Can't find service: package`，模擬器正在重開）或 adb 失去裝置，屬於裝置不可用，記為 `NOT_RUN` 而非應用的 `FAIL`。
 
 ## 配置
 
@@ -183,7 +183,7 @@ Compose 與 Flutter 注意事項：
 
 - 可點擊的 `Box`／`Row` 在 Android 無障礙樹中是 `View`，文字在子節點：只含文字的可點擊容器視為按鈕，標籤取子節點文字。
 - `BasicTextField` 的 placeholder（`decorationBox`）是輸入框的子文字節點，Flutter 在 iOS 把 hint 放在輸入框的 label；兩者在輸入框空白時都視為 placeholder，不計入外層容器文字。
-- Compose 對可點擊元件強制 48 dp 觸控高度；T1 的兄弟順序以閱讀順序（中心點同列再由左至右）判斷，較高的觸控區不會被誤判為在上方。
+- Compose 對可點擊元件強制 48 dp 觸控高度；T1 的兄弟順序以閱讀順序（見下方「閱讀順序」）判斷，較高的觸控區不會被誤判為在上方。
 
 ### 鍵盤
 
@@ -200,6 +200,19 @@ Compose 與 Flutter 注意事項：
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
 
 **捲出畫面的內容**：網頁原型在 Playwright 中把折線以下的元素算作可見，文字也算進容器；原生平台只回報螢幕上的部分。為使兩邊一致，位於捲動區（iOS 的 `scrollView`／`table`／`collectionView`，Android 的 `isScrollable` 節點或 `ScrollView`、`HorizontalScrollView`、`RecyclerView`、`ListView`）內、中心落在捲動區之外的元素（或其所在的捲動區本身已捲出，例如折線以下的橫向列表）視為已渲染：`visible` 為 true，文字算進包含該捲動區的容器。不在任何捲動區內的畫面外元素（例如停在螢幕外的抽屜）仍不可見。Android 的 UiAutomator 還會把捲出節點的螢幕邊界裁到捲動區邊緣並回報 `isVisibleToUser` 為 false；驅動器另外回報節點的 `boundsInParent` 尺寸與 `isScrollable`，正規化時被夾住的那一側依尺寸往外還原並恢復可見。夾住的線可能是捲動區的外框，也可能是它的內距邊緣（React Native 裁到內距，siyue 實測在外框內 18 px），所以以離捲動區邊緣較近的一側為被夾住的一側（在下方的保留真實上緣，在上方或被上內距裁掉一截的保留真實下緣），兩側一樣近時保持原樣；本身被外層裁切的捲動區（例如折線以下的橫向列表），其內容沿該方向沿用外層的邊緣。捲動區內未被裁切卻不可見的節點（例如透明度為 0）仍不可見。容器文字依閱讀順序串接時，同一個捲動區的內容視為一整塊、放在捲動區的位置，和 DOM 的文件順序一致：疊在捲動區上方的固定分頁列排在捲動內容之後，不會插在折線上下之間。實測 siyue（React Native）在 iPhone 上原型可見、應用判為不可見的錨點從 31 個降為 0 個。
+
+**閱讀順序**：容器文字與 T1 兄弟順序都依閱讀順序，由上而下分列，同一列再由左至右。兩個元素符合下列任一條件就算同一列：
+
+- 垂直中心相差不超過較矮者高度的一半。
+- 左右並排（水平不重疊），而且其中一個的垂直中心落在另一個的高度範圍內。
+
+第二條對應左圖右文的版面：較高的圓環或圖示排在右側整疊文字之前，和 DOM 順序一致。例如 siyue `growth.goal` 的 84 pt 進度環在右側單行標題之前。
+
+水平重疊的元素（疊在背景上的文字、上下堆疊的文字行）仍依中心點上下排序。
+
+開關等控制項常以旁邊的可見標題作為無障礙名稱。這類控制項的 label 若與容器內其他文字相同，不論是否相鄰都略過；網頁的 checkbox 也沒有文字。
+
+這兩條規則以 siyue 的 1,419 次歷史擷取（iPhone、iPad、Android）（16,765 個錨點文字）回放驗證：與原型一致的錨點從 14,830 個增為 14,896 個，原本一致的沒有任何一個變成不一致。
 
 步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
 

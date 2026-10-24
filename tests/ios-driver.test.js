@@ -92,6 +92,17 @@ test('native controls: no text of their own, labels deduplicated inside containe
   ] };
   assert.equal(subtreeText(row), 'Daily reminder');
   assert.equal(elementText(row.children[1]), '');
+  // With a subtitle the switch reads after both lines (siyue growth.reminders); its repeated label is still left out,
+  // in a hierarchy and in a flattened (React Native) tree. A switch whose label is the only text keeps it.
+  const subtitled = { ...row, children: [
+    { type: 'staticText', label: 'Daily reminder', frame: { x: 74, y: 128, width: 235, height: 21 } },
+    { type: 'switch', label: 'Daily reminder', value: '1', frame: { x: 321, y: 132.7, width: 51, height: 31 } },
+    { type: 'staticText', label: 'Today’s tasks', frame: { x: 74, y: 150, width: 235, height: 18 } }
+  ] };
+  assert.equal(subtreeText(subtitled), 'Daily reminder Today’s tasks');
+  const flat = { type: 'other', frame: { x: 0, y: 0, width: 402, height: 874 }, children: [{ ...subtitled, children: undefined, frame: { x: 16, y: 116, width: 370, height: 64 } }, ...subtitled.children] };
+  assert.equal(elementText(flat.children[0], flat), 'Daily reminder Today’s tasks');
+  assert.equal(subtreeText({ type: 'other', children: [{ type: 'switch', label: 'Wi-Fi', frame: { x: 0, y: 0, width: 300, height: 44 } }] }), 'Wi-Fi');
   assert.equal(elementText({ type: 'textField', value: 'Draft', placeholder: 'New task' }), 'Draft');
   assert.equal(elementText({ type: 'textField', value: 'New task', placeholder: 'New task' }), 'New task');
   assert.equal(elementText({ type: 'textField', placeholder: 'New task' }), 'New task');
@@ -106,6 +117,22 @@ test('native controls: no text of their own, labels deduplicated inside containe
     { label: 'a', frame: { x: 20, y: 83, width: 80, height: 34 } }
   ]).map(item => item.label);
   assert.deepEqual(order, ['a', 'b', 'c']);
+  // A tall ring beside a stack of text lines (siyue growth.goal): each line's centre lies within the ring's height,
+  // so the ring reads first; the stacked lines overlap horizontally and stay top to bottom. A layer over the same
+  // area (overlapping horizontally) still orders by its centre.
+  const media = readingOrder([
+    { label: 'name', frame: { x: 120, y: 125, width: 205, height: 30 } },
+    { label: 'sub', frame: { x: 120, y: 155, width: 205, height: 20 } },
+    { label: 'ring', frame: { x: 20, y: 121, width: 84, height: 84 } },
+    { label: 'visibility', frame: { x: 120, y: 183, width: 91, height: 20 } },
+    { label: 'next', frame: { x: 22, y: 232, width: 74, height: 24 } }
+  ]).map(item => item.label);
+  assert.deepEqual(media, ['ring', 'name', 'sub', 'visibility', 'next']);
+  const layered = readingOrder([
+    { label: 'line', frame: { x: 10, y: 20, width: 100, height: 20 } },
+    { label: 'backdrop', frame: { x: 0, y: 0, width: 400, height: 300 } }
+  ]).map(item => item.label);
+  assert.deepEqual(layered, ['line', 'backdrop']);
 });
 
 test('iosResponse crops to the safe area and refuses keyboards, failures and unmeasured frames', () => {

@@ -205,6 +205,7 @@ kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 
 .lane-state em{font-style:normal;color:var(--muted)}
 .lane-state em.now{color:var(--mint-ink);font-weight:600}.lane-state em.bad{color:var(--bad);font-weight:600}
 .timer{font:12px var(--mono);color:var(--faint)}
+.waited{margin-left:auto;flex:none;font-size:12px;color:var(--faint);white-space:nowrap}
 .track{--inset:15px;position:relative;height:30px}
 .track i{position:absolute;left:var(--inset);top:13.5px;height:3px;border-radius:3px}
 .track .bed{right:var(--inset);background:var(--line2)}
