@@ -128,6 +128,7 @@ async function runner(cache) {
   return { apks, directory };
 }
 
+const DEVICE_UNAVAILABLE = /Can't find service: package|cmd: Failure calling service package|device offline|device '[^']*' not found|no devices\/emulators found|Broken pipe \(32\)|Is the system running\?/i;
 async function install(serial, apk, label, packageName = null) {
   let result = await adb(serial, ['install', '-r', '-g', apk], { timeoutMs: 300000 });
   let replaced = false;
@@ -138,6 +139,8 @@ async function install(serial, apk, label, packageName = null) {
     replaced = true;
   }
   if (result.timedOut || result.code === null) return { notRun: `emulator did not finish installing ${label} within 300 s` };
+  // The device, not the APK: its package manager is down (the emulator is restarting) or adb lost it.
+  if (DEVICE_UNAVAILABLE.test(result.stdout + result.stderr)) return { notRun: `emulator could not install ${label}: ${tail(result.stdout + result.stderr)}` };
   if (result.code !== 0 || !/Success/.test(result.stdout)) return { fail: `${label} could not be installed: ${tail(result.stdout + result.stderr)}` };
   return { replaced };
 }

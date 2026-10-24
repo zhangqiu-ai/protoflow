@@ -30,7 +30,7 @@ AVD 名稱不能有空格。驅動器需要時以無視窗模式開機（`-no-wi
 
 **Flutter**：Flutter SDK 在 `PATH` 上（3.19 以上，`Semantics(identifier:)`）。Codex 執行者要能跑 `flutter test`，adapter argv 需加 `--add-dir <Flutter SDK> --add-dir ~/.dart-tool（絕對路徑） --network`，見 [整合：專案工具鏈的沙箱權限](integrations.md#專案工具鏈的沙箱權限--add-dir--network)。
 
-沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。擷取沒有產出結果（`NOT_RUN`，例如 XCUITest 偶發的 `xcodebuild exit null`）時，引擎自動重擷取一次，場景記錄 `captureRetry`（第一次的原因）；兩次都沒有結果才記為 `NOT_RUN`。`FAIL` 不重擷取。
+沒有 Xcode／JDK／SDK、找不到模擬器或 AVD、開機或安裝逾時、驅動器 runner 無法建置時，該場景記為 `NOT_RUN`，不會 PASS；應用回報安裝錯誤、閃退、無法到達畫面或步驟失敗則是 `FAIL`。擷取沒有產出結果（`NOT_RUN`，例如 XCUITest 偶發的 `xcodebuild exit null`）時，引擎自動重擷取一次，場景記錄 `captureRetry`（第一次的原因）；兩次都沒有結果才記為 `NOT_RUN`。`FAIL` 不重擷取。Android 安裝時模擬器的套件服務不在（`Can't find service: package`，模擬器正在重開）或 adb 失去裝置，屬於裝置不可用，記為 `NOT_RUN` 而非應用的 `FAIL`。
 
 ## 配置
 
