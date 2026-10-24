@@ -122,6 +122,21 @@ test('classification separates CSS, DOM, data, security and unknown changes; rul
   const touched = await snapshot(root, config);
   await fs.writeFile(path.join(root, 'prototype/one-line.html'), '<nav><a data-act="go:settings.storage">Storage</a></nav><main><button data-act="fetch:/api/folder">📁</button></main>');
   assert.equal(classifyChanges(touched, await snapshot(root, config), config).level, 'L2');
+  // A new page's navigator names other screens; linking to a permission or password screen is not a security change.
+  const navigator = '<nav><button data-go="home.permission"><span>權限選單</span><span>home.permission</span></button><a href="account.password.html">密碼</a><a data-act="go:account.secret">金鑰</a></nav>';
+  const withoutPage = await snapshot(root, config);
+  const select = `<style>.sel { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E") }</style>`;
+  const icon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><path d="M0 0h8v8H0z"/></svg>';
+  await fs.writeFile(path.join(root, 'prototype/tasks.html'), `${select}${navigator}<main><button>${icon}新建任務</button></main>`);
+  assert.equal(classifyChanges(withoutPage, await snapshot(root, config), config).level, 'L1');
+  const withPage = await snapshot(root, config);
+  await fs.writeFile(path.join(root, 'prototype/tasks.html'), `${navigator}<main><button>新建任務</button><input type="password"></main>`);
+  assert.equal(classifyChanges(withPage, await snapshot(root, config), config).level, 'L3');
+  await fs.writeFile(path.join(root, 'prototype/links.html'), '<a href="https://example.com/help">Help</a>');
+  // A link to another origin still counts.
+  const beforeLinks = await snapshot(root, config);
+  await fs.writeFile(path.join(root, 'prototype/links.html'), '<a href="https://example.com/docs">Help</a>');
+  assert.equal(classifyChanges(beforeLinks, await snapshot(root, config), config).level, 'L2');
   const before = await snapshot(root, config);
   await fs.writeFile(path.join(root, 'prototype/auth.js'), 'const password = "new value"');
   const after = await snapshot(root, config);
