@@ -6,6 +6,7 @@ import http from 'node:http';
 import { traceActivity, roles, listProjects, addProject, removeProject, dashboardSnapshot, projectId } from '../src/dashboard-data.js';
 import { createDashboardServer, overviewStream } from '../src/dashboard-server.js';
 import { runAction } from '../src/dashboard-actions.js';
+import { diagnose } from '../src/dashboard-diagnosis.js';
 import { dashboardFixture, PNG } from './helpers/dashboard-fixture.js';
 
 async function fixture(t, options) { const f = await dashboardFixture(options); t.after(f.cleanup); return f; }
@@ -137,4 +138,50 @@ test('the overview carries each working target\'s version, phase, timer start an
   // An idle target sends no live activity, so the card stays quiet.
   const idle = await fixture(t, { executing: false });
   assert.equal(overviewStream((await dashboardSnapshot(idle.root)).streams[0]).live, null);
+});
+
+test('a known failure becomes what to do before retrying: which login expired, the network, the disk', () => {
+  const claude = diagnose('Claude execution FAIL (EXEC-1792798137551-21266fcf, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed');
+  assert.equal(claude.kind, 'auth'); assert.equal(claude.title, 'Claude 登入失效'); assert.equal(claude.command, 'claude');
+  assert.match(claude.steps.join(' '), /`\/login`/);
+  assert.deepEqual([diagnose('HTTP 401: Bad credentials (https://api.github.com/graphql)').command, diagnose('codex exec failed: 401 Unauthorized').command], ['gh auth login', 'codex login']);
+  assert.equal(diagnose('fatal: unable to access: Could not resolve host: github.com').kind, 'network');
+  assert.equal(diagnose('rate_limit_error: 429 Too Many Requests').kind, 'quota');
+  assert.equal(diagnose('write ENOSPC: no space left on device').command, 'protoflow runner gc');
+  assert.equal(diagnose('Executor timed out after 1800000ms').kind, 'timeout');
+  // An unknown reason is shown as it is, without a guess.
+  assert.equal(diagnose('Repair limit exhausted (2)'), null);
+  assert.equal(diagnose(undefined), null);
+});
+
+test('a blocked version waiting for a person carries the diagnosis of its failure', async t => {
+  const f = await fixture(t, { blockedError: 'Claude execution FAIL (exit 1): Failed to authenticate: OAuth session expired' });
+  const blocked = (await dashboardSnapshot(f.root)).attention.find(item => item.kind === 'blocked-version');
+  assert.equal(blocked.diagnosis.title, 'Claude 登入失效');
+  assert.match(blocked.reason, /OAuth session expired/);
+});
+
+test('pages watching the same view share one poll, and a view nobody watches stops polling', async t => {
+  const { root, home } = await fixture(t);
+  await addProject(root, { home });
+  let reads = 0;
+  const dashboard = createDashboardServer({ home, port: 0, service: false, pollMs: 100, snapshotOf: async (...args) => { reads += 1; return dashboardSnapshot(...args); } });
+  const url = await dashboard.listen(); t.after(() => dashboard.close());
+  const id = await projectId(root);
+  const open = path => new Promise((resolve, reject) => {
+    const req = http.get(`${url}${path}`, response => { response.setEncoding('utf8'); let data = ''; response.on('data', chunk => { data += chunk; if (data.includes('\n\n')) resolve({ req, data }); }); });
+    req.on('error', error => error.code === 'ECONNRESET' ? null : reject(error));
+  });
+  // Three project pages and the overview: every page gets data, yet the project is read about once per poll.
+  const pages = await Promise.all([open(`api/projects/${id}/stream`), open(`api/projects/${id}/stream`), open(`api/projects/${id}/stream`), open('api/stream')]);
+  for (const page of pages.slice(0, 3)) assert.match(page.data, /^data: \{"protocol":"protoflow\.dashboard\/1"/);
+  assert.match(pages[3].data, /"inbox":\[/);
+  const before = reads;
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  assert.ok(reads - before <= 12, `${reads - before} reads in 10 polls of two views`);
+  for (const page of pages) page.req.destroy();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const idle = reads;
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.equal(reads, idle, 'no polling once every page has gone');
 });

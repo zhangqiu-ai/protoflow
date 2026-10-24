@@ -11,7 +11,8 @@ const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面
 const ICON = {
   merge: 'M5 3v12M13 3v3a4 4 0 0 1-4 4H5', tag: 'M3 3h6l6 6-6 6-6-6zM6.5 6.5h.01', issue: 'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 6v3.5M9 12.2h.01',
   retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', review: 'M7.5 3a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM11 11l4 4', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4',
-  grid: 'M3.5 3.5h4v4h-4zM10.5 3.5h4v4h-4zM3.5 10.5h4v4h-4zM10.5 10.5h4v4h-4z'
+  grid: 'M3.5 3.5h4v4h-4zM10.5 3.5h4v4h-4zM3.5 10.5h4v4h-4zM10.5 10.5h4v4h-4z', inbox: 'M2.5 10.5h3.6l1.2 2h3.4l1.2-2h3.6M2.5 10.5l2-6.5h9l2 6.5v4.5h-13z',
+  bell: 'M5 12.5V8.5a4 4 0 0 1 8 0v4l1.3 1.5H3.7zM7.4 16h3.2', copy: 'M6.5 6.5h8v8.5h-8zM3.5 11.5V3h8', fix: 'M9 2.5a4.5 4.5 0 0 0-2.6 8.2v2.3h5.2v-2.3A4.5 4.5 0 0 0 9 2.5zM7 15.5h4'
 };
 
 /** Element helper: h('div.card', {attr}, ...children); strings become text nodes. */
@@ -117,7 +118,13 @@ function watch(stream, onData) {
 }
 // Entrance motion plays once per view; later pushes redraw in place without replaying it.
 function paint(render, data) { render(data); app.classList.remove('swap'); setTimeout(() => document.body.classList.add('settled'), 900); }
-const overview = watch(new EventSource('/api/stream'), data => { overviewData = data; renderSide(data); if (!source) paint(renderOverview, data); });
+const overview = watch(new EventSource('/api/stream'), data => {
+  overviewData = data;
+  renderSide(data);
+  badge(data);
+  notifyNew(data);
+  if (!source) paint(view() === 'inbox' ? renderInbox : renderOverview, data);
+});
 // The service mints a new token each time it starts, so a page left open across a restart (an upgrade, a launchd
 // relaunch) holds a stale one: on that refusal, read the current token from a fresh copy of the page and send once more.
 async function freshToken() {
@@ -152,7 +159,7 @@ function renderOverview(data) {
   const due = projects.reduce((sum, project) => sum + (project.attention ?? 0), 0);
   app.replaceChildren(
     h('section.hero.rise', {}, h('div', {}, h('span.label', {}, '所有專案'),
-      h('h1', {}, `${projects.length} 個專案`, h('br'), due ? [h('b', {}, `${due} 件`), '等你決定'] : ['一切', h('b', {}, '順暢')])),
+      h('h1', {}, `${projects.length} 個專案`, h('br'), due ? h('a.to-inbox', { href: '#/inbox' }, h('b', {}, `${due} 件`), '等你決定') : ['一切', h('b', {}, '順暢')])),
       h('div.gauges', {}, gauge('常駐', healthy, healthy / projects.length, 'var(--mint)'), gauge('進行中', busy, busy / projects.length, 'var(--ink)'),
         gauge('等你', due, projects.filter(project => project.attention).length / projects.length, 'var(--amber)'))),
     h('section.cards', {}, projects.map((project, index) => h(`a.card.rise${project.streams?.some(active) ? '.busy' : ''}`, { href: `#/p/${project.id}`, style: `animation-delay:${index * 60}ms` },
@@ -208,14 +215,28 @@ function consoleCard(streams) {
     live ? [list, live.files?.length ? h('div.files', {}, live.files.slice(-6).map(file => h('span', { title: file }, file.split('/').pop()))) : null]
       : h('p.quiet', {}, '目前沒有代理在工作'));
 }
-function decisions(snapshot) {
-  const items = snapshot.attention;
-  const id = snapshot.project.id;
+// Most urgent first: the service, then blocked work, rejected reviews, merges and approvals, then issues.
+const URGENCY = { service: 0, 'blocked-version': 1, 'delivery-blocked': 1, 'review-rejected': 2, 'manual-merge': 3, review: 3, issue: 4 };
+const KIND = { service: 'Runner 異常', 'blocked-version': '阻塞', 'delivery-blocked': '交付受阻', 'review-rejected': '審查未過', 'manual-merge': '可合併', review: '待核准', issue: 'Issue 等你' };
+const byUrgency = items => [...items].sort((a, b) => (URGENCY[a.kind] ?? 5) - (URGENCY[b.kind] ?? 5));
+/** Text with `code` spans, as nodes. */
+const withCode = text => String(text).split('`').map((part, i) => i % 2 ? h('code', {}, part) : part);
+/** What to do about a blocked item when the engine recognises its failure: the steps, a command to copy, then retry. */
+function diagnosisBlock(diagnosis) {
+  if (!diagnosis) return null;
+  const copy = async () => { try { await navigator.clipboard.writeText(diagnosis.command); toast(`已複製：${diagnosis.command}`); } catch { toast(`無法複製，請手動輸入 ${diagnosis.command}`, true); } };
+  return h('div.diag', { 'aria-label': `診斷：${diagnosis.title}` },
+    h('div.diag-h', {}, icon(ICON.fix, 16), h('b', {}, diagnosis.title),
+      diagnosis.command ? h('button.copy', { type: 'button', title: '複製命令', 'aria-label': `複製命令 ${diagnosis.command}`, onclick: copy }, h('code', {}, diagnosis.command), icon(ICON.copy, 14)) : null),
+    h('ol', {}, diagnosis.steps.map(step => h('li', {}, withCode(step)))));
+}
+/** One card per item waiting for a person, with the action it allows; the same cards on a project page and in the inbox. */
+function askCards(projectId, items, many) {
   const run = async (box, body, label, question, result) => {
     if (!confirm(question)) return;
     box.querySelectorAll('button').forEach(button => { button.disabled = true; });
     try {
-      const response = await act(id, body, label);
+      const response = await act(projectId, body, label);
       done.set(keyOf(body), `${result}${response.next ? ` · ${response.next}` : ''}`);
       rerender();
     } catch (error) { toast(`${label}失敗：${error.message}`, true); box.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
@@ -231,28 +252,61 @@ function decisions(snapshot) {
       : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result) }, button.label))));
     return box;
   };
-  const cards = items.map(item => {
-    const where = snapshot.streams.length > 1 ? `${targetName(item.target)} · ` : '';
+  return byUrgency(items).map(item => {
+    const where = many ? `${targetName(item.target)} · ` : '';
+    const diagnosis = diagnosisBlock(item.diagnosis);
     if (item.kind === 'manual-merge') return card(item, ICON.merge, `${where}${item.title} 可合併`, `已驗收並通過獨立審查 · ${item.commit?.slice(0, 7) ?? ''}`, null,
       [{ label: '核准並合併', body: { action: 'merge', target: item.target, deliveryId: item.deliveryId }, question: `確定以你的 GitHub 身分合併 ${item.title}？只會合併審查過的 commit。`, result: '已核准 · 合併中' }, item.pr ? { label: 'GitHub', href: item.pr } : null].filter(Boolean));
     if (item.kind === 'issue') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
-      item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null,
+      [item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null, diagnosis],
       [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
     if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, `驗收 ${item.verificationId} 已通過`, null,
       [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`, result: '已核准' }]);
     if (item.kind === 'review-rejected') return card(item, ICON.review, `${where}${item.title} 審查未過`, item.reason,
       h('ul.findings', {}, item.findings.map(finding => h(`li.${finding.severity}`, { title: finding.description }, finding.file ? h('code', {}, finding.file.split('/').pop()) : null, finding.description))),
       [{ label: '退回重修', body: { action: 'request-changes', target: item.target, deliveryId: item.deliveryId }, question: `同意獨立審查的 ${item.findings.length} 項發現，把這個版本退回給執行代理重修？會以你的名字記錄「要求修改」，綁定這次驗收。`, result: '已退回 · 下一輪重修' }]);
-    if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, null,
-      [{ label: '重試', body: { action: 'retry', target: item.target }, question: '確定已處理阻塞原因並重試這個版本？', result: '已重新排入' }]);
-    return card(item, ICON.alert, item.title ?? item.kind, item.reason, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, 'GitHub') : null, null);
+    if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, diagnosis,
+      [{ label: item.diagnosis ? '已處理，重試' : '重試', body: { action: 'retry', target: item.target }, question: item.diagnosis ? `確定已依「${item.diagnosis.title}」的步驟處理，並重試這個版本？` : '確定已處理阻塞原因並重試這個版本？', result: '已重新排入' }]);
+    return card(item, ICON.alert, item.title ?? item.kind, item.reason, [diagnosis, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, 'GitHub') : null], null);
   });
+}
+function decisions(snapshot) {
+  const items = snapshot.attention;
+  const cards = askCards(snapshot.project.id, items, snapshot.streams.length > 1);
   const open = items.filter(item => item.actions?.length).length;
   return h('div.decide', { 'aria-label': '需要你' },
     h('div.decide-h', {}, h('span.label', {}, '需要你'), h('b', {}, String(open))),
     cards.length ? cards : h('div.ask.calm', {}, h('div.ask-h', {}, h('span.glyph', {}, icon(ICON.check)), h('div', {}, h('b', {}, '沒有需要你決定的事')))),
     h('div.calm-note', {}, icon(ICON.clock, 16), '以你的 GitHub 身分執行 · 記錄於 actions.jsonl'));
 }
+
+// ---- inbox: everything waiting for a person, across projects, most urgent first ----
+function notifyToggle() {
+  if (!('Notification' in window)) return null;
+  const on = notifyOn(), denied = Notification.permission === 'denied';
+  const click = async () => {
+    if (on) store('protoflow.notify', 'off');
+    else { if (Notification.permission !== 'granted' && await Notification.requestPermission() !== 'granted') { toast('瀏覽器沒有允許通知', true); return renderInbox(overviewData); } store('protoflow.notify', 'on'); }
+    renderInbox(overviewData);
+  };
+  return h(`button.btn.notify${on ? '.on' : ''}`, { type: 'button', disabled: denied, 'aria-pressed': String(on), onclick: click, title: denied ? '在瀏覽器的網站設定允許通知' : '有新的事等你決定時，在桌面通知你' },
+    icon(ICON.bell, 16), denied ? '通知已被瀏覽器封鎖' : on ? '桌面通知已開啟' : '開啟桌面通知');
+}
+function renderInbox(data) {
+  crumb.textContent = '等你';
+  const groups = data.projects.filter(project => project.inbox?.length)
+    .map(project => ({ project, items: project.inbox, top: Math.min(...project.inbox.map(item => URGENCY[item.kind] ?? 5)) }))
+    .sort((a, b) => a.top - b.top || b.items.length - a.items.length);
+  const total = groups.reduce((sum, group) => sum + group.items.length, 0);
+  app.replaceChildren(
+    h('section.hero.rise', {}, h('div', {}, h('span.label', {}, '等你'), h('h1', {}, total ? [h('b', {}, `${total} 件`), '等你決定'] : ['一切', h('b', {}, '順暢')])), notifyToggle()),
+    groups.length ? h('div.inbox', {}, groups.map(({ project, items }, index) => h('section.inbox-group.rise', { 'aria-label': project.name, style: `animation-delay:${index * 60}ms` },
+      h('a.inbox-h', { href: `#/p/${project.id}` }, h('span.tile', {}, initial(project.name)), h('div', {}, h('b', {}, project.name), h('small', {}, headline(project).label)),
+        h('span.due', {}, '待你', h('b', {}, String(items.length))), h('span.go', { 'aria-hidden': 'true' }, '→')),
+      h('div.inbox-cards', {}, askCards(project.id, items, project.streams?.length > 1)))))
+      : h('div.ask.calm.rise', {}, h('div.ask-h', {}, h('span.glyph', {}, icon(ICON.check)), h('div', {}, h('b', {}, '沒有需要你決定的事'), h('p', {}, '有新的事時，這裡和分頁標題會先告訴你')))));
+}
+
 function frameOf(project, stream, variant) {
   const name = `${variant ?? ''} ${project.targets?.find(target => target.id === stream.target)?.platform ?? ''} ${stream.target ?? ''}`.toLowerCase();
   return /ipad|tablet/.test(name) ? 'tablet' : /iphone|ios|android|flutter|phone|mobile|react-native/.test(name) ? 'phone' : 'browser';
@@ -370,8 +424,40 @@ function renderProject(snapshot) {
     evidence(snapshot) ?? '',
     lists(snapshot));
 }
-const rerender = () => { if (lastProject) renderProject(lastProject); };
+const rerender = () => { if (lastProject) renderProject(lastProject); else if (view() === 'inbox' && overviewData) renderInbox(overviewData); };
 setInterval(() => document.querySelectorAll('[data-since]').forEach(node => { if (node.dataset.since) node.textContent = elapsed(node.dataset.since); }), 1000);
+
+// ---- title, icon and notifications: what waits for you reaches you on another tab or app ----
+const favicon = document.getElementById('favicon');
+const TITLE = document.title;
+function badge(data) {
+  const due = data.projects.reduce((sum, project) => sum + (project.attention ?? 0), 0);
+  document.title = due ? `(${due}) ${TITLE}` : TITLE;
+  const count = due > 99 ? '99+' : String(due);
+  const dot = due ? `<circle cx="23" cy="9" r="9" fill="#D97706"/><text x="23" y="12.6" text-anchor="middle" font-family="system-ui,sans-serif" font-size="${count.length > 1 ? 9 : 11}" font-weight="700" fill="#fff">${count}</text>` : '';
+  favicon.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="2" y="2" width="17" height="17" rx="5" fill="#0E1116"/><rect x="11" y="11" width="17" height="17" rx="5" fill="#0FA98F" fill-opacity=".9"/>${dot}</svg>`)}`;
+}
+const notifyOn = () => 'Notification' in window && Notification.permission === 'granted' && stored('protoflow.notify') === 'on';
+const itemKey = (project, item) => `${project.id}:${item.kind}:${item.deliveryId ?? item.verificationId ?? item.number ?? item.manifestId ?? item.status ?? ''}`;
+let known = null;
+/** A new item since the last push: a toast while you look at the page, a desktop notification (if allowed) while you don't. */
+function notifyNew(data) {
+  const keys = new Set(), fresh = [];
+  for (const project of data.projects) {
+    // A project that failed to read keeps its items, so a passing read error does not announce them again.
+    if (project.error) { for (const key of known ?? []) if (key.startsWith(`${project.id}:`)) keys.add(key); continue; }
+    for (const item of project.inbox ?? []) { const key = itemKey(project, item); keys.add(key); if (known && !known.has(key)) fresh.push({ project, item, key }); }
+  }
+  known = keys;
+  if (!fresh.length) return;
+  const say = ({ project, item }) => `${project.name} · ${KIND[item.kind] ?? item.kind}`;
+  if (!document.hidden) { toast(fresh.length === 1 ? `新的事等你：${say(fresh[0])}` : `${fresh.length} 件新的事等你決定`); return; }
+  if (!notifyOn()) return;
+  for (const { project, item, key } of byUrgency(fresh.map(entry => ({ ...entry.item, entry }))).map(item => item.entry).slice(0, 3)) {
+    const note = new Notification(say({ project, item }), { body: item.diagnosis?.title ?? item.title ?? item.reason ?? '', tag: key });
+    note.onclick = () => { window.focus(); location.hash = `#/p/${project.id}`; note.close(); };
+  }
+}
 
 // ---- sidebar: every project on every view, with where it is and what waits for a person ----
 const side = document.getElementById('side'), navList = document.getElementById('nav-list'), navInd = side.querySelector('.nav-ind'), menu = document.getElementById('menu'), scrim = document.getElementById('scrim');
@@ -395,21 +481,24 @@ const segments = stream => {
   return h('span.nav-segs', { 'aria-hidden': 'true' }, STAGES.map((_, i) => h(`i${i < at ? '.done' : i === at ? (tone === 'bad' ? '.bad' : '.now') : ''}`)));
 };
 const currentId = () => /^#\/p\/([0-9a-f]{12})$/.exec(location.hash)?.[1] ?? null;
+const view = () => currentId() ? 'project' : location.hash === '#/inbox' ? 'inbox' : 'overview';
+const currentHref = () => currentId() ? `#/p/${currentId()}` : view() === 'inbox' ? '#/inbox' : '#/';
 function renderSide(data = overviewData) {
   if (!data) return;
-  const here = currentId(), projects = data.projects;
+  const here = currentHref(), projects = data.projects;
   const focused = navList.contains(document.activeElement) ? document.activeElement.getAttribute('href') : null;
   const due = projects.reduce((sum, project) => sum + (project.attention ?? 0), 0);
   const item = (href, tile, name, sub, count, on, tip) => h(`a.nav-item${on ? '.here' : ''}`, { href, 'aria-current': on ? 'page' : null, 'data-tip': tip },
     h(`span.nav-tile${tile.home ? '.home' : ''}`, { 'data-due': count || null }, tile.glyph, tile.tone ? h(`i.nav-dot.${tile.tone}`) : null),
     h('span.nav-text', {}, h('b', {}, name), sub), count ? h('span.nav-due', { title: `${count} 件等你決定` }, String(count)) : null);
   navList.replaceChildren(
-    item('#/', { home: true, glyph: icon(ICON.grid, 16) }, '總覽', h('small', {}, `${projects.length} 個專案`), due, !here, `總覽 · ${projects.length} 個專案`),
+    item('#/', { home: true, glyph: icon(ICON.grid, 16) }, '總覽', h('small', {}, `${projects.length} 個專案`), 0, here === '#/', `總覽 · ${projects.length} 個專案`),
+    item('#/inbox', { home: true, glyph: icon(ICON.inbox, 16) }, '等你', h('small', {}, due ? `${due} 件等你決定` : '沒有待辦'), due, here === '#/inbox', due ? `等你 · ${due} 件` : '等你 · 沒有待辦'),
     h('span.nav-label', { 'aria-hidden': 'true' }, '專案'),
     ...projects.map(project => {
       const head = headline(project);
       return item(`#/p/${project.id}`, { glyph: initial(project.name), tone: head.tone }, project.name,
-        h('small', {}, h(`span.nav-state.${head.tone}`, {}, head.label), segments(head.stream)), project.attention, project.id === here, `${project.name} · ${head.label}`);
+        h('small', {}, h(`span.nav-state.${head.tone}`, {}, head.label), segments(head.stream)), project.attention, `#/p/${project.id}` === here, `${project.name} · ${head.label}`);
     }));
   if (focused) navList.querySelector(`a[href="${focused}"]`)?.focus();
   placeIndicator();
@@ -450,7 +539,7 @@ document.addEventListener('keydown', event => {
   // ⌥↑↓ switches project from anywhere; plain ↑↓ moves focus within the list.
   if (event.altKey) {
     // From the address, not the highlight: a quick second press lands before hashchange redraws the list.
-    const at = currentId() ? `#/p/${currentId()}` : '#/';
+    const at = currentHref();
     const next = links[links.findIndex(link => link.getAttribute('href') === at) + step];
     if (next) { event.preventDefault(); location.hash = next.getAttribute('href'); }
   } else if (links.includes(document.activeElement)) {
@@ -476,11 +565,18 @@ function route() {
   renderSide();
   if (id) {
     crumb.textContent = overviewData?.projects.find(project => project.id === id)?.name ?? '';
-    source = watch(new EventSource(`/api/projects/${id}/stream`), data => paint(renderProject, data));
+    openProject();
   } else {
     setConn(overview.readyState === EventSource.OPEN);
-    if (overviewData) paint(renderOverview, overviewData);
+    if (overviewData) paint(view() === 'inbox' ? renderInbox : renderOverview, overviewData);
   }
 }
+const openProject = () => { source = watch(new EventSource(`/api/projects/${currentId()}/stream`), data => paint(renderProject, data)); };
+// A hidden page stops its project stream (the server stops polling a view nobody watches) and picks it up on return;
+// the overview stream stays open, so the title and notifications keep up while you work elsewhere.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { source?.close(); return; }
+  if (currentId() && source?.readyState === EventSource.CLOSED) openProject();
+});
 window.addEventListener('hashchange', route);
 route();
