@@ -85,6 +85,57 @@ test('a flattened container\'s own label is an accessible name, not text it show
   assert.equal(elementText(tree.children[0], tree), 'Settings Z Growth Me');
 });
 
+test('an overlay reads after the page it covers, in tree order like the DOM, and never as content of what it covers', () => {
+  const frame = (x, y, width, height) => ({ x, y, width, height });
+  // siyue nav.sidebar on iPad (React Native, flattened): the home page with a progress ring, a drawer over it and a
+  // centred tab bar the drawer barely touches.
+  const page = (drawerLast, tabs) => {
+    const home = { type: 'other', frame: frame(0, 0, 834, 1210), children: [
+      { type: 'button', label: 'Z', frame: frame(12, 41, 34, 34) },
+      { type: 'scrollView', frame: frame(0, 86, 834, 1104), children: [
+        { type: 'other', label: '1/4', frame: frame(91, 110, 74, 74) },
+        { type: 'staticText', label: '3 left today', frame: frame(181, 125, 562, 26) },
+        { type: 'button', label: 'Goals', frame: frame(16, 600, 802, 50) }
+      ] }
+    ] };
+    const drawer = [
+      { type: 'other', label: 'Sidebar', frame: frame(0, 0, 300, 1210) },
+      { type: 'scrollView', frame: frame(12, 42, 276, 1090), children: [
+        { type: 'button', label: 'Zhang Qiu', frame: frame(12, 42, 276, 64) },
+        // Its centre lies inside the ring underneath: the ring is not a container of the drawer's items.
+        { type: 'button', label: 'Search', frame: frame(12, 106, 276, 48) }
+      ] },
+      { type: 'button', label: 'Settings', frame: frame(12, 1132, 276, 48) }
+    ];
+    const bar = { type: 'other', label: 'Main navigation', frame: frame(tabs.x - 6, tabs.y - 6, 420, 62), children: [
+      { type: 'button', label: 'Growth', frame: frame(tabs.x, tabs.y, 82, 51) },
+      { type: 'button', label: 'Me', frame: frame(tabs.x + 327, tabs.y, 82, 51) }
+    ] };
+    const root = { type: 'other', identifier: 'nav.sidebar', label: '', frame: frame(0, 0, 834, 1210) };
+    return { type: 'application', frame: frame(0, 0, 834, 1210), children: [root, home, ...(drawerLast ? [bar, ...drawer] : [...drawer, bar])] };
+  };
+  const text = tree => elementText(tree.children[0], tree);
+  const ipad = { x: 213, y: 1140 }, iphone = { x: 17, y: 1140 };
+  // The prototype's DOM: page, tab bar, then the drawer that covers both.
+  assert.equal(text(page(true, ipad)), 'Z 1/4 3 left today Goals Growth Me Zhang Qiu Search Settings');
+  assert.equal(text(page(true, iphone)), 'Z 1/4 3 left today Goals Growth Me Zhang Qiu Search Settings');
+  // A drawer earlier in the tree than the tab bar reads before it: the order follows the tree, not the coordinates
+  // (formerly the drawer's Settings and the tab bar shared a row, and the ring was dropped as a container on iPad).
+  assert.equal(text(page(false, ipad)), 'Z 1/4 3 left today Goals Zhang Qiu Search Settings Growth Me');
+  assert.equal(text(page(false, iphone)), 'Z 1/4 3 left today Goals Zhang Qiu Search Settings Growth Me');
+
+  // Plain layouts keep the geometric order: a badge inside a button and lines that touch stay where they are.
+  const plain = { type: 'application', frame: frame(0, 0, 400, 800), children: [
+    { type: 'other', identifier: 'list', label: '', frame: frame(0, 0, 400, 800) },
+    { type: 'staticText', label: 'Second', frame: frame(16, 40, 200, 22) },
+    { type: 'staticText', label: 'First', frame: frame(16, 20, 200, 21) },
+    { type: 'button', label: 'Chats', frame: frame(16, 100, 100, 50) },
+    { type: 'button', label: 'Me', frame: frame(120, 100, 100, 50) },
+    { type: 'staticText', label: '3', frame: frame(90, 110, 20, 20) }
+  ] };
+  assert.equal(elementText(plain.children[0], plain), 'First Second Chats 3 Me');
+});
+
 test('native controls: no text of their own, labels deduplicated inside containers, values never leak', () => {
   const row = { type: 'other', identifier: 'settings.notify', frame: { x: 20, y: 140, width: 362, height: 52 }, children: [
     { type: 'staticText', label: 'Daily reminder', frame: { x: 36, y: 156, width: 120, height: 20 } },

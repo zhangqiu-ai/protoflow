@@ -98,33 +98,115 @@ export function scrolledOut(tree) {
  * accessibility tree, so a View's text and buttons are siblings that lie within its frame rather than its children.
  * Text scrolled out of a scroll view belongs to the container that holds the scroll view. A scroll view's content reads
  * as one block placed where the scroll view is, like the DOM's document order: a tab bar floating over the scroll view
- * reads after it, not between the content above and below the fold.
+ * reads after it, not between the content above and below the fold. Units that overlap are layers (see layers()): an
+ * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
+ * as text enclosed by an element of the layer underneath.
  */
 export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
   const frame = frameOf(container);
-  const found = [], owner = new Map(), outer = new Map();
+  const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
   const within = item => inside(frameOf(item), frame) || (scrolled.has(item) && within(scrolled.get(item)));
   const visit = (item, scroller) => {
+    order.set(item, order.size);
     if (item === container || item.visible === false) return;
     if (within(item) && !TEXT_ENTRY.has(item.type)) {
       const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
     if (SCROLLERS.has(item.type)) outer.set(item, scroller);
-    for (const child of item.children ?? []) visit(child, SCROLLERS.has(item.type) ? item : scroller);
+    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller); }
   };
   visit(tree, null);
-  // A labelled leaf that encloses other text is a flattened container (a tab bar named "Main navigation"): its label
-  // is an accessible name, which the DOM's innerText leaves out as well.
-  const encloses = (outer, inner) => outer !== inner && inside(frameOf(inner), frameOf(outer));
-  const text = found.filter(item => LABELLED.has(item.type) || !found.some(other => encloses(item, other)));
   const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
+  const top = item => chain(item)[0] ?? item;
+  const placed = layers([...new Set(found.map(top))], parent, order);
+  // A labelled leaf that encloses other text of its own layer is a flattened container (a tab bar named "Main
+  // navigation"): its label is an accessible name, which the DOM's innerText leaves out as well. A drawer's item over a
+  // progress ring is not the ring's content.
+  const encloses = (outer, inner) => outer !== inner && inside(frameOf(inner), frameOf(outer)) && placed.get(top(outer)).level === placed.get(top(inner)).level;
+  const text = found.filter(item => LABELLED.has(item.type) || !found.some(other => encloses(item, other)));
   const ordered = (items, depth) => {
     const units = new Map();
     for (const item of items) { const key = chain(item)[depth] ?? item; units.set(key, [...(units.get(key) ?? []), item]); }
-    return readingOrder([...units.keys()]).flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
+    return stacked([...units.keys()], depth ? layers([...units.keys()], parent, order) : placed)
+      .flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
   };
   return joinText(ordered(text, 0));
+}
+
+const area = frame => Math.max(0, frame.width) * Math.max(0, frame.height);
+const contains = (outer, inner) => inner.x >= outer.x - 1 && inner.y >= outer.y - 1 && inner.x + inner.width <= outer.x + outer.width + 1 && inner.y + inner.height <= outer.y + outer.height + 1;
+/** Share of the smaller frame that the two frames have in common. */
+function overlap(a, b) {
+  const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x), height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  const smaller = Math.min(area(a), area(b));
+  return width > 0 && height > 0 && smaller > 0 ? width * height / smaller : 0;
+}
+
+/**
+ * Layers of reading units (leaves and scroll views), from the tree: where two units part ways, the branch that comes
+ * later is drawn above the earlier one when the units of the two branches cover at least half of the smaller extent, as
+ * in the DOM, where an overlay later in the document reads after the page underneath whatever its position. A branch
+ * wholly inside an earlier leaf (a badge on a button, a drawer's items on its flattened background) is that leaf's
+ * content and lies on the leaf's layer and in its overlay, not above it. Branches that only touch or graze stay on one
+ * layer, so plain layouts keep their geometric reading order. Maps each unit to { level, overlay, rank }: the overlay
+ * is the branch that lifted it, ranked by its position in the tree (`order`).
+ */
+function layers(units, parent, order) {
+  const path = new Map(units.map(unit => { const list = []; for (let node = unit; node; node = parent.get(node)) list.unshift(node); return [unit, list]; }));
+  const extents = new Map();
+  const extent = branch => {
+    if (!extents.has(branch)) {
+      const frames = units.filter(unit => path.get(unit).includes(branch)).map(frameOf);
+      const x = Math.min(...frames.map(f => f.x)), y = Math.min(...frames.map(f => f.y));
+      extents.set(branch, { x, y, width: Math.max(...frames.map(f => f.x + f.width)) - x, height: Math.max(...frames.map(f => f.y + f.height)) - y });
+    }
+    return extents.get(branch);
+  };
+  const parting = (unit, other) => {
+    const a = path.get(unit), b = path.get(other);
+    let at = 0;
+    while (a[at] === b[at] && at < a.length && at < b.length) at++;
+    return at < a.length && at < b.length ? [a[at], b[at]] : null;
+  };
+  const branch = (unit, other) => parting(unit, other)[0];
+  // How far above the earlier unit `other` the unit lies: 1 above it, 0 on its layer (its content), null unrelated.
+  const lift = (unit, other) => {
+    const pair = parting(unit, other);
+    if (!pair) return null;
+    const mine = extent(pair[0]), theirs = extent(pair[1]);
+    if (pair[1] === other && !SCROLLERS.has(other.type) && contains(frameOf(other), mine)) return 0;
+    return overlap(mine, theirs) >= 0.5 ? 1 : null;
+  };
+  const placed = new Map(), earlier = [];
+  for (const unit of [...units].sort((a, b) => order.get(a) - order.get(b))) {
+    let place = { level: 0, overlay: null, rank: 0 };
+    for (const other of earlier) {
+      const by = lift(unit, other);
+      if (by === null) continue;
+      const level = placed.get(other).level + by;
+      // On a tie the leaf the unit lies in wins: a drawer's items belong to the drawer, not to what they cover.
+      if (level < place.level || (level === place.level && (by || !level))) continue;
+      const overlay = by ? branch(unit, other) : placed.get(other).overlay;
+      place = { level, overlay, rank: order.get(overlay) ?? 0 };
+    }
+    placed.set(unit, place);
+    earlier.push(unit);
+  }
+  return placed;
+}
+
+/**
+ * Units in reading order by layer: the page underneath by geometry, then each layer above it, overlay by overlay in tree
+ * order (a tab bar before a drawer that comes later in the tree, even where they do not overlap), each by geometry.
+ */
+function stacked(units, placed) {
+  const groups = new Map();
+  for (const unit of units) {
+    const { level, rank } = placed.get(unit), id = `${level}:${rank}`;
+    groups.set(id, { level, rank, units: [...(groups.get(id)?.units ?? []), unit] });
+  }
+  return [...groups.values()].sort((a, b) => a.level - b.level || a.rank - b.rank).flatMap(group => readingOrder(group.units));
 }
 
 /**
