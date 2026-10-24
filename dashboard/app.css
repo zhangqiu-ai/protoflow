@@ -267,6 +267,35 @@ kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 
 .signed{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:14px;background:var(--mint-soft);color:var(--mint-ink);font-size:14px}
 .calm-note{display:flex;align-items:center;gap:10px;padding:14px 16px;border-radius:18px;border:1px dashed var(--line);font-size:13px;color:var(--muted);margin-top:auto}
 
+/* diagnosis: what to do about a known failure */
+.diag{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:16px;background:var(--sub);border:1px solid var(--line2)}
+.diag-h{display:flex;align-items:center;gap:8px;color:var(--ink)}
+.diag-h svg{flex:none;color:var(--amber)}
+.diag-h b{font-size:14.5px;font-weight:600;flex:1;min-width:0}
+.diag ol{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:5px;font-size:13.5px;color:var(--ink2)}
+.diag ol li::marker{color:var(--faint);font:12px var(--mono)}
+.diag code{font:12.5px var(--mono);padding:1px 6px;border-radius:6px;background:var(--line2);color:var(--ink);overflow-wrap:anywhere}
+.copy{display:inline-flex;align-items:center;gap:8px;flex:none;max-width:60%;padding:5px 6px 5px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--muted);transition:border-color .2s ease,color .2s ease}
+.copy code{background:none;padding:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.copy:hover{border-color:var(--mint-edge);color:var(--mint-ink)}
+.copy:active{transform:scale(.97)}
+
+/* inbox */
+.inbox{display:flex;flex-direction:column;gap:32px}
+.inbox-group{display:flex;flex-direction:column;gap:14px}
+.inbox-h{display:flex;align-items:center;gap:12px;color:var(--ink);padding:4px 6px;border-radius:16px;transition:background .2s ease}
+.inbox-h:hover{background:color-mix(in srgb,var(--line) 40%,transparent)}
+.inbox-h>div{display:flex;flex-direction:column;min-width:0;flex:1}
+.inbox-h b{font-size:18px;font-weight:600;letter-spacing:-.01em}
+.inbox-h small{font-size:12.5px;color:var(--muted)}
+.inbox-h .go{color:var(--faint);transition:transform .2s ease}
+.inbox-h:hover .go{transform:translateX(3px);color:var(--ink2)}
+.inbox-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(380px,100%),1fr));gap:16px;align-items:start}
+.notify{gap:8px;align-self:flex-end}
+.notify.on{border-color:var(--mint-edge);background:var(--mint-soft);color:var(--mint-ink)}
+.to-inbox{color:inherit;text-decoration:underline;text-decoration-color:var(--amber-edge);text-decoration-thickness:3px;text-underline-offset:8px;transition:text-decoration-color .2s ease}
+.to-inbox:hover{text-decoration-color:var(--amber)}
+
 /* evidence */
 .ev-h{display:flex;align-items:center;gap:18px}
 .ev-h>div{display:flex;flex-direction:column;gap:2px}
