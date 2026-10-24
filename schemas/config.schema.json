@@ -267,6 +267,28 @@
         "autoApprove": {
           "type": "boolean"
         },
+        "waivers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reviewers"
+          ],
+          "properties": {
+            "reviewers": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "not": {
+                  "pattern": "^ai:"
+                }
+              }
+            }
+          }
+        },
         "executor": {
           "type": "object",
           "additionalProperties": false,

@@ -26,6 +26,9 @@ repair → READY_FOR_REVIEW | NEEDS_REVIEW
 ├── contexts/<id>.json       # Context / integration / execution records
 ├── verifications/<id>.json  # checks + projectHash + artifactHashes
 ├── artifacts/<verify-id>/   # PNG 與 visual-review.html
+├── artifacts/<WVR-id>/      # 豁免申請時複製的場景截圖
+├── waivers/<WVR-id>.json    # 維護者豁免（正本在專案根目錄；runner 驗收前複製到 worktree）
+├── engine-limits/<CTX-id>.json # 修復代理標示的引擎限制（在 runner worktree）
 ├── reviews/<id>.json        # 人工決定、finding、證據綁定
 ├── repairs/<id>.json        # bounded attempts, blockingReason
 └── baselines/
@@ -68,6 +71,8 @@ repair → READY_FOR_REVIEW | NEEDS_REVIEW
 verification 包含 manifestId/hash、prototypeHash、project（全檔 hash 集）、Git HEAD、build/functional exitCode/stdout/stderr、visual scene/mapping checks、artifactHashes、changedDuringVerification，以及 hygiene。PASS 要求三種驗證全 PASS，mapped changes 全覆蓋，產品內容在 acceptance 期間穩定，且 hygiene PASS。
 
 `hygiene` 檢查被綁定的應用內容是否像工具快取或下載：Git 尚未追蹤的應用檔超過 1000 個，或任何應用檔超過 25 MiB，即 FAIL，`reason` 依目錄列出數量與大檔。實測中執行代理因沙箱不能寫入 `~/.gradle`，把 `GRADLE_USER_HOME` 設在 worktree 內，26,437 個快取檔被驗收並寫進交付 commit；此檢查讓它在驗證階段 FAIL，並在修復時把原因交給執行代理。git 忽略的檔案不屬於應用內容，不計入。非 Git 專案只檢查檔案大小。
+
+**維護者豁免**（[提案 0005](proposals/0005-maintainer-waivers.md)）：v2 錨點驗收在算出場景各層級後套用已核准的豁免。適用的層級（只限 `required` 的 `structure`、`tokens`、`layout`）保持 `status: "FAIL"` 與完整 `reasons`，另加 `waiver: { id, waiverHash }`；場景加 `waived: [{ tier, waiverId }]` 並可以是 `PASS`；`visual.tiers.<tier>` 摘要以關卡觀點計算，另加 `waived: <場景數>`。不適用的豁免記在場景的 `waiverSkipped: [{ id, tier, why }]`。用到豁免時，`visual.waivers` 與 verification 頂層 `waivers` 列出 `[{ id, target, scene, variant, tier, findings, reason, engineIssue }]`；沒有用到時不加這個欄位，所以 verification hash 與之前相同，而人工核准綁定 verification hash，也就綁定了「這次通過用了哪些豁免」。豁免紀錄的欄位見提案 3.1。
 
 Review 包含 status、reviewer、reviewedAt、notes、findings、manifestHash、verificationHash、projectHash。finding 範例：
 

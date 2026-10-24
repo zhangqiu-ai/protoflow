@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { syncDeliveries, deliveryStatus, assertDelivered, alignWorktreeToBase, rebaseDeliveries } from '../src/delivery.js';
+import { syncDeliveries, deliveryStatus, assertDelivered, alignWorktreeToBase, rebaseDeliveries, deliveryReport } from '../src/delivery.js';
 import { runOnce } from '../src/runner.js';
 import { sourceStatus, saveSourceState } from '../src/source.js';
 import { loadProgress, saveProgress } from '../src/streams.js';
@@ -906,6 +906,38 @@ test('FAKE provider: automated approval requires the separate gate and never use
   assert.equal(baseline.application.git, delivery.commit); assert.equal(baseline.application.verificationGit, report.git.head); assert.notEqual(baseline.application.git, report.git.head);
   assert.ok((await f.gh()).calls.every(call => !call.includes('--admin') && !(call[0] === 'pr' && call[1] === 'review')));
   delete f.config.adapters.independentReview; assert.equal((await syncDeliveries(f.root, f.config)).status, 'IDLE');
+});
+
+test('FAKE provider: under autoApprove a version that passed with maintainer waivers waits for a person, then merges with the human approval', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  // FAKE waiver usage recorded on the synthetic PASS (proposal 0005 D).
+  const waivers = [{ id: 'WVR-fixture-1', target: null, scene: 'nav.sidebar.initial', variant: null, tier: 'structure', findings: ['nav.sidebar: text "Inbox" vs "Settings"'], reason: 'FAKE engine limit', engineIssue: null }];
+  for (const dir of [f.root, f.worktree]) {
+    const file = path.join(dir, '.protoflow/verifications/VER-1.json');
+    await writeJson(file, { ...await readJson(file), waivers });
+  }
+  const blocked = await syncDeliveries(f.root, f.config);
+  assert.equal(blocked.status, 'BLOCKED', JSON.stringify(blocked));
+  assert.deepEqual([blocked.deliveries[0].status, blocked.deliveries[0].reasonCode], ['BLOCKED', 'WAIVER_APPROVAL_REQUIRED']);
+  assert.match(blocked.deliveries[0].error, /VER-1, waivers WVR-fixture-1\) passed with maintainer waivers; under policy\.autoApprove a person approves it on the dashboard/);
+  assert.ok(!(await f.gh()).calls.some(call => call[0] === 'pr' && call[1] === 'merge'));
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].approval, undefined);
+  // A person's approval of exactly this verification, made in the runner worktree and copied to the project as the dashboard does.
+  const review = await createReview(f.worktree, f.config, `git-${f.shas[0]}`, 'VER-1');
+  await decideReview(f.worktree, f.config, review.id, { status: 'approved', reviewer: 'FAKE fixture human', notes: 'FAKE waiver approval fixture only' });
+  await writeJson(path.join(f.root, `.protoflow/reviews/${review.id}.json`), await readJson(path.join(f.worktree, `.protoflow/reviews/${review.id}.json`)));
+  const merged = await syncDeliveries(f.root, f.config);
+  assert.equal(merged.status, 'PASS', JSON.stringify(merged));
+  const delivery = (await deliveryStatus(f.root)).deliveries[0];
+  assert.deepEqual([delivery.status, delivery.approval.kind, delivery.approval.reviewId, delivery.approval.reviewer, delivery.approval.waivers], ['MERGED', 'human', review.id, 'FAKE fixture human', ['WVR-fixture-1']]);
+  assert.ok(delivery.approval.independentReviewId);
+  const call = (await f.gh()).calls.find(item => item[0] === 'pr' && item[1] === 'comment') ?? [];
+  const comment = call[call.indexOf('--body') + 1] ?? '';
+  assert.match(comment, /PASS with waivers WVR-fixture-1 \(nav\.sidebar\.initial structure\)/);
+  assert.match(comment, /Acceptance: 0 passed, 1 passed with maintainer waivers/);
+  assert.match(comment, /Approval: \*\*human\*\* by FAKE fixture human/);
+  const report = await deliveryReport(f.root, f.config);
+  assert.deepEqual(report.deliveries[0].counts, { passed: 0, passedWithWaivers: 1, waivers: ['WVR-fixture-1'] });
 });
 
 test('FAKE provider: main/base delivery scope is blocked before committing application files', async t => {

@@ -10,7 +10,9 @@ test('a blocked version, a blocked issue fix and an issue for a maintainer reach
   assert.equal(notificationFor({ event: 'blocked', reasonCode: null, reason: 'x' }, 'app').subtitle, '版本阻塞：需要處理');
   assert.equal(notificationFor({ event: 'issue-blocked', reason: 'tests fail' }, 'app').subtitle, 'Issue 修復阻塞');
   assert.equal(notificationFor({ event: 'issue-triaged', number: 7, status: 'needs-human' }, 'app').subtitle, 'Issue #7 需要人決定');
-  for (const event of [{ event: 'issue-triaged', number: 7, status: 'planned' }, { event: 'verified', status: 'FAIL' }, { event: 'scanned' }]) assert.equal(notificationFor(event, 'app'), null);
+  assert.deepEqual(notificationFor({ event: 'waiver-requested', target: 'mobile', scene: 'nav.sidebar.initial', variant: 'ipad', tier: 'structure', findings: 2, waiverId: 'WVR-1' }, 'siyue'),
+    { title: 'ProtoFlow · siyue · mobile', subtitle: '豁免待核准', message: 'nav.sidebar.initial / ipad · structure：2 項發現，執行代理標示為引擎限制' });
+  for (const event of [{ event: 'issue-triaged', number: 7, status: 'planned' }, { event: 'verified', status: 'FAIL' }, { event: 'scanned' }, { event: 'waiver-applied' }, { event: 'waiver-request-failed' }]) assert.equal(notificationFor(event, 'app'), null);
 });
 
 test('macOS notifications pass their texts as osascript arguments and can be turned off', async () => {

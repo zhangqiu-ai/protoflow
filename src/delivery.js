@@ -189,6 +189,22 @@ export async function deliveryStatus(root, config = {}, target = null) {
   }
   return readJson(await projectPath(root, deliveryStatePath(config, target)), { schemaVersion: 1, deliveries: [] });
 }
+/** `delivery status` for people: each delivery counts its versions that passed outright and those that passed with waivers. */
+export async function deliveryReport(root, config = {}, target = null) {
+  if (isMultiTarget(config) && !target) {
+    const targets = {};
+    for (const item of config.targets) targets[item.id] = await deliveryReport(root, config, item.id);
+    return { schemaVersion: 1, targets };
+  }
+  const state = await deliveryStatus(root, config, target);
+  const entries = (await loadProgress(root, config, target).catch(() => ({ entries: [] }))).entries ?? [];
+  for (const delivery of state.deliveries ?? []) {
+    const versions = entries.filter(entry => (delivery.versions ?? []).includes(entry.manifestId) && entry.deliveryId === delivery.id);
+    const waived = await waivedVersions(root, versions);
+    delivery.counts = { passed: versions.length - waived.length, passedWithWaivers: waived.length, waivers: waived.flatMap(item => item.waivers) };
+  }
+  return state;
+}
 async function saveDelivery(root, config, target, state) { await writeJson(await projectPath(root, deliveryStatePath(config, target)), state); }
 
 /** A saved commit can precede its source link. Recover only the exact latest VER/manifest bound to that commit. */
@@ -385,6 +401,32 @@ async function copyRecord(worktree, root, kind, recordId) {
   await writeJson(await projectPath(root, `.protoflow/${kind}/${recordId}.json`), record);
 }
 
+/** A person's decided approval of this exact verification, recorded in the project (dashboard approvals land there). */
+async function humanApproval(root, verification) {
+  const directory = await projectPath(root, '.protoflow/reviews');
+  const names = await fs.readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  for (const name of names.filter(item => /^REV-[A-Za-z0-9-]+\.json$/.test(item)).sort().reverse()) {
+    const review = await readJson(path.join(directory, name), null);
+    if (review?.status === 'approved' && (review.reviewerKind ?? 'human') === 'human' && !String(review.reviewer ?? '').startsWith('ai:') && review.verificationId === verification.id && review.verificationHash === hash(verification)) return review;
+  }
+  return null;
+}
+/**
+ * Proposal 0005 D: the versions of a delivery whose accepted verification used maintainer waivers, each with the human
+ * approval it has (or null). Under policy.autoApprove such a version is never approved automatically.
+ */
+export async function waivedVersions(root, entries) {
+  const out = [];
+  for (const entry of entries) {
+    if (!/^VER-[A-Za-z0-9-]+$/.test(entry.verificationId ?? '')) continue;
+    const verification = await loadArtifact(root, 'verifications', entry.verificationId).catch(() => null);
+    if (!verification?.waivers?.length) continue;
+    const review = await humanApproval(root, verification);
+    out.push({ manifestId: entry.manifestId, verificationId: verification.id, waivers: verification.waivers.map(item => item.id), reviewId: review?.id ?? null, reviewer: review?.reviewer ?? null });
+  }
+  return out;
+}
+
 /** Automated approval of the newest accepted version, bound to its verification exactly like a human review. */
 async function approve(root, config, worktree, entry, independent) {
   // The verification carries its target, so the review checks that target's application hash.
@@ -446,8 +488,9 @@ async function assertPullRequestScope(worktree, independent, delivery) {
   return pr;
 }
 
-function summary(delivery, entries, config, target) {
-  const lines = entries.map(entry => `| \`${entry.sha.slice(0, 7)}\` | ${entry.manifestId} | ${entry.verificationId} | PASS |`);
+function summary(delivery, entries, config, target, waivers = {}) {
+  const lines = entries.map(entry => `| \`${entry.sha.slice(0, 7)}\` | ${entry.manifestId} | ${entry.verificationId} | ${waivers[entry.verificationId]?.length ? `PASS with waivers ${waivers[entry.verificationId].map(item => `${item.id} (${item.scene}${item.variant ? `/${item.variant}` : ''} ${item.tier})`).join(', ')}` : 'PASS'} |`);
+  const waived = entries.filter(entry => waivers[entry.verificationId]?.length).length;
   return [
     `### ProtoFlow delivery ${delivery.id}${target ? ` — target ${target}` : ''}`,
     '',
@@ -455,7 +498,10 @@ function summary(delivery, entries, config, target) {
     '|---|---|---|---|',
     ...lines,
     '',
-    delivery.approval?.reviewId
+    `Acceptance: ${entries.length - waived} passed, ${waived} passed with maintainer waivers (the waived findings are listed in each verification).`,
+    delivery.approval?.kind === 'human'
+      ? `Approval: **human** by ${delivery.approval.reviewer} (review ${delivery.approval.reviewId}), required because the version passed with maintainer waivers.`
+      : delivery.approval?.reviewId
       ? `Approval: **automated** by \`${AUTOMATED_REVIEWER}\` (review ${delivery.approval.reviewId}, baseline ${delivery.approval.baselineId}). No human reviewed this change.`
       : 'Approval: none recorded (policy.autoApprove is off); a human must review before merging.',
     `Application commit: ${delivery.commit}`,
@@ -597,9 +643,21 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       const independent = await assertIndependentReview(root, config, delivery.independentReviewId, { ...gateOptions, published: 'either' });
       if (delivery.approval && delivery.approval.independentReviewId !== independent.id && !revalidatingDelivery) { const error = new Error('Existing automated approval lacks this independent review; inspect it manually'); error.code = 'INDEPENDENT_REVIEW_BLOCKED'; throw error; }
       if (config.policy?.autoApprove && (!delivery.approval || revalidatingDelivery)) {
-        const entry = (await loadProgress(root, config, target)).entries.find(item => item.manifestId === delivery.versions.at(-1));
+        const entries = (await loadProgress(root, config, target)).entries.filter(item => delivery.versions.includes(item.manifestId));
+        const entry = entries.find(item => item.manifestId === delivery.versions.at(-1));
+        // A version that passed with a maintainer waiver needs a person's approval even under autoApprove.
+        const waived = await waivedVersions(root, entries);
+        const waiting = waived.filter(item => !item.reviewId);
+        if (waiting.length) {
+          const error = new Error(`${waiting.map(item => `${item.manifestId} (${item.verificationId}, waivers ${item.waivers.join(', ')})`).join('; ')} passed with maintainer waivers; under policy.autoApprove a person approves ${waiting.length === 1 ? 'it' : 'them'} on the dashboard before the delivery continues`);
+          error.code = 'INDEPENDENT_REVIEW_BLOCKED'; error.reasonCode = 'WAIVER_APPROVAL_REQUIRED'; throw error;
+        }
         if (delivery.approval) { delivery.approvalHistory ??= []; delivery.approvalHistory.push(delivery.approval); }
-        delivery.approval = await approve(root, config, worktree, entry, independent);
+        const human = waived.find(item => item.manifestId === entry.manifestId);
+        delivery.approval = human
+          ? { reviewId: human.reviewId, reviewer: human.reviewer, kind: 'human', independentReviewId: independent.id, waivers: human.waivers }
+          : await approve(root, config, worktree, entry, independent);
+        if (waived.length) delivery.approval.waivedVersions = waived;
         await saveDelivery(root, config, target, state);
       }
       if (!delivery.steps.pushedAt) {
@@ -636,7 +694,9 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
       if (!delivery.steps.commentedAt) {
         const entries = (await loadProgress(root, config, target)).entries.filter(entry => delivery.versions.includes(entry.manifestId));
         await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
-        const comment = await gh(worktree, repository, ['pr', 'comment', String(delivery.pr.number), '--body', summary(delivery, entries, config, target)]);
+        const waivers = {};
+        for (const entry of entries) waivers[entry.verificationId] = (await loadArtifact(root, 'verifications', entry.verificationId).catch(() => null))?.waivers ?? [];
+        const comment = await gh(worktree, repository, ['pr', 'comment', String(delivery.pr.number), '--body', summary(delivery, entries, config, target, waivers)]);
         if (comment.status !== 'PASS') throw ghFailure('gh pr comment', comment);
         delivery.steps.commentedAt = new Date().toISOString();
       }
@@ -672,15 +732,16 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
         await assertIndependentReview(root, config, independent.id, { ...gateOptions, published: true });
         delivery.status = 'PR_OPEN_MANUAL';
       }
-      delivery.error = null; delete delivery.retryable;
+      delivery.error = null; delete delivery.retryable; delete delivery.reasonCode;
     } catch (error) {
       delivery.status = error.code === 'INDEPENDENT_REVIEW_BLOCKED' ? 'BLOCKED' : 'FAIL'; delivery.error = error.message;
+      if (error.reasonCode) delivery.reasonCode = error.reasonCode; else delete delivery.reasonCode;
       // Network/5xx failures are recorded apart from review verdicts and binding drift.
       delivery.retryable = error.transient === true;
     }
     delivery.updatedAt = new Date().toISOString();
     await saveDelivery(root, config, target, state);
-    results.push({ id: delivery.id, status: delivery.status, versions: delivery.shas, commit: delivery.commit, pr: delivery.pr?.url ?? null, mergeCommit: delivery.mergeCommit ?? null, error: delivery.error ?? null, ...(delivery.error ? { retryable: delivery.retryable === true, independentReviewId: delivery.independentReviewId ?? null } : {}), ...(delivery.alignment ? { alignment: delivery.alignment } : {}) });
+    results.push({ id: delivery.id, status: delivery.status, versions: delivery.shas, commit: delivery.commit, pr: delivery.pr?.url ?? null, mergeCommit: delivery.mergeCommit ?? null, error: delivery.error ?? null, ...(delivery.error ? { retryable: delivery.retryable === true, independentReviewId: delivery.independentReviewId ?? null, ...(delivery.reasonCode && { reasonCode: delivery.reasonCode }) } : {}), ...(delivery.alignment ? { alignment: delivery.alignment } : {}) });
     // Later deliveries stack on this branch; keep order by stopping at the first failure.
     if (['FAIL', 'BLOCKED'].includes(delivery.status)) break;
   }

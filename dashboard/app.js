@@ -218,7 +218,8 @@ function consoleCard(streams) {
       : h('p.quiet', {}, '目前沒有代理在工作'));
 }
 // Most urgent first: the service, then blocked work, rejected reviews, merges and approvals, then issues.
-const URGENCY = { service: 0, 'blocked-version': 1, 'delivery-blocked': 1, 'review-rejected': 2, 'manual-merge': 3, review: 3, issue: 4 };
+const URGENCY = { service: 0, 'blocked-version': 1, 'delivery-blocked': 1, 'review-rejected': 2, waiver: 2, 'manual-merge': 3, review: 3, issue: 4 };
+const TIER_NAME = { structure: '結構', tokens: '配色', layout: '版面', visual: '視覺' };
 const KIND = { service: 'Runner 異常', 'blocked-version': '阻塞', 'delivery-blocked': '交付受阻', 'review-rejected': '審查未過', 'manual-merge': '可合併', review: '待核准', issue: 'Issue 等你' };
 const byUrgency = items => [...items].sort((a, b) => (URGENCY[a.kind] ?? 5) - (URGENCY[b.kind] ?? 5));
 /** Text with `code` spans, as nodes. */
@@ -263,8 +264,14 @@ function askCards(projectId, items, many) {
     if (item.kind === 'issue') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
       [item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null, diagnosis],
       [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
-    if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, `驗收 ${item.verificationId} 已通過`, null,
-      [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}。`, result: '已核准' }]);
+    if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, item.waivers ? `驗收 ${item.verificationId} 附豁免通過 ${item.waivers} 項，需要你核准` : `驗收 ${item.verificationId} 已通過`, null,
+      [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}${item.waivers ? `，其中 ${item.waivers} 項是附豁免通過` : ''}。`, result: '已核准' }]);
+    if (item.kind === 'waiver') return card(item, ICON.alert, `${where}豁免待核准：${item.title}`, `${item.reason}${item.engineIssue ? ` · ${item.engineIssue}` : ''}`,
+      [h('div.waiver-shots', {}, [['prototype', '原型'], ['application', 'App']].map(([key, label]) => h('figure', {}, item[key] ? h('img', { src: fileUrl(projectId, item[key]), alt: `${label}截圖`, loading: 'lazy' }) : h('div.miss', {}, '無截圖'), h('figcaption', {}, label)))),
+        h('ul.findings', {}, item.findings.map(finding => h('li', { title: finding }, finding))),
+        h('small.muted', {}, `${TIER_NAME[item.tier] ?? ''}層級 ${item.findingCount} 項發現 · 驗收 ${item.verificationId} · 申請者 ${item.requestedBy?.name ?? ''}`)],
+      [{ label: '核准豁免', body: { action: 'approve-waiver', waiverId: item.waiverId }, question: `確定以你的名字核准這個豁免？只涵蓋版本 ${item.manifestId} 的這 ${item.findingCount} 項發現；發現一變或原型改版就失效。`, result: '已核准豁免' },
+        { label: '拒絕', body: { action: 'reject-waiver', waiverId: item.waiverId }, question: '確定拒絕這個豁免？版本會繼續因這些發現而失敗。', result: '已拒絕' }]);
     if (item.kind === 'review-rejected') return card(item, ICON.review, `${where}${item.title} 審查未過`, item.reason,
       h('ul.findings', {}, item.findings.map(finding => h(`li.${finding.severity}`, { title: finding.description }, finding.file ? h('code', {}, finding.file.split('/').pop()) : null, finding.description))),
       [{ label: '退回重修', body: { action: 'request-changes', target: item.target, deliveryId: item.deliveryId }, question: `同意獨立審查的 ${item.findings.length} 項發現，把這個版本退回給執行代理重修？會以你的名字記錄「要求修改」，綁定這次驗收。`, result: '已退回 · 下一輪重修' }]);
@@ -323,7 +330,7 @@ function viewer(projectId, scenes, start) {
   const draw = () => {
     const scene = scenes[index];
     const image = (file, label) => file ? h('img', { src: fileUrl(projectId, file), alt: `${label}截圖`, draggable: 'false' }) : h('div.miss', {}, '無截圖');
-    const tiers = TIERS.map(([tier, label]) => { const status = scene.tiers[tier]; const ref = tier === 'visual' && status !== 'NOT_RUN'; return h(`span.pill${ref ? '' : (STATUS[status] ?? [])[1] ? `.${STATUS[status][1]}` : ''}`, {}, `${label} ${ref ? '參考' : (STATUS[status] ?? [status])[0]}`); });
+    const tiers = TIERS.map(([tier, label]) => { const status = scene.tiers[tier]; const ref = tier === 'visual' && status !== 'NOT_RUN'; if (scene.waived?.[tier]) return h('span.pill.waived', { title: scene.waived[tier] }, `${label} 附豁免通過`); return h(`span.pill${ref ? '' : (STATUS[status] ?? [])[1] ? `.${STATUS[status][1]}` : ''}`, {}, `${label} ${ref ? '參考' : (STATUS[status] ?? [status])[0]}`); });
     let stage;
     if (mode === 'side') stage = h('div.v-side', {}, h('figure', {}, image(scene.prototype, '原型'), h('figcaption', {}, '原型')), h('figure', {}, image(scene.application, 'App'), h('figcaption', {}, 'App')));
     else {
@@ -361,6 +368,7 @@ function evidence(snapshot) {
   const variant = variants.includes(selected[vkey]) ? selected[vkey] : variants[0];
   const scenes = report.scenes.filter(scene => (scene.variant ?? '') === variant);
   const pass = scenes.filter(scene => scene.status === 'PASS').length;
+  const waivedCount = scenes.filter(scene => scene.status === 'PASS' && Object.keys(scene.waived ?? {}).length).length;
   const c = 2 * Math.PI * 26, fraction = scenes.length ? pass / scenes.length : 0;
   const frame = frameOf(snapshot.project, current, variant);
   const shot = (file, label, open) => h('figure', {}, h(`button.device.${frame}`, { type: 'button', onclick: open, 'aria-label': `放大查看${label}` }, h('div.screen', {}, file ? h('img', { src: fileUrl(snapshot.project.id, file), alt: `${label}截圖`, loading: 'lazy' }) : h('div.miss', {}, '無截圖'))), h('figcaption', {}, label));
@@ -371,7 +379,7 @@ function evidence(snapshot) {
         s('circle', { cx: 32, cy: 32, r: 26, fill: 'none', stroke: 'var(--line2)', 'stroke-width': 6 }),
         s('circle.arc', { cx: 32, cy: 32, r: 26, fill: 'none', stroke: fraction === 1 ? 'var(--mint)' : fraction ? 'var(--mint)' : 'var(--bad)', 'stroke-width': 6, 'stroke-linecap': 'round', 'stroke-dasharray': c.toFixed(1), 'stroke-dashoffset': (c * (1 - fraction)).toFixed(1), transform: 'rotate(-90 32 32)', style: `--c:${c.toFixed(1)}`, class: 'gauge-arc' })),
         h('b', {}, `${Math.round(100 * fraction)}%`)),
-      h('div', {}, h('b', {}, '原型 ↔ App'), h('small', {}, `${pass} / ${scenes.length} 場景 · `, h('span.mono', {}, report.id)))),
+      h('div', {}, h('b', {}, '原型 ↔ App'), h('small', {}, `${pass} / ${scenes.length} 場景${waivedCount ? `（其中 ${waivedCount} 個附豁免）` : ''} · `, h('span.mono', {}, report.id)))),
       h('div.checks', {}, withVer.length > 1 ? segs(withVer, stream => stream === current, stream => { selected.ver = String(stream.target); }, stream => targetName(stream.target)) : null,
         variants.length > 1 ? segs(variants, name => name === variant, name => { selected[vkey] = name; }, name => name) : null)),
     h('div.checks', {}, [['建置', report.variants?.[variant] ?? report.build], ['功能測試', report.functional], ['比對', report.visual ?? report.status]].map(([label, status]) => h(`span.pill${(STATUS[status] ?? [])[1] ? `.${STATUS[status][1]}` : ''}`, { title: status }, `${label} ${(STATUS[status] ?? [status])[0]}`))),
@@ -379,7 +387,8 @@ function evidence(snapshot) {
       h('div.pair', {}, shot(scene.prototype, '原型', () => viewer(snapshot.project.id, scenes, index)), shot(scene.application, 'App', () => viewer(snapshot.project.id, scenes, index))),
       h('div.scene-f', {}, h('b', { title: scene.id }, scene.id),
         h('span.tiers', { role: 'img', 'aria-label': TIERS.map(([tier, label]) => `${label} ${(STATUS[scene.tiers[tier]] ?? [scene.tiers[tier]])[0]}`).join('，') },
-          TIERS.map(([tier, label]) => h(`i.${tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? 'ref' : scene.tiers[tier]}`, { title: `${label}：${tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? '參考' : (STATUS[scene.tiers[tier]] ?? [scene.tiers[tier]])[0]}` })))),
+          TIERS.map(([tier, label]) => h(`i.${scene.waived?.[tier] ? 'waived' : tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? 'ref' : scene.tiers[tier]}`, { title: `${label}：${scene.waived?.[tier] ? `附豁免通過（${scene.waived[tier]}）` : tier === 'visual' && scene.tiers[tier] !== 'NOT_RUN' ? '參考' : (STATUS[scene.tiers[tier]] ?? [scene.tiers[tier]])[0]}` }))),
+        Object.keys(scene.waived ?? {}).length ? h('span.pill.waived', { title: Object.values(scene.waived).join(', ') }, '附豁免') : null),
       scene.reasons.length ? h('ul.why', {}, scene.reasons.map(reason => h('li', {}, reason))) : null))) : h('p.empty', {}, '這個版本沒有比對場景'));
 }
 function sparkline(events) {
@@ -398,7 +407,7 @@ function lists(snapshot) {
   const eventTone = event => /fail|block|error|stop/i.test(`${event.event}${event.status ?? ''}`) ? 'bad' : /merged|pass|deliver|complete|done/i.test(`${event.event}${event.status ?? ''}`) ? 'ok' : /human|manual|needs/i.test(`${event.event}${event.status ?? ''}`) ? 'warn' : 'ink';
   return h('div.quad', {},
     panel('版本', null, versions.length ? h('ol.timeline', {}, versions.slice(0, 8).map(version => h(`li.${version.status === 'RUNNING' ? 'now' : TONE(version.status) || 'idle'}`, {},
-      h('div', {}, h('b', {}, `${many ? `${targetName(version.target)} · ` : ''}${version.sha?.slice(0, 7) ?? version.manifestId}`), h('span', { title: version.summary ?? version.error ?? '' }, version.summary ?? version.error ?? '')), pill(version.status)))) : h('p.empty', {}, '還沒有原型版本')),
+      h('div', {}, h('b', {}, `${many ? `${targetName(version.target)} · ` : ''}${version.sha?.slice(0, 7) ?? version.manifestId}`), h('span', { title: version.summary ?? version.error ?? '' }, version.summary ?? version.error ?? '')), version.waivers ? h('span.pill.waived', { title: '這個版本的驗收用到維護者豁免' }, `附豁免通過 ${version.waivers} 項`) : pill(version.status)))) : h('p.empty', {}, '還沒有原型版本')),
     panel('交付', null, deliveries.length ? h('ul.feed', {}, deliveries.slice(0, 8).map(delivery => h('li', {}, h('time', {}, clock(delivery.updatedAt)), h(`i.${delivery.manualMerge ? 'ok' : TONE(delivery.status) || 'ink'}`),
       h('span', { title: delivery.error ?? '' }, `${many ? `${targetName(delivery.target)} · ` : ''}${(STATUS[delivery.manualMerge ? 'MERGED' : delivery.status] ?? [delivery.status])[0]}`),
       delivery.pr ? h('a', { href: delivery.pr, target: '_blank', rel: 'noopener' }, `PR #${delivery.prNumber}`) : h('span')))) : h('p.empty', {}, '還沒有交付')),
@@ -407,6 +416,23 @@ function lists(snapshot) {
       h('span', { title: issue.title ?? '' }, issue.title ?? ''), h('span.muted', {}, (ISSUE[issue.status] ?? [issue.status])[0])))) : h('p.empty', {}, '沒有 Issue')),
     panel('動態', sparkline(snapshot.events), snapshot.events.length ? h('ul.feed', {}, snapshot.events.slice(0, 8).map(event => h('li', {}, h('time', {}, clock(event.at)), h(`i.${eventTone(event)}`),
       h('span', { title: event.reason ?? event.error ?? '' }, `${event.target && many ? `${event.target} · ` : ''}${event.event}${event.number ? ` #${event.number}` : ''}${event.status ? ` · ${event.status}` : ''}`), h('span')))) : h('p.empty', {}, '還沒有事件')));
+}
+/** Proposal 0005: approved waivers (a maintainer may revoke one) and recent decisions. */
+function waiverPanel(snapshot) {
+  const list = (snapshot.waivers?.waivers ?? []).filter(waiver => waiver.status !== 'requested').slice(0, 8);
+  if (!snapshot.waivers?.enabled || !list.length) return null;
+  const revoke = async (button, waiver) => {
+    if (!confirm(`確定撤回豁免 ${waiver.id}？下一次驗收就不再套用；已經用它通過的驗收保留原紀錄。`)) return;
+    button.disabled = true;
+    try { await act(snapshot.project.id, { action: 'revoke-waiver', waiverId: waiver.id }, '撤回豁免'); }
+    catch (error) { toast(`撤回豁免失敗：${error.message}`, true); button.disabled = false; }
+  };
+  const LABEL = { approved: ['已核准', 'waived'], rejected: ['已拒絕', ''], revoked: ['已撤回', ''] };
+  return h('section.panel.rise', { 'aria-label': '維護者豁免' }, h('div.panel-h', {}, h('span.label', {}, '維護者豁免'), h('small.muted', {}, `核准者：${snapshot.waivers.reviewers.join('、')}`)),
+    h('ul.waivers', {}, list.map(waiver => h('li', {}, h(`span.pill${LABEL[waiver.status]?.[1] ? `.${LABEL[waiver.status][1]}` : ''}`, {}, LABEL[waiver.status]?.[0] ?? waiver.status),
+      h('span', { title: waiver.findings.join('\n') }, `${waiver.scene}${waiver.variant ? ` / ${waiver.variant}` : ''} · ${TIER_NAME[waiver.tier] ?? waiver.tier} · ${waiver.findingCount} 項 · ${waiver.reason}`),
+      h('small.mono.muted', {}, waiver.id),
+      waiver.status === 'approved' ? h('button.btn', { type: 'button', onclick: event => revoke(event.currentTarget, waiver) }, '撤回') : null))));
 }
 let lastProject = null;
 function renderProject(snapshot) {
@@ -425,6 +451,7 @@ function renderProject(snapshot) {
     pipelines(snapshot.streams),
     h('section.split', {}, consoleCard(snapshot.streams), decisions(snapshot)),
     evidence(snapshot) ?? '',
+    waiverPanel(snapshot) ?? '',
     lists(snapshot));
 }
 const rerender = () => { if (lastProject) renderProject(lastProject); else if (view() === 'inbox' && overviewData) renderInbox(overviewData); };

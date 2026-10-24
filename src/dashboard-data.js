@@ -9,6 +9,7 @@ import { recordedVerdict } from './delivery-review.js';
 import { HEARTBEAT, EVENTS } from './runner.js';
 import { serviceStatus } from './runner-service.js';
 import { diagnose } from './dashboard-diagnosis.js';
+import { listWaivers, waiverReviewers } from './waivers.js';
 
 /**
  * Proposal 0004: everything the dashboard shows, read from a project's own engine state. Nothing here writes to a
@@ -127,10 +128,12 @@ export function verificationSummary(report) {
     const shot = name => dir && images.includes(`${dir}/${name}`) ? `${dir}/${name}` : null;
     const tiers = Object.fromEntries(['structure', 'tokens', 'layout', 'visual'].map(tier => [tier, scene.tiers?.[tier]?.status ?? 'NOT_RUN']));
     const reasons = ['structure', 'tokens', 'layout'].flatMap(tier => (scene.tiers?.[tier]?.reasons ?? []).slice(0, 2).map(reason => `${tier}: ${short(reason, 140)}`));
-    return { id: scene.id, screen: scene.screen, state: scene.state, variant: scene.variant ?? null, status: scene.status, tiers, reasons: [...(scene.reason ? [short(scene.reason, 140)] : []), ...reasons].slice(0, 3), prototype: shot('prototype.png'), application: shot('application.png') };
+    // Proposal 0005: a tier that failed but passed the gate under a maintainer waiver is shown apart from PASS and FAIL.
+    const waived = Object.fromEntries(['structure', 'tokens', 'layout'].filter(tier => scene.tiers?.[tier]?.waiver).map(tier => [tier, scene.tiers[tier].waiver.id]));
+    return { id: scene.id, screen: scene.screen, state: scene.state, variant: scene.variant ?? null, status: scene.status, tiers, waived, waiverSkipped: (scene.waiverSkipped ?? []).map(item => ({ id: item.id, tier: item.tier, why: short(item.why, 200) })), reasons: [...(scene.reason ? [short(scene.reason, 140)] : []), ...reasons].slice(0, 3), prototype: shot('prototype.png'), application: shot('application.png') };
   });
   const variants = report.build?.variants ? Object.fromEntries(Object.entries(report.build.variants).map(([name, result]) => [name, result.status])) : null;
-  return { id: report.id, createdAt: report.createdAt, manifestId: report.manifestId, status: report.status, build: report.build?.status ?? 'NOT_RUN', variants, functional: report.functional?.status ?? 'NOT_RUN', visual: report.visual?.status ?? 'NOT_RUN', scenes };
+  return { id: report.id, createdAt: report.createdAt, manifestId: report.manifestId, status: report.status, waivers: (report.waivers ?? []).map(item => ({ id: item.id, scene: item.scene, variant: item.variant ?? null, tier: item.tier, reason: short(item.reason ?? '', 300), engineIssue: item.engineIssue ?? null })), build: report.build?.status ?? 'NOT_RUN', variants, functional: report.functional?.status ?? 'NOT_RUN', visual: report.visual?.status ?? 'NOT_RUN', scenes };
 }
 
 async function streamSnapshot(root, config, stream, events) {
@@ -162,7 +165,7 @@ async function streamSnapshot(root, config, stream, events) {
   const versions = [];
   for (const entry of entries.slice(-12).reverse()) {
     const manifest = await manifestOf(entry.manifestId);
-    versions.push({ manifestId: entry.manifestId, sha: entry.sha, ordinal: entry.ordinal ?? null, summary: manifest?.summary ?? manifest?.source?.message ?? null, level: manifest?.level ?? null, status: entry.status, attempts: entry.attempts?.length ?? 0, planId: entry.planId ?? null, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, completedAt: entry.completedAt ?? null, error: entry.error ? short(entry.error, 300) : null });
+    versions.push({ manifestId: entry.manifestId, sha: entry.sha, ordinal: entry.ordinal ?? null, summary: manifest?.summary ?? manifest?.source?.message ?? null, level: manifest?.level ?? null, status: entry.status, attempts: entry.attempts?.length ?? 0, planId: entry.planId ?? null, verificationId: entry.verificationId ?? null, waivers: entry.verificationId ? (await latestVerification([root, runner?.worktree].filter(Boolean), entry.verificationId))?.report.waivers?.length ?? 0 : 0, deliveryId: entry.deliveryId ?? null, completedAt: entry.completedAt ?? null, error: entry.error ? short(entry.error, 300) : null });
   }
   const deliveries = (await deliveryStatus(root, config, stream).catch(() => ({ deliveries: [] }))).deliveries.slice(-8).reverse().map(delivery => ({ id: delivery.id, status: delivery.status, pr: delivery.pr?.url ?? null, prNumber: delivery.pr?.number ?? null, commit: delivery.commit ?? null, mergeCommit: delivery.mergeCommit ?? null, versions: delivery.versions ?? [], error: delivery.error ? short(delivery.error, 300) : null, manualMerge: delivery.manualMerge ?? null, independentReviewId: delivery.independentReviewId ?? null, updatedAt: delivery.updatedAt ?? delivery.createdAt ?? null }));
   // A delivery the independent review rejected carries its findings, so a person can send the version back for repair.
@@ -198,7 +201,8 @@ async function issueSummaries(root) {
 }
 
 async function pendingReviews(root, config, streams) {
-  if (config.policy?.autoApprove) return [];
+  // Under autoApprove only a version that passed with maintainer waivers waits for a person (proposal 0005 D).
+  const waivedOnly = config.policy?.autoApprove === true;
   const reviews = await fs.readdir(path.join(root, '.protoflow/reviews')).catch(() => []);
   const approved = new Set();
   for (const name of reviews.filter(item => item.endsWith('.json'))) {
@@ -208,11 +212,24 @@ async function pendingReviews(root, config, streams) {
   }
   // A version whose delivery the independent review rejected is not offered for approval: it goes back for repair.
   const rejected = stream => new Set(stream.deliveries.filter(delivery => delivery.review?.status === 'FAIL').flatMap(delivery => delivery.versions));
-  return streams.flatMap(stream => { const sentBack = rejected(stream); return stream.versions.filter(version => version.status === 'PASS' && version.verificationId && !approved.has(version.verificationId) && !sentBack.has(version.manifestId)).map(version => ({ ...version, target: stream.target })); });
+  return streams.flatMap(stream => { const sentBack = rejected(stream); return stream.versions.filter(version => version.status === 'PASS' && version.verificationId && !approved.has(version.verificationId) && !sentBack.has(version.manifestId) && (!waivedOnly || version.waivers > 0)).map(version => ({ ...version, target: stream.target })); });
+}
+
+/** Proposal 0005: the project's waivers for the dashboard; requests wait for a reviewer in policy.waivers.reviewers. */
+async function waiverSummaries(root, config) {
+  const reviewers = waiverReviewers(config);
+  if (!reviewers?.length) return { enabled: false, reviewers: [], waivers: [] };
+  const waivers = (await listWaivers(root).catch(() => [])).slice(-40).reverse().map(waiver => ({
+    id: waiver.id, status: waiver.status, target: waiver.target ?? null, scene: waiver.scene, variant: waiver.variant ?? null, tier: waiver.tier, manifestId: waiver.manifestId, verificationId: waiver.verificationId,
+    findings: waiver.findings.slice(0, 20).map(item => short(item, 400)), findingCount: waiver.findings.length, reason: short(waiver.reason ?? '', 600), engineIssue: waiver.engineIssue ?? null,
+    requestedBy: waiver.requestedBy, requestedAt: waiver.requestedAt, decision: waiver.decision ?? null, revocation: waiver.revocation ?? null,
+    prototype: waiver.evidence?.find(file => file.endsWith('/prototype.png')) ?? null, application: waiver.evidence?.find(file => file.endsWith('/application.png')) ?? null
+  }));
+  return { enabled: true, reviewers, waivers };
 }
 
 /** What needs a person: blocked versions, manual merges, issues handed to a person, reviews and service health. */
-function attention({ streams, issues, reviews, service, config }) {
+function attention({ streams, issues, reviews, service, config, waivers }) {
   const items = [];
   for (const stream of streams) {
     if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, reasonCode: stream.current.reasonCode, since: stream.current.blockedAt, actions: ['retry'] });
@@ -228,7 +245,8 @@ function attention({ streams, issues, reviews, service, config }) {
   for (const issue of issues) {
     if (['needs-human', 'blocked', 'rejected'].includes(issue.status)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, actions: ['handback'] });
   }
-  for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, since: review.completedAt, actions: ['approve'] });
+  for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, waivers: review.waivers ?? 0, since: review.completedAt, actions: ['approve'] });
+  for (const waiver of waivers?.waivers ?? []) if (waiver.status === 'requested') items.push({ kind: 'waiver', target: waiver.target, waiverId: waiver.id, title: `${waiver.scene}${waiver.variant ? ` / ${waiver.variant}` : ''} · ${waiver.tier}`, reason: waiver.reason, engineIssue: waiver.engineIssue, findings: waiver.findings, findingCount: waiver.findingCount, requestedBy: waiver.requestedBy, manifestId: waiver.manifestId, verificationId: waiver.verificationId, prototype: waiver.prototype, application: waiver.application, since: waiver.requestedAt, actions: ['approve-waiver', 'reject-waiver'] });
   if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
   // A blocked item says what to do about it: by its runner reasonCode first, else when its reason is a known failure.
   for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked') item.diagnosis = diagnose(item.reason, item.reasonCode);
@@ -254,6 +272,7 @@ export async function dashboardSnapshot(root, { service = process.platform === '
   for (const stream of streamTargets(config)) streams.push(await streamSnapshot(real, config, stream, events));
   const issues = await issueSummaries(real);
   const reviews = await pendingReviews(real, config, streams);
+  const waivers = await waiverSummaries(real, config);
   const heartbeat = await readJson(path.join(real, HEARTBEAT), null);
   // A caller polling many projects passes the service health it already knows (launchctl is a subprocess).
   const health = knownHealth !== undefined ? knownHealth : service ? await serviceStatus(real).catch(error => ({ status: 'UNKNOWN', reason: error.message })) : null;
@@ -263,8 +282,8 @@ export async function dashboardSnapshot(root, { service = process.platform === '
     project: { id: await projectId(real), root: real, name: config.dashboard?.name ?? path.basename(real), targets: (config.targets ?? [{ id: 'application', platform: 'web' }]).map(target => ({ id: target.id, platform: target.platform })), delivery: config.runner?.delivery ? { baseBranch: config.runner.delivery.baseBranch, merge: config.runner.delivery.merge ?? 'auto' } : null, autoApprove: config.policy?.autoApprove === true, issues: config.issues?.enabled === true },
     roles: roles(config),
     service: { status: summary.status, pid: summary.pid ?? summary.heartbeat?.pid ?? null, version: summary.heartbeat?.version ?? null, beatAgeSeconds: summary.beatAgeSeconds ?? null, failingPasses: summary.heartbeat?.failingPasses ?? 0, lastFailure: summary.heartbeat?.lastFailure ?? null, reason: summary.reason ?? null },
-    streams, issues, adr: await adrStatus(real, config),
-    attention: attention({ streams, issues, reviews, service: summary, config }),
+    streams, issues, adr: await adrStatus(real, config), waivers,
+    attention: attention({ streams, issues, reviews, service: summary, config, waivers }),
     events: events.slice(-eventCount).reverse()
   };
 }

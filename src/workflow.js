@@ -272,7 +272,7 @@ export async function executeContext(root, config, contextId, { execute = false,
   });
   const request = {
     ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
-    repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }) },
+    repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }), engineLimits: `.protoflow/engine-limits/${contextId}.json` },
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
@@ -353,7 +353,7 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   const hygiene = await applicationHygiene(root, after.files);
   const checks = [build.status, functional.status, visual.status, hygiene.status];
   const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(environment && status === 'NOT_RUN' && { reasonCode: 'environment', environment }) };
+  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(visual.waivers?.length && { waivers: visual.waivers }), ...(environment && status === 'NOT_RUN' && { reasonCode: 'environment', environment }) };
   // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
   if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
   return persist(root, 'verifications', record);

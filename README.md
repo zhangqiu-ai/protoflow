@@ -100,6 +100,7 @@ protoflow install --project /path/to/app
 - **動態內容**：`data-pf-text="dynamic"` 標記的錨點只檢查存在，文字不比對，也不從祖先容器文字比對；它的 T2 取樣顏色與水平位置、寬度不比對（內容決定寬度），只比垂直位置與高度；動態內容的高度差會帶動下方錨點，下方錨點在原位或扣掉這個高度差後相符都算通過（固定在底部的按鈕不隨內容移動）。沒有錨點的動態文字（共用介面裡的未讀徽章）可在原型元素上加 `data-pf-text="dynamic"`，或在設定 `anchors.dynamicText` 列出 CSS selector，不必改原型；兩者都從錨點文字中排除。
 - **原生比對**：文字比對忽略單獨的分隔符號（`·`、`•`、`—` 等），因為 iOS 合併標籤會省略它們；React Native 攤平後，包住其他文字的具名容器（例如名為「Main navigation」的分頁列）的標籤視為無障礙名稱，不算可見文字。T2 取樣只在兩邊的主色各占元素至少一半時才比對；漸層、開關的軌道與圓鈕沒有穩定主色，不取樣。
 - **變體與差異**：同一份程式碼跑在多個平台（React Native、Expo、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
+- **維護者豁免**（[提案 0005](docs/proposals/0005-maintainer-waivers.md)）：引擎限制短期修不好時，可以申請只涵蓋「一個場景 × 一個 T1–T3 層級（× 一個變體）× 一個原型版本」的豁免，綁定那次驗收的發現全文；需設定 `policy.waivers.reviewers`，由列在其中的人在儀表板核准。被豁免的層級照常比對並保留 FAIL 與發現，只有版本關卡不看它；發現一變、原型改版或撤回就失效。T4 視覺永遠不能豁免。修復代理可在 `.protoflow/engine-limits/` 標示引擎限制，同樣的發現連續失敗時 runner 自動申請（不會自動核准）；`autoApprove` 專案用到豁免的版本仍要人工核准。
 - **多目標**：`targets` 可以列出多個平台，各有獨立的 `root`、進度、worktree 與交付分支，一個 target 阻塞不影響其他 target。`release.requireTargets` 讓 `queue` 回報所有必要 target 都已完成的最新版本。多目標時用 `--target <id>` 指定命令作用的 target。
 - **工具**：`anchors lint`、`anchors suggest --patch-file`、`contract show`，以及從 v1 遷移的 `migrate anchors`（只產生草稿，不套用）。
 
@@ -198,7 +199,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 3. `policy.autoApprove: true` 時，才建立 `reviewerKind: automated` 的 Review 與 Baseline。這不能代替真人 ADR 或 GitHub approval。
 4. 推送到專用交付分支（多目標時為 `<branch>/<id>`），重用或建立以 `baseBranch`（任何分支，不限 `main`）為目標的 PR，並留言證據。`prBodyTrailers` 讓 PR 正文帶固定標記行（例如 `OpenSpec-Change: <id>`），每個 key 恰好一行，重用的 PR 也會更正，見 [PR 正文附加行](docs/git-runner.md#pr-正文附加行prbodytrailers)。`merge: "auto"` 以 `--match-head-commit` 合併；`"manual"` 留給人合併，可在儀表板或直接在 GitHub 合併；`delivery sync` 與 `runner rebase` 會向 GitHub 查詢並記錄已合併的 PR。不使用 `--admin`，也不強推。
 
-在 `autoApprove` 下，審查 FAIL 且附 findings 時，Runner 會自動記錄模型拒收並重開版本修復（每版最多 3 次）。因暫時性網路故障而 BLOCKED 的審查會自動重新審查；審查判斷本身永不重擲。GitHub 的只讀請求遇到暫時性錯誤會原地重試（`PROTOFLOW_NETWORK_RETRIES`，預設 2）。
+在 `autoApprove` 下，驗收用到維護者豁免的版本不會自動核准：交付停在 BLOCKED（`WAIVER_APPROVAL_REQUIRED`），等人在儀表板核准那份驗收。審查 FAIL 且附 findings 時，Runner 會自動記錄模型拒收並重開版本修復（每版最多 3 次）。因暫時性網路故障而 BLOCKED 的審查會自動重新審查；審查判斷本身永不重擲。GitHub 的只讀請求遇到暫時性錯誤會原地重試（`PROTOFLOW_NETWORK_RETRIES`，預設 2）。
 
 需要人工介入時，用 `delivery sync --retry-review --delivery DLV-… --review AIR-…` 明確取得新的審查。`gh` 必須已登入，且對目標 repo 有寫入權。細節見 [自動交付](docs/git-runner.md#自動交付commit--pr--合併) 與 [獨立 AI review gate](docs/independent-review.md)。
 
@@ -206,7 +207,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 ## 儀表板（提案 0004）
 
-`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：每頁左側的側邊欄列出所有專案的階段與待你數量，可點選或以 ⌥↑↓ 直接切換、收合成圖示；「等你」收件匣集中所有專案需要你的事，阻塞原因可辨識時附上診斷與修法（例如登入失效時要執行的命令），分頁標題顯示待辦數，也可開啟桌面通知；圓環與管線呈現各 target 的階段，總覽卡片即時顯示進行中的版本、階段與代理最新動作，終端機即時顯示執行代理正在做的事（讀檔、編輯、命令），原型與 App 截圖並排放在仿真機框、可點開大圖並排或疊圖比對，另有角色模型、Issue、交付與事件；淺色／深色與手機寬度皆可用。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、把獨立審查否決的版本帶著發現退回重修、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
+`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：每頁左側的側邊欄列出所有專案的階段與待你數量，可點選或以 ⌥↑↓ 直接切換、收合成圖示；「等你」收件匣集中所有專案需要你的事，阻塞原因可辨識時附上診斷與修法（例如登入失效時要執行的命令），分頁標題顯示待辦數，也可開啟桌面通知；圓環與管線呈現各 target 的階段，總覽卡片即時顯示進行中的版本、階段與代理最新動作，終端機即時顯示執行代理正在做的事（讀檔、編輯、命令），原型與 App 截圖並排放在仿真機框、可點開大圖並排或疊圖比對，另有角色模型、Issue、交付與事件；淺色／深色與手機寬度皆可用。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、把獨立審查否決的版本帶著發現退回重修、重試阻塞的版本、核准／拒絕／撤回維護者豁免（附那次驗收的截圖對照與發現全文；只有列在 `policy.waivers.reviewers` 的人能決定）；附豁免通過的層級以另一個顏色標示，與一般通過分開。每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
 
 ## Claude 規劃與驗收、GitHub Issues（提案 0003）
 
@@ -242,7 +243,8 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `supersede` / `reclassify` / `rebase` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、以後續版本取代、以目前引擎重新分級、在移動後的基底上重新開始、綁定新設定、回收 worktree |
 | `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（執行中每分鐘心跳；連續失敗時為 DEGRADED，心跳停止 5 分鐘以上為 STALLED） |
 | `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准（見 [docs/dashboard.md](docs/dashboard.md)） |
-| `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |
+| `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查；`delivery status` 分開計數通過與附豁免通過的版本 |
+| `waiver request --verification ID --scene ID --tier structure\|tokens\|layout [--variant ID] --reason TEXT [--engine-issue URL] --requested-by NAME` / `waiver list` / `waiver show --waiver ID` | 申請維護者豁免（只建立「申請中」，核准只在儀表板）／列出與查看豁免 |
 | `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |
 | `queue` / `status` | 版本佇列（含 `release`）／會話、Baseline、佇列與整合狀態 |
 | `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
@@ -309,4 +311,4 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
-| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）提案與實作紀錄；維護者豁免（0005，提案中，尚未實作） |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）、維護者豁免（0005）提案與實作紀錄 |

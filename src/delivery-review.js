@@ -257,7 +257,7 @@ async function capture(root, config, options, ownedMerge = null) {
       if (!Object.keys(report.artifactHashes ?? {}).length) throw blocked('Missing hashed acceptance artifacts');
       for (const [file, expected] of Object.entries(report.artifactHashes)) if (hash(await fs.readFile(await projectPath(worktree, file))) !== expected) throw blocked('Acceptance artifact changed');
       // verificationHash binds the authoritative main-root VER; the reviewer reads verificationFile in this checkout.
-      versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), verificationFile: `.protoflow/verifications/${report.id}.json`, verificationFileHash: hash(localReport), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes), ...(entry.planId && { plan: await boundPlan(worktree, entry.planId, manifest.id) }) });
+      versions.push({ sha: entry.sha, entryHash: hash(entry), manifestId: manifest.id, manifestHash: hash(manifest), verificationId: report.id, verificationHash: hash(report), verificationFile: `.protoflow/verifications/${report.id}.json`, verificationFileHash: hash(localReport), applicationHash: report.project.hash, artifactsHash: hash(report.artifactHashes), ...(report.waivers?.length && { waivers: report.waivers.map(({ id, scene, variant, tier, findings }) => ({ id, scene, variant, tier, findings })) }), ...(entry.planId && { plan: await boundPlan(worktree, entry.planId, manifest.id) }) });
     }
   }
   if (application.hash !== versions.at(-1).applicationHash) throw blocked('Full application content drifted since the newest PASS verification');

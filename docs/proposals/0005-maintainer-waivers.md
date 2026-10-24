@@ -2,9 +2,9 @@
 
 | 項目 | 內容 |
 |---|---|
-| 狀態 | 提案（2026-10-24），待 qiuge 確認第 5 節的待決事項後實作 |
+| 狀態 | 已實作於 0.3.49（2026-10-24）；第 5 節的待決事項已由 qiuge 決定 |
 | 來源 | 思玥 `docs/decisions.md`（b84d8c1）：無人在電腦前時讓 runner 繼續前進，門檻不變；qiuge 於 2026-10-24 同意需求 |
-| 影響範圍 | 驗收判定（`src/targets.js`、`src/tiers.js`）、驗收 JSON 與證據、儀表板核准、交付摘要、獨立審查的綁定資料 |
+| 影響範圍 | 驗收判定（`src/waivers.js`、`src/targets.js`）、驗收 JSON 與證據、runner 事件與自動申請、儀表板核准、交付關卡與摘要、獨立審查的綁定資料 |
 
 ## 1. 背景
 
@@ -46,19 +46,24 @@ qiuge 要的是明確、範圍窄、經人核准、會自動失效的例外。
   "engineIssue": "https://github.com/zhangqiu-ai/protoflow/issues/NN",
   "requestedBy": { "kind": "ai", "name": "ai:codex" },
   "requestedAt": "…",
+  "verificationId": "VER-…",
+  "evidence": [".protoflow/artifacts/WVR-…/prototype.png", ".protoflow/artifacts/WVR-…/application.png", ".protoflow/artifacts/WVR-…/diff.png"],
   "decision": null
 }
 ```
 
 - `status`：`requested` → `approved` 或 `rejected`；已核准的可以 `revoked`。
 - `findings` 從某次驗收的場景證據逐字複製（`scenes[].tiers[tier].reasons`），不能手寫。申請時必須指定來源驗收 `verificationId`，引擎從那份驗收讀出發現，並確認它的 `manifestHash` 與場景、變體、層級都對得上。
-- `decision`：`{ status, reviewer, reviewerKind: "human", at, notes }`。
+- `evidence`：申請時把那次驗收該場景的截圖複製到專案的 `.protoflow/artifacts/<WVR-id>/`，即使驗收只存在 runner worktree，儀表板也看得到。
+- `decision`：`{ status, reviewer, reviewerKind: "human", at, notes, waiverHash }`（`waiverHash` 只在核准時寫入）。撤回另記 `revocation: { reviewer, reviewerKind: "human", at, notes }`。
+- 同一個 target、scene、variant、tier、manifestHash 與 findingsHash 已有申請中或已核准的豁免時，再申請會回傳原紀錄（`existing: true`），不重複建立。
 
 ### 3.2 建立與核准
 
-- **申請**：`protoflow waiver request --verification VER-… --scene … --tier … [--variant …] --reason … --engine-issue …`。CLI 與代理都只能建立 `requested`。代理在 runner 裡判斷是引擎限制時，也只能走這條。
+- **申請**：`protoflow waiver request --verification VER-… --scene … --tier structure|tokens|layout [--variant …] --reason … [--engine-issue …] --requested-by <名字>|ai:<代理>`。CLI 與代理都只能建立 `requested`；`--requested-by` 以 `ai:` 開頭時記為代理。驗收只在 runner worktree 時，引擎也會到 runner worktree 找。`waiver list` 與 `waiver show --waiver WVR-…` 唯讀。
+- **自動申請（決定 C）**：修復代理判斷某個失敗是引擎限制時，把它寫進 `.protoflow/engine-limits/<CTX-id>.json`：`{ "limits": [{ "scene", "variant", "tier", "reason", "engineIssue" }] }`（修復請求的 `engineLimits` 欄位給出路徑）。runner 在下一次驗收仍 FAIL、而且同一個場景層級的 findingsHash 和修復前那次驗收相同時，替它建立 `requested` 豁免（`requestedBy: ai:<執行代理>`），記錄 `waiver-requested` 事件並發桌面通知「豁免待核准」；申請被拒（例如 T4）記為 `waiver-request-failed`。每次最多 10 筆。絕不自動核准。
 - **核准**：只在儀表板「待你處理」出現「豁免待核准」，動作為 `approve-waiver` / `reject-waiver`。核准者是 `dashboard.reviewer`（不得以 `ai:` 開頭），而且必須列在新設定 `policy.waivers.reviewers` 裡（例：`["張秋"]`）。沒有設定這個欄位時，整個功能關閉，申請也會被拒絕。
-- **核准的綁定**：核准寫入的 `decision` 帶 `waiverHash`，涵蓋 target、scene、variant、tier、manifestHash 與 findingsHash；之後任何一項變動，這筆核准就失效。核准紀錄與版本核准一樣，寫到 runner worktree 再複製回專案，並記入 `.protoflow/dashboard/actions.jsonl`。
+- **核准的綁定**：核准寫入的 `decision` 帶 `waiverHash`，涵蓋 target、scene、variant、tier、manifestHash 與 findingsHash；之後任何一項變動，這筆核准就失效。豁免紀錄只寫在專案根目錄的 `.protoflow/waivers/`，這是唯一的正本；runner 每次驗收前把整個目錄複製到 runner worktree（先刪除舊副本），所以撤回與新核准在下一次驗收就生效。每個決定也記入 `.protoflow/dashboard/actions.jsonl`。
 - **不提供 CLI 核准**，和現有的版本核准一樣只走儀表板。限制：儀表板以每次啟動的 token 和 Host／Origin 檢查擋住其他網站，但同一台電腦上能讀取面板頁面的程式在技術上仍能呼叫它。這和現有的「核准版本」是同一個信任邊界，本提案不另外加強。
 
 ### 3.3 套用到驗收
@@ -67,14 +72,17 @@ qiuge 要的是明確、範圍窄、經人核准、會自動失效的例外。
 
 - target、scene、variant、tier 相同；
 - 豁免的 `manifestHash` 等於這次驗收的 `manifestHash`；
-- 這次的發現非空，而且每一條都逐字出現在豁免的 `findings` 裡（待決事項 A）。
+- 豁免已核准，`decision.waiverHash` 仍與紀錄相符；
+- 這次的發現非空，而且每一條都逐字出現在豁免的 `findings` 裡（決定 A）；
+- 層級是 T1–T3 且在這個 target 是 `required`（決定 B）。
 
 適用時：
 
 - 該層級的紀錄保持 `status: "FAIL"` 與完整的 `reasons`，另加 `waiver: { id, waiverHash }`。
-- `tierVerdict` 把這個層級當成已滿足；場景狀態仍是 `PASS`，但加上 `waived: [{ tier, waiverId }]`。
-- 驗收 JSON 頂層 `status` 仍是 `PASS`，另加 `waivers: [{ id, target, scene, variant, tier, findings }]`；驗收 hash 涵蓋這個欄位，所以版本核准也綁定了「這次通過用了哪些豁免」。
-- 不適用（發現變了、不同版本、豁免未核准或已撤回）時，判定與現在完全相同；同時在場景證據記錄 `waiverSkipped: { id, why }`，讓人看得出為什麼沒套用。
+- `tierVerdict` 把這個層級當成已滿足；場景狀態是 `PASS`，另加 `waived: [{ tier, waiverId }]`。
+- 驗收的層級摘要（`visual.tiers.<tier>`）是關卡的觀點：被豁免的場景算通過，另加 `waived: <場景數>`。
+- 驗收 JSON 頂層 `status` 仍是 `PASS`，另加 `waivers: [{ id, target, scene, variant, tier, findings, reason, engineIssue }]`（沒有用到豁免時不加這個欄位，既有驗收的 hash 不變）；驗收 hash 涵蓋這個欄位，所以版本核准也綁定了「這次通過用了哪些豁免」。
+- 不適用（發現變了、不同版本、豁免未核准或已撤回、核准後被改動）時，判定與現在完全相同；同時在場景證據記錄 `waiverSkipped: [{ id, tier, why }]`，讓人看得出為什麼沒套用。
 
 ### 3.4 顯示與計數
 
@@ -86,7 +94,8 @@ qiuge 要的是明確、範圍窄、經人核准、會自動失效的例外。
 - **交付與發版**：
   - 交付摘要、PR 內文與 `delivery status` 分開計數「通過」與「附豁免通過」，並列出豁免編號。
   - 獨立審查的綁定資料加上 `waivers`。審查提示說明：這些發現已由維護者核准豁免，審查者仍可回報，但不能因為它們本身判 FAIL。
-- **事件**：runner 事件新增 `waiver-applied` 與 `waiver-skipped`。
+- **事件**：runner 每次驗收後記錄 `waiver-applied`（用到的豁免）與 `waiver-skipped`（沒套用的豁免與原因，最多 20 筆）；自動申請記錄 `waiver-requested` 與 `waiver-request-failed`。
+- **autoApprove（決定 D）**：開了 `policy.autoApprove` 的專案，交付中只要有版本的驗收用到豁免，交付就停在 `BLOCKED`（`reasonCode: WAIVER_APPROVAL_REQUIRED`），直到有人在儀表板核准那份驗收（人工核准綁定 `verificationHash`）。之後交付的 `approval` 記為 `{ kind: "human", reviewId, reviewer, independentReviewId, waivers }`。autoApprove 專案的儀表板只對這種版本顯示「核准版本」。
 
 ### 3.5 失效與清理
 
@@ -104,22 +113,22 @@ qiuge 要的是明確、範圍窄、經人核准、會自動失效的例外。
 | 核准 | 改設定檔（走程式碼審查） | 儀表板上的維護者核准 |
 | 執行 | 該錨點不參與比較 | 照常比較並記錄，只有關卡不看 |
 
-## 5. 待決事項（請 qiuge 確認）
+## 5. 決定（qiuge，2026-10-24）
 
-A. **發現變少時是否仍適用**：建議「目前的發現是豁免發現的子集」就適用。修好一部分不必重新核准；新增或改變任何一條都會讓豁免失效。另一個選項是要求完全相同。
+A. **子集適用**：目前的發現是豁免發現的子集就適用。修好一部分不必重新核准；新增或改變任何一條都會讓豁免失效。
 
-B. **可豁免的層級**：建議只開放 `required` 層級，`advisory` 本來就不擋關卡。是否限制只能豁免 T1／T2，T3 版面、T4 視覺不開放？
+B. **開放 T1–T3**：只有 `required` 的結構、token、版面層級可以豁免。T4 視覺永遠不能豁免，即使它在這個 target 是 `required`。
 
-C. **代理能否自動申請**：建議 runner 在版本因同一個發現連續失敗、而且執行代理標示為引擎限制時，自動建立 `requested` 並通知，但絕不自動核准。或者只允許人或 session 手動申請？
+C. **允許自動申請、不自動核准**：見 3.2 的「自動申請」。
 
-D. **對 `policy.autoApprove` 專案的影響**：建議即使開了 autoApprove，用到豁免的版本仍要人工核准版本，因為豁免是用來放行的例外，不應該再讓 AI 自動放行。
+D. **用到豁免的版本要人工核准**：即使開了 autoApprove，見 3.4。
 
-## 6. 實作與驗證計畫
+## 6. 實作與驗證
 
-- 新增 `src/waivers.js`（紀錄、hash、比對），在 `targets.js` 套用，並擴充儀表板動作與資料。CLI 只有 `waiver request|list|show`。
+- `src/waivers.js`（紀錄、hash、比對、申請、決定、複製到 runner worktree），在 `src/targets.js` 套用；runner 自動申請在 `src/runner.js`；交付關卡與摘要在 `src/delivery.js`；儀表板動作與資料在 `src/dashboard-actions.js`、`src/dashboard-data.js`、`dashboard/`。CLI 只有 `waiver request|list|show`。
 - 測試：
-  - 單元：比對規則（版本、場景、變體、層級、發現子集或完全相同）。
-  - 驗收整合：附豁免通過、發現改變後失效、未核准不套用。
-  - 儀表板：只有列在 `policy.waivers.reviewers` 裡的人能核准，`ai:` 一律拒絕。
-  - 交付摘要計數。
-- 文件：`docs/dashboard.md`、`docs/git-runner.md`、`docs/protocols.md`（驗收 JSON）、README 功能概覽、`skills/protoflow`。
+  - `tests/waivers.test.js`：比對規則（版本、場景、變體、target、層級、發現子集、核准後改動、T4 與 advisory 不豁免）、申請與決定的驗證、重複申請、撤回、複製到 worktree、runner 自動申請。
+  - `tests/e2e/anchors.spec.js`：真實 Playwright 驗收，結構層失敗 → CLI 申請 → 未核准不套用 → 核准後發現改變不套用 → 同樣發現附豁免通過。
+  - `tests/dashboard.test.js`、`tests/e2e/dashboard.spec.js`：只有列在 `policy.waivers.reviewers` 的人能決定（`dashboard.reviewer` 本身不得以 `ai:` 開頭）；豁免卡片的截圖、發現與核准、撤回；附豁免通過的顯示。
+  - `tests/delivery.test.js`：autoApprove 下用到豁免的版本先 BLOCKED，人工核准後合併，PR 留言與 `delivery status` 分開計數。
+  - `tests/notify.test.js`：「豁免待核准」通知。

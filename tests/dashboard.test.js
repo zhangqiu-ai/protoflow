@@ -71,6 +71,41 @@ test('versions waiting for a person appear when the project does not approve aut
   assert.deepEqual(view.attention.filter(item => item.kind === 'review').map(item => [item.verificationId, item.actions[0]]), [['VER-fixture-1', 'approve']]);
 });
 
+test('waivers: the snapshot shows waived tiers and requests, and only a listed person decides a waiver', async t => {
+  const { root } = await fixture(t, { waivers: true });
+  const view = await dashboardSnapshot(root, { service: false });
+  assert.deepEqual([view.waivers.enabled, view.waivers.reviewers, view.waivers.waivers.map(item => [item.id, item.status])], [true, ['Fixture Person'], [['WVR-fixture-2', 'requested'], ['WVR-fixture-1', 'approved']]]);
+  assert.deepEqual(view.waivers.waivers[0].prototype, '.protoflow/artifacts/WVR-fixture-2/prototype.png');
+  const [stream] = view.streams;
+  assert.deepEqual(stream.verification.scenes[0].waived, { tokens: 'WVR-fixture-1' });
+  assert.deepEqual(stream.verification.waivers.map(item => [item.id, item.tier]), [['WVR-fixture-1', 'tokens']]);
+  assert.equal(stream.versions.find(version => version.verificationId === 'VER-fixture-1').waivers, 1);
+  // Under autoApprove the waived version still waits for a person (decision D), next to the waiver request.
+  const waiting = view.attention.filter(item => ['review', 'waiver'].includes(item.kind));
+  assert.deepEqual(waiting.map(item => [item.kind, item.waiverId ?? item.verificationId, item.actions]), [['review', 'VER-fixture-1', ['approve']], ['waiver', 'WVR-fixture-2', ['approve-waiver', 'reject-waiver']]]);
+  assert.equal(waiting[0].waivers, 1);
+  assert.deepEqual(waiting[1].findings, ['settings.toggle: text "Weekly" vs "Monthly"']);
+  // The dashboard reviewer must be listed in policy.waivers.reviewers; an ai: identity never decides.
+  const configFile = path.join(root, 'protoflow.config.json'), config = JSON.parse(await fs.readFile(configFile, 'utf8'));
+  await fs.writeFile(configFile, JSON.stringify({ ...config, dashboard: { ...config.dashboard, reviewer: 'Someone Else' } }));
+  await assert.rejects(runAction(root, { action: 'approve-waiver', waiverId: 'WVR-fixture-2' }), /Someone Else is not a waiver reviewer/);
+  await fs.writeFile(configFile, JSON.stringify({ ...config, dashboard: { ...config.dashboard, reviewer: 'ai:claude' } }));
+  // The config itself refuses an ai: dashboard reviewer.
+  await assert.rejects(runAction(root, { action: 'approve-waiver', waiverId: 'WVR-fixture-2' }), /\/dashboard\/reviewer/);
+  await fs.writeFile(configFile, JSON.stringify(config));
+  const approved = await runAction(root, { action: 'approve-waiver', waiverId: 'WVR-fixture-2', notes: 'until the engine fix' });
+  assert.deepEqual([approved.status, approved.waiverId, approved.waiver], ['PASS', 'WVR-fixture-2', 'approved']);
+  const stored = JSON.parse(await fs.readFile(path.join(root, '.protoflow/waivers/WVR-fixture-2.json'), 'utf8'));
+  assert.deepEqual([stored.decision.reviewer, stored.decision.reviewerKind, stored.decision.notes], ['Fixture Person', 'human', 'until the engine fix']);
+  await assert.rejects(runAction(root, { action: 'reject-waiver', waiverId: 'WVR-fixture-2' }), /already approved/);
+  assert.equal((await runAction(root, { action: 'revoke-waiver', waiverId: 'WVR-fixture-1' })).waiver, 'revoked');
+  assert.deepEqual((await dashboardSnapshot(root, { service: false })).attention.filter(item => item.kind === 'waiver'), []);
+  // Under autoApprove the dashboard approves only a version that passed with waivers.
+  await assert.rejects(runAction(root, { action: 'approve', manifestId: 'git-x', verificationId: 'VER-missing' }), /only a version that passed with maintainer waivers is approved here/);
+  const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['approve-waiver', 'FAIL'], ['approve-waiver', 'PASS'], ['reject-waiver', 'FAIL'], ['revoke-waiver', 'PASS'], ['approve', 'FAIL']]);
+});
+
 function request(url, { method = 'GET', headers = {}, body, encoding = 'utf8' } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(url, { method, headers }, response => {
