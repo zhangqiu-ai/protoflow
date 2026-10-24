@@ -1984,6 +1984,63 @@ test('FAKE gh only: the dashboard merges a manual delivery PR only at the review
   assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['merge', 'PASS'], ['merge', 'PASS']]);
 });
 
+/** A person acting on the delivery PR directly on GitHub (FAKE gh database; the merge lands on the real bare remote). */
+async function onGitHub(f, change) {
+  const db = await f.gh(), pr = db.prs[0];
+  if (change === 'merge') {
+    const head = (await git(f.remote, 'rev-parse', `refs/heads/${pr.head}`));
+    await exec('gh', ['pr', 'merge', String(pr.number), '--merge', '--match-head-commit', head, '--repo', pr.repository], { env: { ...process.env, FAKE_GH_REAL_REMOTE: f.remote } });
+    return (await f.gh()).prs[0];
+  }
+  Object.assign(pr, change); await fs.writeFile(process.env.FAKE_GH_DB, JSON.stringify(db));
+  return pr;
+}
+
+test('FAKE gh only: delivery sync records a manual PR a person merged on GitHub, so the dashboard stops asking to merge it', async t => {
+  const f = await fixture(t, { merge: 'manual' });
+  const { dashboardSnapshot } = await import('../src/dashboard-data.js');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await writeJson(path.join(f.root, 'protoflow.config.json'), f.config);
+  const [delivery] = (await deliveryStatus(f.root)).deliveries;
+  const merged = await onGitHub(f, 'merge');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'IDLE');
+  const saved = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(saved.status, 'PR_OPEN_MANUAL');
+  assert.deepEqual(saved.manualMerge, { mergedBy: 'github:fixture-person', mergedAt: merged.mergedAt, mergeCommit: merged.mergeCommit, via: 'github' });
+  assert.equal(await git(f.remote, 'rev-parse', `${merged.mergeCommit}^2`), delivery.commit);
+  const view = await dashboardSnapshot(f.root, { service: false });
+  assert.equal(view.attention.filter(item => item.kind === 'manual-merge').length, 0);
+});
+
+test('single target: runner rebase takes up a manual PR a person merged on GitHub, and refuses while it is open or closed unmerged', async t => {
+  const f = await fixture(t, { merge: 'manual' }); f.config.policy.autoApprove = true;
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  const [manual] = (await deliveryStatus(f.root)).deliveries;
+  assert.equal(manual.status, 'PR_OPEN_MANUAL');
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-081\n');
+  const v2 = `${'2'.repeat(8)}${'b'.repeat(32)}`;
+  await acceptNext(f, { sha: v2, ordinal: 2, verificationId: 'VER-2', executionId: 'EXEC-fixture-2', content: '<main>v2</main>\n' });
+  await assert.rejects(rebaseDeliveries(f.root, f.config, f.worktree), new RegExp(`Delivery ${manual.id} has an open pull request #${manual.pr.number}`));
+
+  await onGitHub(f, { state: 'CLOSED', closedAt: '2026-10-22T23:37:33Z' });
+  await assert.rejects(rebaseDeliveries(f.root, f.config, f.worktree), /was closed without merging and its commits are still on protoflow\/delivery/);
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].manualClosed.closedAt, '2026-10-22T23:37:33Z');
+  await onGitHub(f, { state: 'OPEN', closedAt: null });
+  await assert.rejects(rebaseDeliveries(f.root, f.config, f.worktree), /has an open pull request/);
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].manualClosed, undefined);
+
+  const merged = await onGitHub(f, 'merge');
+  const result = await rebaseDeliveries(f.root, f.config, f.worktree);
+  assert.deepEqual([result.to, result.deliveries, result.versions], [merged.mergeCommit, [], [`git-${v2}`]]);
+  assert.equal(await git(f.worktree, 'rev-parse', `${merged.mergeCommit}^1`), human);
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), merged.mergeCommit);
+  const saved = (await deliveryStatus(f.root)).deliveries[0];
+  assert.deepEqual([saved.status, saved.manualMerge.via, saved.manualMerge.mergeCommit], ['PR_OPEN_MANUAL', 'github', merged.mergeCommit]);
+  const source = await sourceStatus(f.root);
+  assert.deepEqual(source.entries.map(entry => entry.status), ['PASS', 'PENDING']);
+  assert.equal(source.entries[0].deliveryId, manual.id);
+});
+
 test('FAKE gh only: the dashboard refuses to merge a manual PR whose head moved after review', async t => {
   const f = await fixture(t, { merge: 'manual' });
   const { runAction } = await import('../src/dashboard-actions.js');

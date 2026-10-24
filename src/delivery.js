@@ -128,10 +128,16 @@ export async function rebaseDeliveries(root, config, worktree) {
   await ensureCommit(worktree, base);
   const head = await git(worktree, ['rev-parse', 'HEAD']);
   if (await isAncestor(worktree, base.sha, head)) throw new Error(`Base ${options.baseBranch} (${base.sha.slice(0, 7)}) is already in the runner worktree; nothing to rebase`);
-  for (const delivery of state.deliveries.filter(item => item.status === 'MERGED')) {
-    if (delivery.mergeCommit && !await isAncestor(worktree, delivery.mergeCommit, base.sha)) throw new Error(`Merged delivery ${delivery.id} is not in base ${base.sha.slice(0, 7)}; the base was rewritten, resolve it externally`);
+  // The local record of a manual PR is only what the runner last saw; a person may have merged or closed it on GitHub.
+  if (await reconcileManualDeliveries(worktree, config, state)) await saveDelivery(root, config, null, state);
+  for (const delivery of state.deliveries.filter(item => item.status === 'MERGED' || item.manualMerge)) {
+    const mergeCommit = delivery.mergeCommit ?? delivery.manualMerge?.mergeCommit;
+    if (mergeCommit && delivery.manualMerge) await ensureCommit(worktree, { sha: mergeCommit, url: base.url });
+    if (mergeCommit && !await isAncestor(worktree, mergeCommit, base.sha)) throw new Error(`Merged delivery ${delivery.id} is not in base ${base.sha.slice(0, 7)}; the base was rewritten, resolve it externally`);
   }
-  const open = state.deliveries.find(item => item.status === 'PR_OPEN_MANUAL');
+  const closed = state.deliveries.find(item => manualOpen(item) && item.manualClosed);
+  if (closed) throw new Error(`Delivery ${closed.id} pull request #${closed.pr.number} was closed without merging and its commits are still on ${deliveryBranch(config, null)}; reopen and merge it, or resolve the delivery branch externally, before rebasing`);
+  const open = state.deliveries.find(manualOpen);
   if (open) throw new Error(`Delivery ${open.id} has an open pull request${open.pr ? ` #${open.pr.number}` : ''}; merge or close it before rebasing`);
   const retired = state.deliveries.filter(item => !settled(item));
   const destination = await resolveDeliveryDestination(worktree, options.remote);
@@ -237,6 +243,40 @@ const unpublished = delivery => !delivery.steps?.pushedAt && !delivery.pr;
 async function ensureCommit(worktree, base) {
   try { await git(worktree, ['cat-file', '-e', `${base.sha}^{commit}`]); }
   catch { await git(worktree, ['fetch', '--no-tags', '--no-write-fetch-head', base.url, base.sha]); }
+}
+const manualOpen = delivery => delivery.status === 'PR_OPEN_MANUAL' && !delivery.manualMerge;
+
+/**
+ * A manual PR a person merged on GitHub (not from the dashboard) is recorded as merged once GitHub shows it merged
+ * this delivery's commit: as its head, or, when a later delivery reused the PR, inside its merge commit. The record
+ * is the dashboard's `manualMerge` with `via: 'github'`; the GitHub login is not presented as a reviewed person.
+ * A PR closed without merging is recorded as `manualClosed` until it is reopened. Returns whether anything changed.
+ */
+async function reconcileManualDeliveries(worktree, config, state) {
+  const waiting = state.deliveries.filter(item => manualOpen(item) && item.pr?.number);
+  if (!waiting.length) return false;
+  const options = config.runner.delivery;
+  const destination = await resolveDeliveryDestination(worktree, options.remote);
+  let changed = false;
+  for (const delivery of waiting) {
+    const view = await ghJson(worktree, destination.repository, ['pr', 'view', String(delivery.pr.number), '--json', 'state,headRefOid,baseRefName,mergeCommit,mergedAt,mergedBy,closedAt']);
+    if (view?.state === 'CLOSED') {
+      if (!delivery.manualClosed) { delivery.manualClosed = { closedAt: view.closedAt ?? null, observedAt: new Date().toISOString(), head: view.headRefOid ?? null }; changed = true; }
+      continue;
+    }
+    if (delivery.manualClosed) { delete delivery.manualClosed; changed = true; }
+    if (view?.state !== 'MERGED' || view.baseRefName !== options.baseBranch) continue;
+    const mergeCommit = view.mergeCommit?.oid ?? null;
+    let merged = view.headRefOid === delivery.commit;
+    if (!merged && mergeCommit && delivery.commit) {
+      await ensureCommit(worktree, { sha: mergeCommit, url: destination.url });
+      merged = await isAncestor(worktree, delivery.commit, mergeCommit);
+    }
+    if (!merged) continue;
+    delivery.manualMerge = { mergedBy: view.mergedBy?.login ? `github:${view.mergedBy.login}` : null, mergedAt: view.mergedAt ?? null, mergeCommit, via: 'github' };
+    changed = true;
+  }
+  return changed;
 }
 /** Revoked deliveries that never left this checkout and whose commits `head` still carries above the base. */
 async function revokedHistory(worktree, state, head, base, except = null) {
@@ -454,6 +494,9 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
   const source = await loadProgress(root, config, target);
   const state = await deliveryStatus(root, config, target);
   await reconcileReopenedDeliveries(root, config, target, source, state);
+  // Best effort: an unreachable GitHub leaves the PR waiting until the next sync; runner rebase requires the answer.
+  try { if (await reconcileManualDeliveries(worktree, config, state)) await saveDelivery(root, config, target, state); }
+  catch {}
   try { await retireTaintedDeliveries(root, config, target, worktree, source, state, options); }
   catch (error) { return { status: 'BLOCKED', reason: error.message, retryable: error.transient === true }; }
   // An explicit retry selects the current attempt; `revalidation` lets its fresh PASS replace an existing approval.
