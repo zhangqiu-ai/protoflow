@@ -29,7 +29,7 @@ export function overviewStream(stream) {
     live, lastEvent: stream.lastEvent ? { event: stream.lastEvent.event, at: stream.lastEvent.at } : null, lastDelivery: stream.deliveries[0] ?? null };
 }
 
-export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1', port = 7420, token = randomBytes(24).toString('hex'), pollMs = 3000, healthTtlMs = 20000, service = process.platform === 'darwin', actions = runAction } = {}) {
+export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1', port = 7420, token = randomBytes(24).toString('hex'), pollMs = 3000, healthTtlMs = 20000, service = process.platform === 'darwin', actions = runAction, snapshotOf = dashboardSnapshot } = {}) {
   const healthCache = new Map();
   const health = async root => {
     if (!service) return null;
@@ -40,13 +40,22 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
     return value;
   };
   const project = async id => (await listProjects({ home })).find(item => item.id === id) ?? null;
-  const snapshot = async entry => dashboardSnapshot(entry.root, { health: await health(entry.root) });
+  // The overview and a project page polling in the same moment read the project once.
+  const recent = new Map();
+  const snapshot = entry => {
+    const hit = recent.get(entry.root);
+    if (hit && Date.now() - hit.at < pollMs / 2) return hit.promise;
+    const promise = health(entry.root).then(known => snapshotOf(entry.root, { health: known }));
+    recent.set(entry.root, { at: Date.now(), promise });
+    promise.catch(() => recent.delete(entry.root));
+    return promise;
+  };
   const overview = async () => {
     const out = [];
     for (const entry of await listProjects({ home })) {
       try {
         const view = await snapshot(entry);
-        out.push({ id: entry.id, name: entry.name, root: entry.root, service: view.service, roles: view.roles, attention: view.attention.length, streams: view.streams.map(overviewStream), issues: { open: view.issues.filter(issue => !['done', 'closed'].includes(issue.status)).length, inProgress: view.issues.filter(issue => issue.status === 'in-progress').length }, lastEvent: view.events[0] ?? null, engineVersion: view.engineVersion });
+        out.push({ id: entry.id, name: entry.name, root: entry.root, service: view.service, roles: view.roles, attention: view.attention.length, inbox: view.attention, streams: view.streams.map(overviewStream), issues: { open: view.issues.filter(issue => !['done', 'closed'].includes(issue.status)).length, inProgress: view.issues.filter(issue => issue.status === 'in-progress').length }, lastEvent: view.events[0] ?? null, engineVersion: view.engineVersion });
       } catch (error) { out.push({ id: entry.id, name: entry.name, root: entry.root, error: error.message.slice(0, 300) }); }
     }
     return { protocol: 'protoflow.dashboard-overview/1', generatedAt: new Date().toISOString(), projects: out };
@@ -57,17 +66,28 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
     response.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
     response.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
-  const stream = (request, response, produce) => {
+  // One poll per view however many pages watch it: they share each result, a page that joins paints at once from the
+  // last one, and a view nobody watches stops polling.
+  const hubs = new Map();
+  let stopped = false;
+  const stream = (request, response, key, produce) => {
     response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
-    let last = null, closed = false;
-    const tick = async () => {
-      if (closed) return;
-      try { const data = await produce(); const digest = stable(data); if (digest !== last) { last = digest; response.write(`data: ${JSON.stringify(data)}\n\n`); } else response.write(': ping\n\n'); }
-      catch (error) { response.write(`event: failure\ndata: ${JSON.stringify({ error: error.message.slice(0, 300) })}\n\n`); }
-      if (!closed) timer = setTimeout(tick, pollMs);
-    };
-    let timer = setTimeout(tick, 0);
-    request.on('close', () => { closed = true; clearTimeout(timer); });
+    let hub = hubs.get(key);
+    if (!hub) {
+      hub = { clients: new Set(), digest: null, message: null, timer: null };
+      const tick = async () => {
+        let out;
+        try { const data = await produce(); const digest = stable(data); if (digest !== hub.digest) { hub.digest = digest; hub.message = out = `data: ${JSON.stringify(data)}\n\n`; } else out = ': ping\n\n'; }
+        catch (error) { out = `event: failure\ndata: ${JSON.stringify({ error: error.message.slice(0, 300) })}\n\n`; }
+        for (const client of hub.clients) client.write(out);
+        if (hub.clients.size && !stopped) hub.timer = setTimeout(tick, pollMs); else if (hubs.get(key) === hub) hubs.delete(key);
+      };
+      hubs.set(key, hub);
+      hub.timer = setTimeout(tick, 0);
+    }
+    hub.clients.add(response);
+    if (hub.message) response.write(hub.message);
+    request.on('close', () => hub.clients.delete(response));
   };
 
   const server = http.createServer(async (request, response) => {
@@ -86,11 +106,11 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
       }
       if (parts[0] !== 'api') return send(response, 404, { error: 'Not found' });
       if (request.method === 'GET' && url.pathname === '/api/projects') return send(response, 200, await overview());
-      if (request.method === 'GET' && url.pathname === '/api/stream') return stream(request, response, overview);
+      if (request.method === 'GET' && url.pathname === '/api/stream') return stream(request, response, 'overview', overview);
       const entry = parts[1] === 'projects' && parts[2] ? await project(parts[2]) : null;
       if (!entry) return send(response, 404, { error: 'Unknown project' });
       if (request.method === 'GET' && parts.length === 3) return send(response, 200, await snapshot(entry));
-      if (request.method === 'GET' && parts[3] === 'stream') return stream(request, response, () => snapshot(entry));
+      if (request.method === 'GET' && parts[3] === 'stream') return stream(request, response, entry.id, () => snapshot(entry));
       if (request.method === 'GET' && parts[3] === 'file') {
         const relative = url.searchParams.get('path') ?? '';
         if (!IMAGE.test(relative) || relative.split('/').includes('..')) return send(response, 400, { error: 'Only screenshots under .protoflow/artifacts' });
@@ -110,6 +130,8 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
         try { parsed = JSON.parse(body); } catch { return send(response, 400, { error: 'Expected JSON' }); }
         try { return send(response, 200, await actions(entry.root, parsed)); }
         catch (error) { return send(response, error.statusCode ?? 409, { error: error.message.slice(0, 600) }); }
+        // The next push shows what the action changed instead of a snapshot read just before it.
+        finally { recent.delete(entry.root); }
       }
       return send(response, 404, { error: 'Not found' });
     } catch (error) { return send(response, 500, { error: error.message.slice(0, 300) }); }
@@ -117,7 +139,7 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
   return {
     server, token,
     listen: () => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve(`http://${host}:${server.address().port}/`)); }),
-    close: () => new Promise(resolve => { server.closeAllConnections?.(); server.close(() => resolve()); })
+    close: () => new Promise(resolve => { stopped = true; for (const hub of hubs.values()) clearTimeout(hub.timer); hubs.clear(); server.closeAllConnections?.(); server.close(() => resolve()); })
   };
 }
 
