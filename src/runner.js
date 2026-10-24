@@ -8,7 +8,7 @@ import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, reclassifyVersion, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
-import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
+import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER, alignWorktreeToBase, rebaseDeliveries } from './delivery.js';
 import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interruptedProvider } from './delivery-review.js';
 import { transientFailure } from './delivery-scope.js';
 import { snapshot } from './sessions.js';
@@ -467,6 +467,24 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     return { status: 'PASS', manifestId: entry.manifestId, sha: entry.sha, verificationId: report.id, recovered: true, delivery };
   }
   if (queue.current?.id !== entry.manifestId) throw new Error(`Runner queue mismatch: expected ${entry.manifestId}, got ${queue.current?.id}`);
+  // A single-target delivery is reviewed against the current base: build the version there, or block before running.
+  try {
+    const aligned = await alignWorktreeToBase(runner.worktree, config);
+    if (aligned) {
+      runner.base = aligned.to; await saveRunner(root, runner, statePath);
+      await onEvent({ event: 'base-aligned', sha: entry.sha, manifestId: entry.manifestId, from: aligned.from, to: aligned.to });
+    }
+  } catch (error) {
+    // An unreachable remote does not stop the version: delivery checks the base again before anything is reviewed.
+    if (error.code !== 'BASE_MOVED') {
+      await onEvent({ event: 'base-check-failed', sha: entry.sha, manifestId: entry.manifestId, reason: String(error.stderr || error.message).trim().slice(-300) });
+    } else {
+      entry.status = 'BLOCKED'; entry.error = error.message; runner.status = 'BLOCKED';
+      await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
+      await onEvent({ event: 'base-moved', sha: entry.sha, manifestId: entry.manifestId, baseSha: error.baseSha, reason: error.message });
+      return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message };
+    }
+  }
   entry.status = 'RUNNING'; entry.startedAt = new Date().toISOString();
   runner.status = 'RUNNING'; runner.current = entry.manifestId;
   await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
@@ -724,6 +742,26 @@ export async function reclassifyRunner(root, config = {}, { target = null } = {}
   return { status: 'PASS', manifestId: result.manifestId, from: result.from, to: result.to, engineVersion: result.engineVersion,
     previousManifestHash: result.previousManifestHash, manifestHash, archive: result.archive,
     next: result.manifest.requires?.architecture ? 'bind the ADR to manifestHash, then runner start' : 'runner start' };
+}
+/**
+ * A person retires the undelivered work of a single-target stream whose base moved (rebaseDeliveries): the worktree is
+ * reset to the current base with its old content kept under an archive ref, and the versions run again from scratch.
+ * The levels of the versions are unchanged; a `rebased` event records the archive and the retired deliveries.
+ */
+export async function rebaseRunner(root, config = {}, { target = null } = {}) {
+  if (isMultiTarget(config)) throw new Error('runner rebase supports single-target streams only');
+  const statePath = runnerStatePath(config, target);
+  const runner = await readJson(await projectPath(root, statePath), null);
+  if (!runner?.worktree) throw new Error('runner rebase needs an initialized runner worktree');
+  if (runner.status === 'RUNNING') throw new Error('Stop the runner before rebasing its worktree');
+  const state = await loadProgress(root, config, target);
+  for (const entry of state.entries) assertNoActiveProcesses(entry);
+  const result = await rebaseDeliveries(root, config, runner.worktree);
+  runner.status = 'IDLE'; runner.current = null; runner.base = result.to;
+  runner.rebaseHistory = [...(runner.rebaseHistory ?? []), { at: result.at, from: result.from, to: result.to, archive: result.archive }];
+  await saveRunner(root, runner, statePath);
+  await recordEvent(root, { at: result.at, event: 'rebased', target, from: result.from, to: result.to, archive: result.archive, deliveries: result.deliveries, versions: result.versions });
+  return { status: 'PASS', ...result, next: 'runner start' };
 }
 export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false } = {}) {
   const state = await loadProgress(root, config, target);

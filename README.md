@@ -155,7 +155,7 @@ protoflow runner status --project /path/to/app
   - 連續 `policy.stallRounds` 輪（預設 2，0 為關閉）修復後失敗項沒有減少時提前 BLOCKED，`reasonCode` 為 `stalled`，不把剩下的修復次數耗在同樣的失敗上。
   - `runner status` 的 `blocked` 列出卡住版本的 `reasonCode`、開始時間與原始錯誤前幾行；macOS 上版本阻塞或 Issue 需要人決定時發出桌面通知，可用 `notifications.desktop: false` 關閉。
   - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。
-- **恢復**：BLOCKED、STOPPED 或中斷的 RUNNING 必須先查明原因，再執行 `runner retry [--target id]`。設定錯誤時，先用 `runner configure` 明確綁定新設定。啟動意圖沒有留下 PID 時，用 `runner retry --recover-unknown-start`；引擎會先確認沒有存活程序。原型本身有錯、修正排在後面的版本時，用 `runner supersede` 把卡住的版本併入最新版；舊引擎誤判等級（例如卡在不需要的 `--spec`）時，用 `runner reclassify` 以目前引擎重新分級，見 [重新分級](docs/git-runner.md)。`runner gc [--apply]` 會封存並回收不再使用的乾淨 worktree。
+- **恢復**：BLOCKED、STOPPED 或中斷的 RUNNING 必須先查明原因，再執行 `runner retry [--target id]`。設定錯誤時，先用 `runner configure` 明確綁定新設定。啟動意圖沒有留下 PID 時，用 `runner retry --recover-unknown-start`；引擎會先確認沒有存活程序。原型本身有錯、修正排在後面的版本時，用 `runner supersede` 把卡住的版本併入最新版；舊引擎誤判等級（例如卡在不需要的 `--spec`）時，用 `runner reclassify` 以目前引擎重新分級，見 [重新分級](docs/git-runner.md)。單一 target 的基底在上次交付後被人移動時，Runner 在版本執行前就快轉到新基底，worktree 有未交付內容時則提前 BLOCKED；已卡住的交付用 `runner rebase` 退回並在目前基底上重跑。`runner gc [--apply]` 會封存並回收不再使用的乾淨 worktree。
 - **定期巡查**：可在 Codex app 建立 heartbeat 自動化，定期執行 `runner start --once`、`delivery sync` 與 `delivery status`，見 [定期巡查](docs/git-runner.md#定期巡查codex-自動化)。
 
 ### 本機設計流程（未配置 Git 來源）
@@ -237,7 +237,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `init` / `install [--personal] [--skip-integrations]` | 建立配置與約定／安裝 Skill、Spec Kit 與 BMad |
 | `doctor` | 接入環境診斷 |
 | `source scan` / `source status` | 掃描並凍結 Git 提交／來源進度 |
-| `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `supersede` / `reclassify` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、以後續版本取代、以目前引擎重新分級、綁定新設定、回收 worktree |
+| `runner start [--once]` / `status` / `retry [--recover-unknown-start]` / `supersede` / `reclassify` / `rebase` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、以後續版本取代、以目前引擎重新分級、在移動後的基底上重新開始、綁定新設定、回收 worktree |
 | `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（執行中每分鐘心跳；連續失敗時為 DEGRADED，心跳停止 5 分鐘以上為 STALLED） |
 | `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准（見 [docs/dashboard.md](docs/dashboard.md)） |
 | `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查 |

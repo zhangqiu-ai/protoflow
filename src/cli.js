@@ -13,7 +13,7 @@ import { suggestMappings } from './mappings.js';
 import { lintAnchors, suggestAnchorsCommand, showContract, migrateCommand } from './anchor-commands.js';
 import { scanSource } from './source.js';
 import { sourceView } from './streams.js';
-import { startRunner, retryRunner, supersedeRunner, reclassifyRunner, configureRunner, runnerStatus, doctor } from './runner.js';
+import { startRunner, retryRunner, supersedeRunner, reclassifyRunner, rebaseRunner, configureRunner, runnerStatus, doctor } from './runner.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { installService, uninstallService, serviceStatus, installDashboardService, uninstallDashboardService, dashboardServiceStatus } from './runner-service.js';
 import { dashboardSnapshot, addProject, removeProject, listProjects } from './dashboard-data.js';
@@ -46,6 +46,8 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          decided the later prototype fixes it); the worktree's changes are kept
   runner reclassify                      Classify the blocked current version again with this engine (its level was
                                          fixed at scan time); the old manifest is archived, the worktree kept
+  runner rebase                          Single target whose base moved: retire unpublished deliveries, keep the worktree
+                                         under an archive ref, reset it to the base and run those versions again
   runner gc [--apply]                    List runner worktrees; --apply archives and removes unused clean ones
   runner start --service                 Resident mode: keeps polling through blocks; stops only on SIGTERM/SIGINT
   runner service install [--env K=V] | uninstall | status
@@ -129,6 +131,7 @@ try {
           if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null, recoverUnknownStart: values['recover-unknown-start'] === true });
           if (action === 'supersede') return supersedeRunner(root, config, { target: values.target ?? null });
           if (action === 'reclassify') return reclassifyRunner(root, config, { target: values.target ?? null });
+          if (action === 'rebase') return rebaseRunner(root, config, { target: values.target ?? null });
           if (action === 'configure') return configureRunner(root, config);
           if (action === 'gc') return collectRunnerWorktrees(root, config, { apply: values.apply });
           if (action === 'start') {
@@ -151,7 +154,7 @@ try {
             if (operation === 'status') return serviceStatus(root);
             throw new Error('Use runner service install|uninstall|status');
           }
-          throw new Error('Use runner start|status|retry|supersede|reclassify|configure|gc|service');
+          throw new Error('Use runner start|status|retry|supersede|reclassify|rebase|configure|gc|service');
         case 'delivery':
           if (action === 'sync') {
             if (!values['retry-review']) {

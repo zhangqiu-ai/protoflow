@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { syncDeliveries, deliveryStatus, assertDelivered } from '../src/delivery.js';
+import { syncDeliveries, deliveryStatus, assertDelivered, alignWorktreeToBase, rebaseDeliveries } from '../src/delivery.js';
 import { runOnce } from '../src/runner.js';
 import { sourceStatus, saveSourceState } from '../src/source.js';
 import { loadProgress, saveProgress } from '../src/streams.js';
@@ -1485,6 +1485,89 @@ test('FAKE transport: network failures before the provider runs do not use up th
   assert.deepEqual(resumed.events.slice(0, 1), ['review-retry']);
   assert.equal(resumed.status, 'PASS', JSON.stringify(resumed));
   assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
+});
+
+/** A person commits to the base branch from their own clone (FAKE fixture history only). */
+async function humanCommit(f, file, content) {
+  const clone = path.join(f.base, `human-${Date.now()}`);
+  await git(f.base, 'clone', '-q', f.remote, clone);
+  await git(clone, 'config', 'user.email', 'human@protoflow.test'); await git(clone, 'config', 'user.name', 'FAKE human');
+  await fs.mkdir(path.dirname(path.join(clone, file)), { recursive: true }); await fs.writeFile(path.join(clone, file), content);
+  await git(clone, 'add', file); await git(clone, 'commit', '-q', '-m', `FAKE human ${file}`); await git(clone, 'push', '-q', 'origin', 'HEAD:main');
+  return git(clone, 'rev-parse', 'HEAD');
+}
+/** The next version, accepted in the runner worktree (synthetic PASS fixture only). */
+async function acceptNext(f, { sha, ordinal, verificationId, executionId, content, reuseFrozen = false }) {
+  await fs.mkdir(path.join(f.worktree, 'app'), { recursive: true });
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), content);
+  await acceptVersion({ ...f, sha, ordinal, verificationId, executionId, reuseFrozen });
+  const source = await sourceStatus(f.root);
+  const entry = { sha, manifestId: `git-${sha}`, ordinal, status: 'PASS', verificationId, completedAt: new Date().toISOString(), attempts: [{ executionId, executionStatus: 'PASS', status: 'PASS' }] };
+  const index = source.entries.findIndex(item => item.sha === sha);
+  if (index === -1) source.entries.push(entry); else source.entries[index] = entry;
+  await saveSourceState(f.root, source);
+}
+
+test('single target: a base people moved after the last delivery merged is taken up before the next version runs, so that version delivers', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  const merged = (await deliveryStatus(f.root)).deliveries[0];
+  assert.equal(merged.status, 'MERGED');
+  // The FAKE GitHub merge records the PR only; land the reviewed commit on the base as the real merge would.
+  const landed = await git(f.worktree, 'rev-parse', 'HEAD');
+  await git(f.worktree, 'push', '-q', f.remote, 'HEAD:main');
+  assert.equal(await alignWorktreeToBase(f.worktree, f.config), null);
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-078\n');
+  // Uncommitted application work is not the base's: the version would be built on a stale base, so it blocks.
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), '<main>half done</main>\n');
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config), error => error.code === 'BASE_MOVED' && error.baseSha === human && /uncommitted changes in app\/index\.html/.test(error.message));
+  await git(f.worktree, 'checkout', '--', 'app/index.html');
+  const aligned = await alignWorktreeToBase(f.worktree, f.config);
+  assert.deepEqual(aligned, { from: landed, to: human });
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
+  assert.equal(await fs.readFile(path.join(f.worktree, 'docs/human.md'), 'utf8'), 'TASK-078\n');
+  // The next version is built on the current base and its delivery review passes.
+  await acceptNext(f, { sha: `2${'b'.repeat(39)}`, ordinal: 2, verificationId: 'VER-2', executionId: 'EXEC-fixture-2', content: '<main>v2</main>\n' });
+  const result = await syncDeliveries(f.root, f.config);
+  assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const second = (await deliveryStatus(f.root)).deliveries.at(-1);
+  assert.deepEqual([second.status, second.baseSha], ['MERGED', human]);
+});
+
+test('single target: runner rebase retires a delivery built on a moved base and runs its versions again on the current base', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-079\n');
+  const blocked = await syncDeliveries(f.root, f.config);
+  assert.equal(blocked.status, 'BLOCKED');
+  assert.match(JSON.stringify(blocked), /not an ancestor/);
+  const stale = (await deliveryStatus(f.root)).deliveries[0];
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config), error => error.code === 'BASE_MOVED' && /1 commit\(s\) not in the base/.test(error.message) && /runner rebase/.test(error.message));
+  await fs.writeFile(path.join(f.worktree, 'app/notes.txt'), 'uncommitted\n');
+
+  const result = await rebaseDeliveries(f.root, f.config, f.worktree);
+  assert.deepEqual([result.from, result.to, result.deliveries, result.versions], [stale.commit, human, [stale.id], [`git-${f.shas[0]}`]]);
+  // Nothing is lost: the archive holds the delivery commit and the uncommitted file.
+  assert.equal(await git(f.worktree, 'rev-parse', `${result.archive}^`), stale.commit);
+  assert.equal(await git(f.worktree, 'show', `${result.archive}:app/notes.txt`), 'uncommitted');
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
+  await assert.rejects(fs.access(path.join(f.worktree, 'app/index.html')));
+  await assert.rejects(fs.access(path.join(f.worktree, 'app/notes.txt')));
+  await fs.access(path.join(f.worktree, '.protoflow/contexts/EXEC.json'));
+  const delivery = (await deliveryStatus(f.root)).deliveries[0];
+  assert.deepEqual([delivery.status, delivery.revocation.archive, delivery.revocation.staleBase.to], ['REVOKED', result.archive, human]);
+  let source = await sourceStatus(f.root);
+  assert.deepEqual([source.entries[0].status, source.entries[0].attempts.length, source.completedSha], ['PENDING', 0, null]);
+  assert.equal(source.rebased[0].entries[0].verificationId, 'VER-1');
+  await assert.rejects(rebaseDeliveries(f.root, f.config, f.worktree), /already in the runner worktree/);
+
+  // The version runs again from scratch on the current base and is delivered.
+  await acceptNext(f, { sha: f.shas[0], ordinal: 1, verificationId: 'VER-1b', executionId: 'EXEC-fixture-1b', content: '<main>v1 on the current base</main>\n', reuseFrozen: true });
+  const delivered = await syncDeliveries(f.root, f.config);
+  assert.equal(delivered.status, 'PASS', JSON.stringify(delivered));
+  const fresh = (await deliveryStatus(f.root)).deliveries.at(-1);
+  assert.deepEqual([fresh.status, fresh.baseSha], ['MERGED', human]);
+  source = await sourceStatus(f.root);
+  assert.equal(source.entries[0].deliveryId, fresh.id);
 });
 
 test('multi-target FAKE transport: an unpublished delivery whose base moved is rebuilt on the current base, unless a reviewer rejected it', async t => {
