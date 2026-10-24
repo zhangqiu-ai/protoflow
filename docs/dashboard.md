@@ -48,7 +48,7 @@ protoflow dashboard serve [--port 7420]
 
 | 項目 | 何時出現 | 面板操作 | 綁定 |
 |---|---|---|---|
-| 交付 PR 待你合併 | `runner.delivery.merge: "manual"` 的交付已通過驗證與獨立審查 | 核准並合併 | PR 仍開啟、head 等於審查過的交付 commit 才以 `--match-head-commit` 合併；以你的 GitHub 身分執行，交付紀錄寫入 `manualMerge` |
+| 交付 PR 待你合併 | `runner.delivery.merge: "manual"` 的交付已通過驗證與獨立審查 | 核准並合併 | PR 仍開啟、head 等於審查過的交付 commit 才以 `--match-head-commit` 合併；以你的 GitHub 身分執行，交付紀錄寫入 `manualMerge`；直接在 GitHub 合併的 PR 在下一次 `delivery sync` 記為 `manualMerge`（`via: "github"`）後，這張卡片就不再出現 |
 | Issue 需要你決定 | Issue 為 `needs-human`、`blocked` 或 `rejected` | 交回 AI | 以你的 GitHub 身分移除狀態標籤；Runner 下一輪確認你有寫入權限後重新分流 |
 | 版本待人工核准 | 沒有 `policy.autoApprove` 的專案，已 PASS 的版本 | 核准版本 | 在該 target 的 Runner worktree 建立並核准審查，綁定驗收 hash，複製回專案；審查者為 `dashboard.reviewer` |
 | 審查未過 | 交付被獨立審查判為 FAIL 並附發現（沒有 `policy.autoApprove` 的專案；有開的專案由 runner 自動退回，退回超過 3 次才交給人） | 退回重修 | 以 `dashboard.reviewer` 的名字對該版驗收記錄人工「要求修改」（`changes_requested`），帶上審查的發現；Runner 下一輪重開版本、撤回被否決的交付，執行代理帶著發現修復。被否決的版本不再出現在「版本待人工核准」 |

@@ -13,7 +13,7 @@ const flag = name => args[args.indexOf(name) + 1];
 const repository = args.includes('--repo') ? flag('--repo') : process.env.GH_REPO;
 const head = (branch, target = repository) => execFileSync('git', ['ls-remote', 'https://' + target + '.git', 'refs/heads/' + branch]).toString().split('\t')[0] || null;
 const find = key => state.prs.find(pr => pr.repository === repository && (String(pr.number) === key || pr.head === key));
-const view = pr => ({ number: pr.number, url: 'https://' + pr.repository + '/pull/' + pr.number, state: pr.state, headRefOid: head(pr.head, pr.repository), baseRefOid: head(pr.base, pr.repository), baseRefName: pr.base, headRefName: pr.head, isDraft: pr.isDraft ?? false, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergedAt: pr.mergedAt ?? null, body: pr.body ?? '' });
+const view = pr => ({ number: pr.number, url: 'https://' + pr.repository + '/pull/' + pr.number, state: pr.state, headRefOid: head(pr.head, pr.repository), baseRefOid: head(pr.base, pr.repository), baseRefName: pr.base, headRefName: pr.head, isDraft: pr.isDraft ?? false, mergeCommit: pr.mergeCommit ? { oid: pr.mergeCommit } : null, mergedAt: pr.mergedAt ?? null, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null, closedAt: pr.closedAt ?? null, body: pr.body ?? '' });
 const repo = name => ({ id: name.endsWith('/application') ? 101 : 202, full_name: name.replace('github.com/', ''), html_url: 'https://' + name });
 const rest = pr => ({ number: pr.number, html_url: view(pr).url, state: pr.state.toLowerCase(), head: { ref: pr.head, sha: pr.headSha ?? head(pr.head, pr.repository), repo: pr.headRepo ?? repo(pr.repository) }, base: { ref: pr.base, sha: pr.baseSha ?? head(pr.base, pr.repository), repo: repo(pr.repository) } });
 const [group, verb] = args;
@@ -40,7 +40,7 @@ else if (group === 'pr' && verb === 'ready') { find(args[2]).isDraft = false; }
 else if (group === 'pr' && verb === 'merge') {
   const pr = find(args[2]);
   if (flag('--match-head-commit') !== head(pr.head)) { save(); console.error('head moved'); process.exit(1); }
-  pr.state = 'MERGED'; pr.mergeCommit = 'merge-' + pr.number; pr.mergedAt = new Date().toISOString();
+  pr.state = 'MERGED'; pr.mergeCommit = 'merge-' + pr.number; pr.mergedAt = new Date().toISOString(); pr.mergedBy = process.env.FAKE_GH_VIEWER ?? 'fixture-person';
   if (process.env.FAKE_GH_REAL_REMOTE) {
     const remote = process.env.FAKE_GH_REAL_REMOTE;
     const git = (...argv) => execFileSync('git', ['-C', remote, ...argv], { encoding: 'utf8' }).trim();
