@@ -36,6 +36,8 @@ const pill = (status, map = STATUS) => { const [label, tone] = map[status] ?? [s
 const ago = iso => { if (!iso) return '—'; const sec = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); return sec < 60 ? '剛剛' : sec < 3600 ? `${Math.floor(sec / 60)} 分前` : sec < 86400 ? `${Math.floor(sec / 3600)} 小時前` : `${Math.floor(sec / 86400)} 天前`; };
 const clock = iso => iso ? new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
 const elapsed = iso => { if (!iso) return ''; const sec = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000)); const m = Math.floor(sec / 60); return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}` : `${m}:${String(sec % 60).padStart(2, '0')}`; };
+/** How long something has waited for a person, in words: 等了 12 分鐘 / 3 小時 5 分 / 2 天. */
+const waited = iso => { if (!iso || Number.isNaN(Date.parse(iso))) return null; const min = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000)); return min < 1 ? '剛剛開始等' : min < 60 ? `等了 ${min} 分鐘` : min < 1440 ? `等了 ${Math.floor(min / 60)} 小時${min % 60 ? ` ${min % 60} 分` : ''}` : `等了 ${Math.floor(min / 1440)} 天`; };
 const targetName = target => target ?? '應用';
 const initial = name => [...String(name ?? '?')][0].toUpperCase();
 const active = stream => !['idle', 'blocked'].includes(stream.stage);
@@ -246,7 +248,8 @@ function askCards(projectId, items, many) {
     const body = buttons?.[0]?.body;
     const signed = body ? done.get(keyOf(body)) : null;
     const box = h(`div.ask.rise${signed ? '.done' : buttons ? '' : '.calm'}`, {},
-      h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', { title: sub }, sub) : null)), extra);
+      h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', { title: sub }, sub) : null),
+        !signed && waited(item.since) ? h('span.waited', { title: `從 ${new Date(item.since).toLocaleString()} 開始等` }, waited(item.since)) : null), extra);
     if (signed) box.append(h('div.signed', {}, icon(ICON.check, 16), h('span', {}, signed)));
     else if (buttons) box.append(h('div.btns', {}, buttons.map((button, i) => button.href ? h('a.btn', { href: button.href, target: '_blank', rel: 'noopener' }, button.label)
       : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result) }, button.label))));

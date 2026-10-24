@@ -1077,7 +1077,7 @@ test('FAKE provider: the bound VER hash is recomputable from the reviewer checko
 for (const mode of ['success', 'tampered review', 'substituted primary']) test(`FAKE provider: managed post-merge alignment ${mode}`, async t => {
   const f = await fixture(t);
   f.config.policy.autoApprove = true;
-  const worktree = path.join(f.root, '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
+  const worktree = path.join(await fs.realpath(f.root), '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
   await fs.mkdir(path.dirname(worktree), {recursive:true});
   await git(f.root,'worktree','move',f.worktree,worktree);
   await writeJson(path.join(f.root,'.protoflow/runner/state.json'), {schemaVersion:1,status:'IDLE',worktree,branch:await git(worktree,'branch','--show-current'),configHash:hash(f.config),afterMergeAlignment:true});
@@ -1532,6 +1532,35 @@ test('single target: a base people moved after the last delivery merged is taken
   assert.equal(result.status, 'PASS', JSON.stringify(result));
   const second = (await deliveryStatus(f.root)).deliveries.at(-1);
   assert.deepEqual([second.status, second.baseSha], ['MERGED', human]);
+});
+
+test('single target: the next version blocks before running when the base moved under work left in the worktree, with reasonCode base-moved', async t => {
+  const f = await fixture(t, { versions: 2 }); f.config.policy.autoApprove = true;
+  // The runner names its worktree by the source: move the fixture's worktree there, as runner start would create it.
+  const worktree = path.join(await fs.realpath(f.root), '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
+  await git(f.root, 'worktree', 'move', f.worktree, worktree);
+  // The executor never starts: the base check blocks first.
+  f.config.adapters.codex = { command: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutMs: 10000 } };
+  await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
+  const source = await sourceStatus(f.root), { sha, manifestId, ordinal } = source.entries[1];
+  source.entries[1] = { sha, manifestId, ordinal, status: 'PENDING', attempts: [] }; await saveSourceState(f.root, source);
+  // Version 2 has not run yet: no acceptance evidence.
+  for (const dir of [f.root, worktree]) await fs.rm(path.join(dir, '.protoflow/verifications/VER-2.json'));
+  const first = await syncDeliveries(f.root, f.config);
+  assert.equal(first.status, 'PASS', JSON.stringify(first));
+  await git(worktree, 'push', '-q', f.remote, 'HEAD:main');
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-080\n');
+  // Work left in the worktree is not the base's: version 2 would be built on a stale base.
+  await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>half done</main>\n');
+  const events = [];
+  const result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'base-moved'], JSON.stringify({ result, events }));
+  assert.deepEqual(events.map(event => event.event), ['base-moved', 'blocked']);
+  assert.equal(events[0].baseSha, human);
+  assert.deepEqual([events[1].reasonCode, events[1].manifestId], ['base-moved', `git-${f.shas[1]}`]);
+  assert.match(events[1].reason, /runner rebase/);
+  const entry = (await sourceStatus(f.root)).entries[1];
+  assert.deepEqual([entry.status, entry.reasonCode, typeof entry.blockedAt], ['BLOCKED', 'base-moved', 'string']);
 });
 
 test('single target: runner rebase retires a delivery built on a moved base and runs its versions again on the current base', async t => {

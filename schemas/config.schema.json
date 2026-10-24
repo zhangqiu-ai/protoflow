@@ -243,6 +243,11 @@
           "minimum": 0,
           "maximum": 10
         },
+        "stallRounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
         "transientRetries": {
           "type": "integer",
           "minimum": 0,
@@ -314,6 +319,15 @@
         "idleMs": {
           "type": "integer",
           "minimum": 20
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "type": "boolean"
         }
       }
     },

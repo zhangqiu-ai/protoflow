@@ -161,6 +161,25 @@ test('a blocked version waiting for a person carries the diagnosis of its failur
   assert.match(blocked.reason, /OAuth session expired/);
 });
 
+test('a runner reasonCode decides the diagnosis first, and a blocked version says since when it waits', async t => {
+  assert.equal(diagnose('Repair made no progress: 2 rounds in a row did not reduce the failures (21 → 21 → 21)', 'stalled').title, '修復沒有進展');
+  assert.equal(diagnose('Repair limit exhausted (3)', 'repair-limit').kind, 'repair-limit');
+  assert.deepEqual([diagnose('Base main moved to 1a2b3c4 but the runner worktree has 1 commit(s) not in the base', 'base-moved').kind, diagnose('Base main moved', 'base-moved').command], ['base-moved', 'protoflow runner rebase']);
+  // An environment block still tells an expired login from an unreachable network by its text.
+  const login = diagnose('Claude execution cannot run in this environment (EXEC-1, exit 1): OAuth token has expired', 'environment');
+  assert.deepEqual([login.kind, login.reasonCode, login.command], ['auth', 'environment', 'claude']);
+  assert.equal(diagnose('Codex execution cannot run in this environment: getaddrinfo ENOTFOUND api.openai.com', 'environment').kind, 'network');
+  // A code the dashboard does not know falls back to the text.
+  assert.equal(diagnose('Executor timed out after 1800000ms', 'execution').kind, 'timeout');
+  const since = '2026-10-24T10:00:00.000Z';
+  const f = await fixture(t, { blockedError: 'Repair made no progress: 2 rounds in a row did not reduce the failures (6 → 6 → 6)', blockedReasonCode: 'stalled', blockedAt: since });
+  const view = await dashboardSnapshot(f.root, { service: false });
+  const blocked = view.attention.find(item => item.kind === 'blocked-version');
+  assert.deepEqual([blocked.reasonCode, blocked.since, blocked.diagnosis.kind], ['stalled', since, 'stalled']);
+  assert.equal(view.streams[0].current.reasonCode, 'stalled'); assert.equal(view.streams[0].current.blockedAt, since);
+  assert.ok(view.attention.every(item => 'since' in item), 'every item says since when it waits, or null');
+});
+
 test('pages watching the same view share one poll, and a view nobody watches stops polling', async t => {
   const { root, home } = await fixture(t);
   await addProject(root, { home });
