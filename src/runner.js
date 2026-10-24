@@ -19,6 +19,7 @@ import { planVersion } from './planner.js';
 import { syncIssues } from './issues.js';
 import { runIssues } from './issue-runner.js';
 import { notifyDesktop } from './notify.js';
+import { EXECUTOR_ENVIRONMENT, BUILD_INPUTS } from './environment.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -223,12 +224,8 @@ async function reopenRejected(root, config, stream) {
 /** The executor provider has no capacity for us right now; with a fallback configured, the other executor takes over. */
 export const EXECUTOR_QUOTA = /usage limit|rate.?limit|quota|credit balance|overloaded|\b(?:429|529)\b|too many requests|model is at capacity/i;
 export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
-/**
- * An execution that failed because of the machine, not the version: an expired or missing login, or a network that
- * cannot be reached at all (DNS, refused connection, proxy tunnel). Another repair attempt cannot fix either, so the
- * version blocks at once with reasonCode `environment` instead of using up maxRepairAttempts.
- */
-export const EXECUTOR_ENVIRONMENT = /OAuth|session expired|not logged in|log ?in again|please run \/login|Failed to authenticate|authentication (?:failed|required)|invalid (?:x-)?api[ -]?key|\b401\b|Unauthorized|Could not resolve host|Temporary failure in name resolution|getaddrinfo|network is unreachable|CONNECT tunnel failed|\b(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH)\b/i;
+// Login and unreachable-network signatures live in environment.js with the build ones.
+export { EXECUTOR_ENVIRONMENT };
 /** What a verification failed on: one key per failing check, build variant or scene. */
 export function failureKeys(report) {
   const keys = ['build', 'functional', 'hygiene'].filter(section => report?.[section]?.status && report[section].status !== 'PASS');
@@ -523,6 +520,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       await onEvent({ event: attempt ? 'repair' : 'execute', sha: entry.sha, manifestId: entry.manifestId, attempt, worktree: runner.worktree });
       const { processStarting, processStarted, processFinished } = processHooks(root, config, stream, state, record);
 
+      // What this attempt's executor changes, so a build that fails for the machine can be told from one it broke.
+      const projectBefore = await applicationFingerprint(runner.worktree, config, target);
       // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
       const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
       let execution, diagnostic = '', executionContext = context;
@@ -591,7 +590,18 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (report.status === 'PASS') break;
-      if (report.status === 'NOT_RUN') throw failure('Verification NOT_RUN; configure all checks before retry', 'not-run');
+      if (report.status === 'NOT_RUN' && report.reasonCode === 'environment') {
+        // A build that failed for the machine blocks at once, unless this attempt changed what the build reads
+        // (manifests, lockfiles, native projects): then the failure may be the version's and repair goes on.
+        const changed = Object.keys({ ...projectBefore.files, ...execution.projectAfter?.files }).filter(file => projectBefore.files[file] !== execution.projectAfter?.files?.[file]);
+        const touched = changed.filter(file => BUILD_INPUTS.test(file));
+        if (!touched.length) {
+          const { phase, line, hint, retry } = report.environment;
+          throw failure(`Build cannot run in this environment (${report.id}, ${phase}): ${line}${hint ? ` (${hint})` : ''}; retried after ${Math.round(retry.delayMs / 1000)}s: ${retry.status}${retry.line ? `, ${retry.line}` : ''}; fix the machine, then runner retry`, 'environment');
+        }
+        record.buildInputsChanged = touched.slice(0, 20);
+        await saveProgress(root, config, stream, state);
+      } else if (report.status === 'NOT_RUN') throw failure('Verification NOT_RUN; configure all checks before retry', 'not-run');
       failureCounts.push(failed.length);
       const rounds = stalledRounds(failureCounts);
       if (stallRounds > 0 && rounds >= stallRounds && attempt < maximum) {

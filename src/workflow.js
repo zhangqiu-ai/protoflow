@@ -1,11 +1,13 @@
 import path from 'node:path';
-import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath, stat } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand, applicationHygiene } from './util.js';
 import { snapshot } from './sessions.js';
 import { verifyVisual } from './visual.js';
 import { runAcceptanceAdapter } from './acceptance.js';
 import { loadVersion } from './versions.js';
 import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
+import { buildEnvironment, swallowedFailure } from './environment.js';
 import { selectTarget, targetSettings, targetVariants, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 
 const date = () => new Date().toISOString();
@@ -49,6 +51,42 @@ const ANCHOR_CONVENTIONS = {
 };
 const isV2 = config => config.schemaVersion === 2;
 const checkCommands = (config, target) => isV2(config) ? selectTarget(config, target) : config.verification ?? {};
+/**
+ * A build that exits 0 still failed when it did not produce its configured `outputs` (relative to the directory the
+ * build runs in) or when its output shows a failure the tool swallowed (environment.js).
+ */
+async function checkBuild(root, command, result) {
+  if (result.status !== 'PASS') return result;
+  const missing = [];
+  for (const output of command?.outputs ?? []) if (!await stat(path.resolve(root, output)).catch(() => null)) missing.push(output);
+  const swallowed = swallowedFailure(result);
+  if (!missing.length && !swallowed) return result;
+  const reason = [missing.length && `build exited 0 but did not produce: ${missing.join(', ')}`, swallowed && `build output reports a failure: ${swallowed}`].filter(Boolean).join('\n');
+  const tail = missing.length && !swallowed ? String(result.stdout ?? '').trim().split('\n').slice(-20).join('\n') : '';
+  return { ...result, status: 'FAIL', error: reason, stderr: [result.stderr, reason, tail].filter(Boolean).join('\n') };
+}
+/**
+ * One build command. A failure whose output names the machine (an unreachable network, a fallback this machine cannot
+ * take) runs once more after policy.transientRetryDelayMs; failing the same way again, the build is NOT_RUN with
+ * reasonCode `environment`, because another repair cannot fix it.
+ */
+async function runBuild(root, runPhase, phase, command, { retryDelayMs, signal }) {
+  const run = async () => checkBuild(root, command, await runPhase(phase, command));
+  const first = await run();
+  const cause = first.status === 'FAIL' && buildEnvironment(first);
+  if (!cause) return first;
+  try { await delay(retryDelayMs, undefined, { signal }); }
+  catch {
+    const error = new Error(`STOPPED: verification ${phase} was interrupted`);
+    error.code = 'RUNNER_STOPPED'; error.phase = phase; error.result = first;
+    throw error;
+  }
+  const second = await run();
+  const again = second.status === 'FAIL' && buildEnvironment(second);
+  const retry = { at: date(), delayMs: retryDelayMs, firstLine: cause.line, status: second.status, ...(again && { line: again.line }) };
+  if (!again) return { ...second, environmentRetry: retry };
+  return { ...second, status: 'NOT_RUN', reasonCode: 'environment', environment: { phase, line: again.line, ...(again.hint && { hint: again.hint }), retry }, environmentRetry: retry };
+}
 /**
  * The build phase: the target's own build, then each variant's build (one codebase, several runtimes). A failed
  * optional variant build is recorded but does not fail the target; its captures will not pass either.
@@ -280,15 +318,19 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   };
   // Build may produce project assets. Bind evidence after build, before acceptance.
   const commands = checkCommands(config, target);
-  const build = await buildAll(runPhase, isV2(config) ? targetVariants(selectTarget(config, target)) : [], commands.build);
+  const retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
+  const build = await buildAll((phase, command) => runBuild(root, runPhase, phase, command, { retryDelayMs, signal }), isV2(config) ? targetVariants(selectTarget(config, target)) : [], commands.build);
+  // A build this machine cannot run leaves nothing to check: the version waits for the machine, not for a repair.
+  const environment = build.status === 'NOT_RUN' ? [build, ...Object.values(build.variants ?? {})].find(result => result.reasonCode === 'environment')?.environment : null;
+  const skipped = environment && { status: 'NOT_RUN', reason: `Build could not run in this environment (${environment.phase}): ${environment.line}` };
   const before = await applicationFingerprint(root, config, target);
   const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
-  const functional = !isV2(config) && commands.functional?.adapter === 'acceptance'
+  const functional = skipped ? { ...skipped } : !isV2(config) && commands.functional?.adapter === 'acceptance'
     ? await runAcceptanceAdapter(root, config, 'functional', acceptanceEvidence, { signal, onBeforeSpawn, onStart, onFinish })
     : await runPhase('functional', commands.functional);
   const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
   if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
-  const visual = isV2(config)
+  const visual = skipped ? { ...skipped, scenes: [], artifacts: [] } : isV2(config)
     // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
     ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
     : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
@@ -311,7 +353,7 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   const hygiene = await applicationHygiene(root, after.files);
   const checks = [build.status, functional.status, visual.status, hygiene.status];
   const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status };
+  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(environment && status === 'NOT_RUN' && { reasonCode: 'environment', environment }) };
   // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
   if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
   return persist(root, 'verifications', record);

@@ -1529,6 +1529,42 @@ test('an expired login blocks at once with reasonCode environment, without repai
   assert.equal((await runnerStatus(root, config)).blocked, undefined);
 });
 
+test('a build that cannot run on this machine blocks with reasonCode environment after one retry, without repair', async t => {
+  const { root, config } = await fixture(t);
+  config.adapters.codex.command.argv = [process.execPath, '-e', 'process.exit(0)'];
+  const runs = path.join(root, '.protoflow', 'build-runs');
+  config.verification = { build: { argv: [process.execPath, '-e', `require('fs').appendFileSync(${JSON.stringify(runs)}, 'x'); console.error("fatal: unable to access 'https://repo1.maven.org/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL"); process.exit(1)`] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.equal(result.reasonCode, 'environment');
+  // The reason carries the matching output line and what the retry did.
+  assert.match(result.reason, /Build cannot run in this environment \(VER-[^,]+, build\): fatal: unable to access .*SSL_connect.*; retried after 0s: FAIL, fatal: unable to access/);
+  assert.equal(await fs.readFile(runs, 'utf8'), 'xx', 'the build ran once more before blocking');
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'repair', 'verified', 'blocked'].includes(event)), ['execute', 'verified', 'blocked']);
+  assert.equal(events.at(-1).reasonCode, 'environment');
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1, 'no repair attempt was spent'); assert.equal(entry.reasonCode, 'environment');
+});
+
+test('a build that fails for the machine after the attempt changed build inputs goes on to repair', async t => {
+  const { root, config } = await fixture(t);
+  // The executor adds a dependency each time; the build then fails with a network line, which may be the version's.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `require('fs').writeFileSync('package.json', JSON.stringify({ dependencies: { 'native-thing': String(Math.random()) } }))`];
+  config.verification = { build: { argv: [process.execPath, '-e', `console.error('npm ERR! getaddrinfo ENOTFOUND registry.example.test'); process.exit(1)`] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 1, stallRounds: 0, transientRetries: 0, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event.event) });
+  assert.equal(result.reasonCode, 'repair-limit');
+  assert.deepEqual(events.filter(event => ['execute', 'repair', 'verified', 'blocked'].includes(event)), ['execute', 'verified', 'repair', 'verified', 'blocked']);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.deepEqual(entry.attempts.map(attempt => attempt.buildInputsChanged), [['package.json'], ['package.json']]);
+});
+
 test('repair rounds that do not reduce the failures block as stalled before the attempts run out', async t => {
   const { root, config } = await fixture(t);
   // The executor succeeds without changing anything; the build keeps failing the same way.

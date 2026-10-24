@@ -151,3 +151,44 @@ test('repair does not retry NOT_RUN checks and escalates to pending human review
   const review = JSON.parse(await readFile(path.join(root, '.protoflow/reviews', `${result.reviewId}.json`)));
   assert.equal(review.status, 'pending');
 });
+test('a build that exits 0 still fails without its outputs or with a swallowed pod install failure, and is not retried', async t => {
+  const { root, config, manifest } = await target(t);
+  const node = script => [process.execPath, '-e', script];
+  const policy = { ...config.policy, transientRetryDelayMs: 0 };
+  const missing = await verify(root, { ...config, policy, verification: { build: { argv: node('console.log("built")'), outputs: ['ios/App.xcworkspace'] } } }, manifest.id);
+  assert.equal(missing.build.status, 'FAIL'); assert.match(missing.build.error, /exited 0 but did not produce: ios\/App\.xcworkspace/);
+  assert.match(missing.build.stderr, /built/, 'the end of the build output comes with the reason');
+  assert.equal(missing.build.environmentRetry, undefined); assert.equal(missing.status, 'FAIL'); assert.equal(missing.reasonCode, undefined);
+  const produced = await verify(root, { ...config, policy, verification: { build: { argv: node('require("fs").mkdirSync("ios/App.xcworkspace", { recursive: true })'), outputs: ['ios/App.xcworkspace'] } } }, manifest.id);
+  assert.equal(produced.build.status, 'PASS');
+  // Expo prebuild exits 0 when pod install fails; a native dependency the version added is the version's failure.
+  const pod = 'console.log("✔ Finished prebuild\\n⚠️  Something went wrong running `pod install` in the `ios` directory.\\nCommand `pod install` failed.\\n└─ Cause: Unable to find a specification for `RNFoo` depended upon by `RNBar`")';
+  const swallowed = await verify(root, { ...config, policy, verification: { build: { argv: node(pod) } } }, manifest.id);
+  assert.equal(swallowed.build.status, 'FAIL'); assert.match(swallowed.build.error, /reports a failure: ⚠️ +Something went wrong running `pod install`[\s\S]*RNFoo/);
+  assert.equal(swallowed.build.environmentRetry, undefined, 'a failure that does not name the machine is not retried');
+  assert.equal(swallowed.status, 'FAIL'); assert.equal(swallowed.reasonCode, undefined);
+});
+test('a build that fails for the machine runs once more: failing again it is NOT_RUN environment and nothing else runs', async t => {
+  const { root, config, manifest } = await target(t);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'protoflow-build-runs-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const runs = path.join(scratch, 'runs'), marker = path.join(scratch, 'functional');
+  const count = `const fs = require('fs'); fs.appendFileSync(${JSON.stringify(runs)}, 'x'); const run = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').length;`;
+  const functional = { argv: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] };
+  const policy = { ...config.policy, transientRetryDelayMs: 0 };
+  // hermes-engine falls back to a source build that needs cmake when its Maven check fails; Expo swallows it.
+  const hermes = `${count} console.log("⚠️  Something went wrong running \`pod install\` in the \`ios\` directory.\\n[!] Invalid \`hermes-engine.podspec\` file: [!] Unable to locate the executable \`cmake\`.")`;
+  const blocked = await verify(root, { ...config, policy, verification: { build: { argv: [process.execPath, '-e', hermes] }, functional } }, manifest.id);
+  assert.equal((await readFile(runs, 'utf8')).length, 2, 'the build ran once more');
+  assert.equal(blocked.status, 'NOT_RUN'); assert.equal(blocked.reasonCode, 'environment'); assert.equal(blocked.build.status, 'NOT_RUN');
+  assert.match(blocked.environment.line, /Unable to locate the executable `cmake`/); assert.match(blocked.environment.hint, /HERMES_ENGINE_TARBALL_PATH/);
+  assert.deepEqual([blocked.environment.phase, blocked.environment.retry.status], ['build', 'FAIL']); assert.match(blocked.environment.retry.firstLine, /cmake/);
+  assert.equal(blocked.functional.status, 'NOT_RUN'); assert.equal(blocked.visual.status, 'NOT_RUN');
+  await assert.rejects(readFile(marker), /ENOENT/, 'functional checks did not run against a build that never happened');
+  // A dropped connection on the first run and a clean second run: the build passes and the checks go on.
+  await rm(runs);
+  const flaky = `${count} if (run === 1) { console.error("fatal: unable to access 'https://repo1.maven.org/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL"); process.exit(1); }`;
+  const recovered = await verify(root, { ...config, policy, verification: { build: { argv: [process.execPath, '-e', flaky] }, functional } }, manifest.id);
+  assert.equal(recovered.build.status, 'PASS'); assert.equal(recovered.functional.status, 'PASS'); assert.equal(recovered.reasonCode, undefined);
+  assert.match(recovered.build.environmentRetry.firstLine, /SSL_connect/); assert.equal(recovered.build.environmentRetry.status, 'PASS');
+});

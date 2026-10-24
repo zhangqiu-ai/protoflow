@@ -178,6 +178,8 @@ Expo 注意事項（Continuous Native Generation，範例為 SDK 58、Expo Route
 - 每個原型畫面是一個路由（`app/<screen>.tsx`），`app.json` 的 `scheme` 提供 deep link；Stack 關閉標題列（`headerShown: false`，原型只畫內容區域）與轉場動畫。由 deep link 直接打開的畫面沒有上一頁，返回需改以 `router.replace`。
 - 功能測試用 `jest-expo` preset 與 `expo-router/testing-library` 的 `renderRouter('./app', { initialUrl })`，在真實路由樹上驗證；`@testing-library/react-native` 14 的 `fireEvent` 是非同步的，需 `await`。
 - Runner worktree 沒有 `node_modules`：以 `runner.setup` 執行 `npm --prefix expo ci`。
+- `expo prebuild` 在 `pod install` 失敗時只印出「Something went wrong running `pod install`」並以 0 結束，下一步的 `xcodebuild` 才因找不到 workspace 失敗。ProtoFlow 把這行輸出視為 build FAIL；建議在 target 的 `build` 加 `outputs`（相對於執行建置的 worktree 根目錄，例如 `["expo/ios/Podfile.lock"]`），exit 0 但沒有產出時同樣記為 FAIL。
+- hermes-engine 的 podspec 只對 Maven 做一次 HEAD 檢查、不重試；檢查失敗就改從原始碼建置 Hermes，需要 cmake，錯誤是「Unable to locate the executable `cmake`」。ProtoFlow 把這類建置失敗與下載中斷、連線逾時歸為建置環境問題：等 `policy.transientRetryDelayMs` 後重跑一次，仍失敗則版本 BLOCKED、`reasonCode` 為 `environment`，不進入修復。網路到 Maven 不穩定時，可在 Runner 服務的環境設定 `HERMES_ENGINE_TARBALL_PATH` 指向本機 tarball 跳過檢查。
 
 Compose 與 Flutter 注意事項：
 
