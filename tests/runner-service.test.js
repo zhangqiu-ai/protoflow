@@ -54,6 +54,24 @@ test('FAKE launchctl only: install resolves every tool to an absolute path, writ
   assert.equal(removed.status, 'PASS'); await assert.rejects(fs.access(result.plist), { code: 'ENOENT' });
 });
 
+test('FAKE launchctl only: uninstall returns once the service process has exited, so a command right after finds its locks free', async t => {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1500)'], { stdio: 'ignore' });
+  const done = new Promise(resolve => child.on('exit', resolve));
+  t.after(() => child.kill());
+  const { root, options } = await fixture(t, { print: `state = running\n\tpid = ${child.pid}\n\truns = 1` });
+  const started = Date.now();
+  const removed = await uninstallService(root, options);
+  assert.deepEqual([removed.status, removed.pid, removed.exited], ['PASS', child.pid, true], JSON.stringify(removed));
+  assert.ok(Date.now() - started >= 1000, 'uninstall waited for the process');
+  await done;
+  const stuck = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
+  t.after(() => stuck.kill());
+  const again = await fixture(t, { print: `state = running\n\tpid = ${stuck.pid}` });
+  const late = await uninstallService(again.root, { ...again.options, exitTimeoutMs: 300 });
+  assert.deepEqual([late.status, late.exited], ['PASS', false]); assert.match(late.warning, /still exiting/);
+});
+
 test('FAKE launchctl only: install refuses missing tools, a running foreground runner and other systems', async t => {
   const missing = await fixture(t, { tools: ['git', 'gh'] });
   const result = await installService(missing.root, missing.config, { ...missing.options, env: { PATH: missing.bin }, commonBins: [] });

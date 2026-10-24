@@ -34,6 +34,19 @@ const revokes = (revocation, item, index, defaultTarget) => revocation.index <= 
 const publicRevocation = ({ index, ...revocation }) => revocation;
 
 /**
+ * runner rebase resets the worktree to a moved base and runs its versions again from scratch (records in
+ * .protoflow/rebases): no verification made before the rebase accepts the earliest restarted version or a later one.
+ * These are not rejections: nothing reopens, and the review history is unchanged.
+ */
+function rebaseRevocations(manifests, rebases, defaultTarget) {
+  const order = new Map(manifests.map((manifest, index) => [manifest.id, index]));
+  return rebases.flatMap(rebase => {
+    const indexes = (rebase.versions ?? []).filter(manifestId => order.has(manifestId)).map(manifestId => order.get(manifestId));
+    return indexes.length ? [{ rebaseId: rebase.id, at: rebase.at, target: rebase.target ?? defaultTarget, index: Math.min(...indexes) }] : [];
+  });
+}
+
+/**
  * A prototype version is accepted once a PASS verification is bound to its exact manifest and prototype content
  * and no rejection revokes it. With targets, only that target's verifications count; records made before targets
  * existed belong to the first one. `index` is the version's position in checkpoint order.
@@ -58,7 +71,7 @@ async function queueRecords(root, config) {
   const manifests = (await records(root, 'manifests')).sort(chronological);
   const verifications = await records(root, 'verifications');
   const defaultTarget = config.schemaVersion === 2 ? config.targets[0]?.id : undefined;
-  return { manifests, verifications, defaultTarget, revoked: revocations(manifests, verifications, await records(root, 'reviews'), defaultTarget) };
+  return { manifests, verifications, defaultTarget, revoked: revocations(manifests, verifications, await records(root, 'reviews'), defaultTarget), rebased: rebaseRevocations(manifests, await records(root, 'rebases'), defaultTarget) };
 }
 
 /** Manifest IDs a target's delivery has finished: merged, or handed to a person as an open PR (merge manual/none). */
@@ -90,13 +103,13 @@ function cursor(versions, accepted) {
  * by every target. `release` reports the newest version every required target has accepted.
  */
 export async function versionQueue(root, config, { target } = {}) {
-  const { manifests, verifications, revoked } = await queueRecords(root, config);
+  const { manifests, verifications, revoked, rebased } = await queueRecords(root, config);
   const sequential = config.policy?.sequentialVersions !== false;
   const ids = config.schemaVersion === 2 ? config.targets.map(item => item.id) : [];
   if (target && !ids.includes(target)) throw new Error(`Unknown target: ${target}`);
   const selected = target ?? (ids.length === 1 ? ids[0] : null);
   const versions = manifests.map((manifest, index) => {
-    const options = { index, revoked };
+    const options = { index, revoked: [...revoked, ...rebased] };
     const byTarget = Object.fromEntries(ids.map(id => [id, acceptedBy(manifest, verifications, id, ids[0], options)?.id ?? null]));
     const count = Object.values(byTarget).filter(Boolean).length;
     const acceptedById = ids.length ? (selected ? byTarget[selected] : count === ids.length ? 'all' : null) : acceptedBy(manifest, verifications, undefined, undefined, options)?.id ?? null;

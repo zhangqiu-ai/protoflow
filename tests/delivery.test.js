@@ -1599,6 +1599,39 @@ test('single target: runner rebase retires a delivery built on a moved base and 
   assert.equal(source.entries[0].deliveryId, fresh.id);
 });
 
+test('single target: after runner rebase the restarted version executes again on the new base instead of recovering its pre-rebase PASS', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const { versionQueue } = await import('../src/queue.js');
+  // The runner names its worktree by the source: move the fixture's worktree there, as runner start would create it.
+  const worktree = path.join(await fs.realpath(f.root), '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
+  await git(f.root, 'worktree', 'move', f.worktree, worktree); f.worktree = worktree;
+  f.config.adapters.codex = { command: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutMs: 10000 } };
+  await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-082\n');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
+  // Rebased by an engine that did not record the rebase for the queue (0.3.46): only the source state knows.
+  const rebased = await rebaseDeliveries(f.root, f.config, f.worktree);
+  assert.deepEqual(rebased.versions, [`git-${f.shas[0]}`]);
+  assert.equal((await versionQueue(f.worktree, f.config)).versions[0].acceptedBy, 'VER-1', 'before the fix the old PASS still accepts the version');
+
+  const controller = new AbortController(), events = [];
+  const result = await runOnce(f.root, f.config, { signal: controller.signal, onEvent: event => { events.push(event); if (event.event === 'execute') controller.abort(); } });
+  assert.notEqual(result.recovered, true, JSON.stringify(result));
+  assert.deepEqual(events.slice(0, 1).map(event => [event.event, event.manifestId, event.attempt]), [['execute', `git-${f.shas[0]}`, 0]], JSON.stringify({ result, events }));
+  const id = `REBASE-${rebased.at.replace(/[:.]/g, '-')}`;
+  for (const directory of [f.root, f.worktree]) {
+    const record = await readJson(path.join(directory, `.protoflow/rebases/${id}.json`));
+    assert.deepEqual([record.at, record.to, record.versions], [rebased.at, human, [`git-${f.shas[0]}`]]);
+  }
+  for (const directory of [f.root, f.worktree]) {
+    const queue = await versionQueue(directory, f.config);
+    assert.deepEqual([queue.current?.id, queue.versions[0].acceptedBy, queue.versions[0].rejections], [`git-${f.shas[0]}`, null, undefined]);
+  }
+  // A verification made after the rebase accepts the version again.
+  await acceptNext(f, { sha: f.shas[0], ordinal: 1, verificationId: 'VER-1b', executionId: 'EXEC-fixture-1b', content: '<main>v1 on the current base</main>\n', reuseFrozen: true });
+  assert.equal((await versionQueue(f.worktree, f.config)).versions[0].acceptedBy, 'VER-1b');
+});
+
 test('multi-target FAKE transport: an unpublished delivery whose base moved is rebuilt on the current base, unless a reviewer rejected it', async t => {
   for (const mode of ['approved', 'rejected']) await t.test(mode, async t => {
     const f = await multiFixture(t); f.config.policy.autoApprove = true;

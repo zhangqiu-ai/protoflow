@@ -139,14 +139,26 @@ export async function installService(root, config, options = {}) {
   return { status: 'PASS', label, plist, tools, logs: { stdout: path.join(logs, 'service.out.log'), stderr: path.join(logs, 'service.err.log') }, next: 'runner service status' };
 }
 
+/** Whether `pid` exited within `timeoutMs`. */
+async function exited(pid, timeoutMs) {
+  for (const deadline = Date.now() + timeoutMs; ; await new Promise(resolve => setTimeout(resolve, 200))) {
+    try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return true; }
+    if (Date.now() >= deadline) return false;
+  }
+}
+
 export async function uninstallService(root, options = {}) {
   const ctx = context(root, options);
   if (ctx.platform !== 'darwin') return { status: 'NOT_RUN', reason: 'runner service supports macOS launchd only' };
   const label = await serviceLabel(root), plist = path.join(ctx.home, 'Library/LaunchAgents', `${label}.plist`);
+  const before = await agentState(ctx, label);
   const result = await launch(ctx, ['bootout', `${ctx.domain}/${label}`]);
   await fs.rm(plist, { force: true });
   await fs.rm(await projectPath(root, '.protoflow/runner/service.json'), { force: true });
-  return { status: 'PASS', label, stopped: result.status === 'PASS' };
+  // bootout returns before the runner exits; a command run right after (runner rebase) would find its locks still held.
+  if (!before?.pid) return { status: 'PASS', label, stopped: result.status === 'PASS' };
+  const gone = await exited(before.pid, options.exitTimeoutMs ?? 60000);
+  return { status: 'PASS', label, stopped: result.status === 'PASS', pid: before.pid, exited: gone, ...(!gone && { warning: `The runner (pid ${before.pid}) is still exiting; wait for it before running another runner command` }) };
 }
 
 /** launchd's view of the job plus the runner's own heartbeat: healthy means running and heartbeating as that pid. */

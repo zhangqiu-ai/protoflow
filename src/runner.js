@@ -449,6 +449,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   if (signal?.aborted) return { status: 'STOPPED' };
   if (runner.status === 'SETUP_FAILED' || runner.status === 'INITIALIZING') throw new Error(`Runner requires initialization recovery: ${runner.status}`);
   await syncCheckpoints(root, runner.worktree, state, config);
+  // A rebase made by an engine that did not record it yet (0.3.46 and earlier) is recorded before the queue is read.
+  await recordRebases(root, runner.worktree, state);
   const queue = await versionQueue(runner.worktree, config, { target });
   // Reconcile a crash after independent verification passed but before source progress was saved.
   const version = queue.versions.find(item => item.id === entry.manifestId);
@@ -760,6 +762,20 @@ export async function reclassifyRunner(root, config = {}, { target = null } = {}
  * reset to the current base with its old content kept under an archive ref, and the versions run again from scratch.
  * The levels of the versions are unchanged; a `rebased` event records the archive and the retired deliveries.
  */
+/**
+ * Record each rebase of the source state where the queue reads its records, in the project and in the runner worktree:
+ * verifications made before it no longer accept the versions it restarted (queue.js rebaseRevocations), so a restarted
+ * version is executed and verified again on the new base instead of being taken for an interrupted PASS.
+ */
+async function recordRebases(root, worktree, state) {
+  for (const rebase of state.rebased ?? []) {
+    const record = { schemaVersion: 1, id: `REBASE-${rebase.at.replace(/[:.]/g, '-')}`, at: rebase.at, from: rebase.from, to: rebase.to, archive: rebase.archive, deliveries: rebase.deliveries ?? [], versions: (rebase.entries ?? []).map(entry => entry.manifestId) };
+    for (const directory of [root, worktree]) {
+      const file = await projectPath(directory, `.protoflow/rebases/${record.id}.json`);
+      if (!await readJson(file, null)) await writeJson(file, record);
+    }
+  }
+}
 export async function rebaseRunner(root, config = {}, { target = null } = {}) {
   if (isMultiTarget(config)) throw new Error('runner rebase supports single-target streams only');
   const statePath = runnerStatePath(config, target);
@@ -769,6 +785,7 @@ export async function rebaseRunner(root, config = {}, { target = null } = {}) {
   const state = await loadProgress(root, config, target);
   for (const entry of state.entries) assertNoActiveProcesses(entry);
   const result = await rebaseDeliveries(root, config, runner.worktree);
+  await recordRebases(root, runner.worktree, await loadProgress(root, config, target));
   runner.status = 'IDLE'; runner.current = null; runner.base = result.to;
   runner.rebaseHistory = [...(runner.rebaseHistory ?? []), { at: result.at, from: result.from, to: result.to, archive: result.archive }];
   await saveRunner(root, runner, statePath);
