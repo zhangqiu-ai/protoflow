@@ -724,6 +724,7 @@ export async function supersedeRunner(root, config = {}, { target = null } = {})
   const { current, runner, statePath } = await blockedCurrent(root, config, target, 'supersede', 'superseding');
   const result = await supersedeVersions(root, config, { from: current.manifestId });
   await resyncManifests(root, runner, statePath, [...result.superseded, result.manifest.id]);
+  await recordEvent(root, { at: new Date().toISOString(), event: 'superseded', target, sha: current.sha, manifestId: current.manifestId, into: result.manifest.id, superseded: result.superseded, level: result.manifest.level, archive: result.archive });
   return { status: 'PASS', superseded: result.superseded, manifestId: result.manifest.id, level: result.manifest.level,
     manifestHash: hash(result.manifest), archive: result.archive,
     next: result.manifest.requires?.architecture ? 'bind the ADR to manifestHash, then runner start' : 'runner start' };
