@@ -153,7 +153,7 @@ test('the sidebar lists every project on every page, switches between them and f
 });
 
 test('the inbox gathers what waits across projects, most urgent first, with the fix for a known failure', async ({ page, context }) => {
-  const blocked = await dashboardFixture({ blockedError: 'Claude execution FAIL (EXEC-fixture, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed' });
+  const blocked = await dashboardFixture({ blockedError: 'Claude execution FAIL (EXEC-fixture, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed', blockedAt: new Date(Date.now() - 2 * 3600000 - 300000).toISOString() });
   await addProject(blocked.root, { home: blocked.home });
   const sent = [];
   const server = createDashboardServer({ home: blocked.home, port: 0, service: false, pollMs: 200, actions: async (root, body) => { sent.push(body); return { status: 'PASS', next: 'FAKE FIXTURE action recorded' }; } });
@@ -180,6 +180,8 @@ test('the inbox gathers what waits across projects, most urgent first, with the 
     const first = group.locator('.ask').first();
     await expect(first).toContainText('阻塞');
     await expect(first.locator('.diag')).toContainText('Claude 登入失效');
+    // It says how long it has waited for a person.
+    await expect(first.locator('.waited')).toHaveText(/^等了 2 小時( \d+ 分)?$/);
     await expect(first.locator('.diag ol li code').first()).toHaveText('claude');
     await first.getByRole('button', { name: '複製命令 claude' }).click();
     await expect(page.locator('#toast')).toHaveText('已複製：claude');

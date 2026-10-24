@@ -1490,7 +1490,7 @@ test('a failed executor run is one bounded attempt and the next attempt is told 
   const events = [];
   const result = await runOnce(root, config, { onEvent: event => events.push(event.event) });
   assert.equal(result.status, 'BLOCKED'); assert.match(result.reason, /Codex execution FAIL .*exit 1.*executor crashed/);
-  assert.deepEqual(events, ['execute', 'execute-failed', 'repair']);
+  assert.deepEqual(events, ['execute', 'execute-failed', 'repair', 'blocked']);
   const requests = (await fs.readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(requests.map(request => request.kind), ['implement', 'repair']);
   assert.equal(requests[1].repair.attempt, 1); assert.equal(requests[1].repair.verification, null);
@@ -1499,6 +1499,69 @@ test('a failed executor run is one bounded attempt and the next attempt is told 
   const attempts = (await sourceStatus(root)).entries[0].attempts;
   assert.deepEqual(attempts.map(attempt => attempt.status), ['FAIL', 'FAIL']);
   assert.ok(attempts.every(attempt => attempt.completedAt));
+});
+
+test('an expired login blocks at once with reasonCode environment, without repair attempts or retries', async t => {
+  const { root, config } = await fixture(t);
+  config.adapters.codex.command.argv = [process.execPath, '-e', `console.error('Error: OAuth token has expired; please run codex login\\nretry later');process.exit(1)`];
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 2, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(result.status, 'BLOCKED'); assert.equal(result.reasonCode, 'environment');
+  assert.match(result.reason, /cannot run in this environment.*OAuth token has expired/s);
+  assert.deepEqual(events.map(event => event.event), ['execute', 'blocked']);
+  assert.equal(events[1].reasonCode, 'environment'); assert.match(events[1].reason, /^Error: OAuth token has expired/);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1, 'no repair attempt was spent'); assert.equal(entry.attempts[0].transientRetries, undefined, 'and nothing was retried');
+  assert.deepEqual([entry.reasonCode, entry.attempts[0].reasonCode], ['environment', 'environment']); assert.ok(entry.blockedAt);
+  // runner status shows the code and the first lines of the raw error without reading the attempts.
+  const status = await runnerStatus(root, config);
+  assert.deepEqual([status.blocked.manifestId, status.blocked.reasonCode, status.blocked.since], [entry.manifestId, 'environment', entry.blockedAt]);
+  assert.match(status.blocked.reason, /OAuth token has expired/);
+  await retryRunner(root, config);
+  const retried = (await sourceStatus(root)).entries[0];
+  assert.deepEqual([retried.status, retried.reasonCode, retried.blockedAt, retried.retries[0].reasonCode], ['PENDING', undefined, undefined, 'environment']);
+  assert.equal((await runnerStatus(root, config)).blocked, undefined);
+});
+
+test('repair rounds that do not reduce the failures block as stalled before the attempts run out', async t => {
+  const { root, config } = await fixture(t);
+  // The executor succeeds without changing anything; the build keeps failing the same way.
+  config.adapters.codex.command.argv = [process.execPath, '-e', 'process.exit(0)'];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(3)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event.event) });
+  assert.equal(result.status, 'BLOCKED'); assert.equal(result.reasonCode, 'stalled');
+  assert.match(result.reason, /2 rounds in a row did not reduce the failures \((\d+) → \1 → \1\).*build/);
+  assert.deepEqual(events.filter(event => ['execute', 'repair', 'verified', 'blocked'].includes(event)), ['execute', 'verified', 'repair', 'verified', 'repair', 'verified', 'blocked']);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 3, 'the fourth attempt was not spent'); assert.equal(entry.reasonCode, 'stalled');
+  assert.ok(entry.attempts.every(attempt => attempt.failures.keys.includes('build')));
+  // policy.stallRounds 0 turns the check off: the attempts run out instead.
+  config.policy.stallRounds = 0;
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await configureRunner(root, config);
+  await retryRunner(root, config);
+  const exhausted = await runOnce(root, config);
+  assert.equal(exhausted.reasonCode, 'repair-limit'); assert.match(exhausted.reason, /Repair limit exhausted \(3\)/);
+});
+
+test('progress is a lower failure count than the round before; equal, superset and swapped failures are not', async () => {
+  const { stalledRounds, failureKeys } = await import('../src/runner.js');
+  assert.equal(stalledRounds([21]), 0);
+  assert.equal(stalledRounds([21, 21, 21]), 2);
+  assert.equal(stalledRounds([21, 18, 18]), 1);
+  assert.equal(stalledRounds([21, 22, 23]), 2, 'more failures are no progress');
+  assert.equal(stalledRounds([24, 21, 21, 18]), 0);
+  const report = { build: { status: 'PASS', variants: { iphone: { status: 'PASS' }, android: { status: 'FAIL' } } }, functional: { status: 'PASS' }, hygiene: { status: 'FAIL' },
+    visual: { status: 'FAIL', scenes: [{ id: 'home', variant: 'ipad', status: 'FAIL' }, { id: 'home', variant: 'iphone', status: 'PASS' }, { id: 'goal', status: 'NOT_RUN' }] }, changedDuringVerification: false };
+  assert.deepEqual(failureKeys(report), ['hygiene', 'build:android', 'scene:ipad/home', 'scene:goal']);
+  assert.deepEqual(failureKeys({ build: { status: 'PASS' }, functional: { status: 'FAIL' }, visual: { status: 'FAIL', scenes: [] }, changedDuringVerification: true }), ['functional', 'visual', 'changedDuringVerification']);
 });
 
 test('automatic review retries cover transient blocks, including legacy records known only by their reason', async () => {

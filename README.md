@@ -151,6 +151,9 @@ protoflow runner status --project /path/to/app
 - **重試與失敗**：
   - 供應端的暫時性故障（限流、5xx、串流中斷）會自動重試，次數與間隔由 `policy.transientRetries`、`policy.transientRetryDelayMs` 設定，不計入修復次數。
   - 執行失敗或逾時算一次 attempt，在 `policy.maxRepairAttempts` 內進入下一輪修復，用盡才 BLOCKED。
+  - 登入失效或網路完全連不上（DNS、拒絕連線、代理通道失敗）屬於環境問題：立即 BLOCKED，`reasonCode` 為 `environment`，不重試也不計入修復次數。
+  - 連續 `policy.stallRounds` 輪（預設 2，0 為關閉）修復後失敗項沒有減少時提前 BLOCKED，`reasonCode` 為 `stalled`，不把剩下的修復次數耗在同樣的失敗上。
+  - `runner status` 的 `blocked` 列出卡住版本的 `reasonCode`、開始時間與原始錯誤前幾行；macOS 上版本阻塞或 Issue 需要人決定時發出桌面通知，可用 `notifications.desktop: false` 關閉。
   - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。
 - **恢復**：BLOCKED、STOPPED 或中斷的 RUNNING 必須先查明原因，再執行 `runner retry [--target id]`。設定錯誤時，先用 `runner configure` 明確綁定新設定。啟動意圖沒有留下 PID 時，用 `runner retry --recover-unknown-start`；引擎會先確認沒有存活程序。原型本身有錯、修正排在後面的版本時，用 `runner supersede` 把卡住的版本併入最新版；舊引擎誤判等級（例如卡在不需要的 `--spec`）時，用 `runner reclassify` 以目前引擎重新分級，見 [重新分級](docs/git-runner.md)。`runner gc [--apply]` 會封存並回收不再使用的乾淨 worktree。
 - **定期巡查**：可在 Codex app 建立 heartbeat 自動化，定期執行 `runner start --once`、`delivery sync` 與 `delivery status`，見 [定期巡查](docs/git-runner.md#定期巡查codex-自動化)。

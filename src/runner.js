@@ -18,20 +18,30 @@ import { collectRunnerWorktrees } from './runner-gc.js';
 import { planVersion } from './planner.js';
 import { syncIssues } from './issues.js';
 import { runIssues } from './issue-runner.js';
+import { notifyDesktop } from './notify.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
  * entries' status combined from those targets (see sourceView).
  */
 export async function runnerStatus(root, config = null) {
-  if (!config || !isMultiTarget(config)) return { source: await sourceStatus(root), runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
+  if (!config || !isMultiTarget(config)) {
+    const source = await sourceStatus(root);
+    return { ...blockedSummary(source), source, runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
+  }
   const targets = {};
   for (const stream of streamTargets(config)) {
     const progress = await loadProgress(root, config, stream);
-    targets[stream] = { summary: progressSummary(progress), progress, runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
+    targets[stream] = { ...blockedSummary(progress), summary: progressSummary(progress), progress, runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
   }
   const source = await sourceView(root, config, Object.fromEntries(Object.entries(targets).map(([stream, item]) => [stream, item.progress])));
   return { source, targets };
+}
+/** The blocked current version first, so runner status shows why it waits without reading every attempt. */
+function blockedSummary(progress) {
+  const current = (progress?.entries ?? []).find(entry => entry.status !== 'PASS');
+  if (!current || !['BLOCKED', 'STOPPED'].includes(current.status)) return {};
+  return { blocked: { manifestId: current.manifestId, status: current.status, reasonCode: current.reasonCode ?? null, since: current.blockedAt ?? current.attempts?.at(-1)?.completedAt ?? null, reason: errorHead(current.error) } };
 }
 async function saveRunner(root, runner, statePath) { await writeJson(await projectPath(root, statePath), runner); }
 function assertNoActiveProcesses(entry) {
@@ -213,6 +223,36 @@ async function reopenRejected(root, config, stream) {
 /** The executor provider has no capacity for us right now; with a fallback configured, the other executor takes over. */
 export const EXECUTOR_QUOTA = /usage limit|rate.?limit|quota|credit balance|overloaded|\b(?:429|529)\b|too many requests|model is at capacity/i;
 export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
+/**
+ * An execution that failed because of the machine, not the version: an expired or missing login, or a network that
+ * cannot be reached at all (DNS, refused connection, proxy tunnel). Another repair attempt cannot fix either, so the
+ * version blocks at once with reasonCode `environment` instead of using up maxRepairAttempts.
+ */
+export const EXECUTOR_ENVIRONMENT = /OAuth|session expired|not logged in|log ?in again|please run \/login|Failed to authenticate|authentication (?:failed|required)|invalid (?:x-)?api[ -]?key|\b401\b|Unauthorized|Could not resolve host|Temporary failure in name resolution|getaddrinfo|network is unreachable|CONNECT tunnel failed|\b(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH)\b/i;
+/** What a verification failed on: one key per failing check, build variant or scene. */
+export function failureKeys(report) {
+  const keys = ['build', 'functional', 'hygiene'].filter(section => report?.[section]?.status && report[section].status !== 'PASS');
+  for (const [name, result] of Object.entries(report?.build?.variants ?? {})) if (result?.status !== 'PASS') keys.push(`build:${name}`);
+  const scenes = (report?.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS').map(scene => `scene:${scene.variant ? `${scene.variant}/` : ''}${scene.id}`);
+  keys.push(...scenes);
+  if (report?.visual?.status && report.visual.status !== 'PASS' && !scenes.length) keys.push('visual');
+  if (report?.changedDuringVerification) keys.push('changedDuringVerification');
+  return keys;
+}
+/**
+ * A repair round makes progress only when it fails fewer checks than the round before. Equal counts, a superset and a
+ * same-size swap (one fixed, another broken) all count as no progress; after policy.stallRounds such rounds in a row
+ * (default 2, 0 turns it off) the version blocks with reasonCode `stalled`, so the remaining attempts are not spent on
+ * an executor that keeps failing the same way.
+ */
+export function stalledRounds(counts) {
+  let rounds = 0;
+  for (let index = counts.length - 1; index > 0 && counts[index] >= counts[index - 1]; index--) rounds++;
+  return rounds;
+}
+const failure = (message, reasonCode, detail) => Object.assign(new Error(message), { reasonCode, ...(detail && { detail }) });
+/** The first lines of a raw error, for runner status and the dashboard. */
+export const errorHead = text => String(text ?? '').split('\n').map(line => line.trimEnd()).filter(Boolean).slice(0, 5).join('\n').slice(0, 800);
 export function executionDiagnostic(execution) {
   let diagnostic = execution.result.error;
   for (const line of execution.result.stdout.split('\n')) {
@@ -329,8 +369,9 @@ export async function reverifyOnBase(root, config, stream, runner, state, diverg
   if (!entry) return null;
   const statePath = runnerStatePath(config, stream), base = divergence.baseSha;
   const blocked = async reason => {
-    entry.status = 'BLOCKED'; entry.error = reason; runner.status = 'BLOCKED';
+    entry.status = 'BLOCKED'; entry.error = reason; entry.blockedAt = new Date().toISOString(); runner.status = 'BLOCKED';
     await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
+    await onEvent({ event: 'blocked', sha: entry.sha, manifestId: entry.manifestId, reasonCode: null, reason: errorHead(reason) });
     return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason };
   };
   try { await git(runner.worktree, ['merge', '--no-ff', '--no-edit', '-m', `ProtoFlow: integrate ${base.slice(0, 7)} into target ${stream} for reverification`, base]); }
@@ -449,9 +490,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       if (plan) {
         entry.planId = plan.id; await saveProgress(root, config, stream, state);
         await onEvent({ event: 'planned', sha: entry.sha, manifestId: entry.manifestId, planId: plan.id, decision: plan.plan.decision, criteria: plan.plan.acceptanceCriteria.length, costUsd: plan.costUsd });
-        if (plan.plan.decision === 'needs-human') throw new Error(`Planner ${plan.id} needs a person: ${plan.plan.summary}${plan.plan.questions.length ? ` Questions: ${plan.plan.questions.join(' ')}` : ''}`);
+        if (plan.plan.decision === 'needs-human') throw failure(`Planner ${plan.id} needs a person: ${plan.plan.summary}${plan.plan.questions.length ? ` Questions: ${plan.plan.questions.join(' ')}` : ''}`, 'needs-human');
       }
     }
+    const stallRounds = config.policy?.stallRounds ?? 2, failureCounts = [];
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
@@ -496,6 +538,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
           record.contextId = executionContext.id; retry -= 1;
           continue;
         }
+        if (!execution.result.timedOut && EXECUTOR_ENVIRONMENT.test(diagnostic.slice(-2000))) {
+          record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.reasonCode = 'environment';
+          throw failure(`${provider === 'claude' ? 'Claude' : 'Codex'} execution cannot run in this environment (${execution.id}, exit ${execution.result.exitCode}); fix the login or network, then runner retry: ${diagnostic.slice(-1000)}`, 'environment', diagnostic);
+        }
         if (retry >= retries || !TRANSIENT_PROVIDER.test(diagnostic)) break;
         record.transientRetries = [...(record.transientRetries ?? []), { executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() }];
         await saveProgress(root, config, stream, state);
@@ -508,7 +554,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       }
       if (execution.status !== 'PASS') {
         const reason = `${provider === 'claude' ? 'Claude' : 'Codex'} execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;
-        if (attempt >= maximum) throw new Error(reason);
+        if (attempt >= maximum) throw failure(reason, 'execution', diagnostic);
         // A failed or timed-out run is one bounded attempt; the next one is told why, like a failed verification.
         record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = reason;
         executionFailure = { attempt, executionId: execution.id, exitCode: execution.result.exitCode, timedOut: execution.result.timedOut === true, reason };
@@ -519,16 +565,23 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       executionFailure = null;
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
+      const failed = failureKeys(report);
+      record.failures = { count: failed.length, keys: failed.slice(0, 100) };
       await reapLeftovers(root, runner.worktree, record, 'verify', onEvent);
       await saveProgress(root, config, stream, state);
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (report.status === 'PASS') break;
-      if (report.status === 'NOT_RUN') throw new Error('Verification NOT_RUN; configure all checks before retry');
+      if (report.status === 'NOT_RUN') throw failure('Verification NOT_RUN; configure all checks before retry', 'not-run');
+      failureCounts.push(failed.length);
+      const rounds = stalledRounds(failureCounts);
+      if (stallRounds > 0 && rounds >= stallRounds && attempt < maximum) {
+        throw failure(`Repair made no progress: ${rounds} rounds in a row did not reduce the failures (${failureCounts.slice(-rounds - 1).join(' → ')}); ${report.id} still fails ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ` and ${failed.length - 8} more` : ''}`, 'stalled');
+      }
     }
-    if (report?.status !== 'PASS') throw new Error(`Repair limit exhausted (${config.policy?.maxRepairAttempts ?? 3})`);
+    if (report?.status !== 'PASS') throw failure(`Repair limit exhausted (${config.policy?.maxRepairAttempts ?? 3})`, 'repair-limit');
     await exportEvidence(root, runner.worktree, report);
-    entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null;
+    entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null; delete entry.reasonCode; delete entry.blockedAt;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;
     await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
     const delivery = await syncDeliveries(root, config, { worktree: runner.worktree, target: stream });
@@ -542,10 +595,12 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       currentAttempt.error = error.message;
       if (['PROCESS_GROUP_ACTIVE', 'PROCESS_START_UNKNOWN'].includes(error.code)) currentAttempt.processFailure = { code: error.code, phase: error.phase, result: error.result ?? null };
     }
-    entry.status = signal?.aborted ? 'STOPPED' : 'BLOCKED'; entry.error = error.message;
+    entry.status = signal?.aborted ? 'STOPPED' : 'BLOCKED'; entry.error = error.message; entry.blockedAt = new Date().toISOString();
+    if (error.reasonCode) entry.reasonCode = error.reasonCode; else delete entry.reasonCode;
     runner.status = entry.status;
     await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
-    return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message, worktree: runner.worktree };
+    if (!signal?.aborted) await onEvent({ event: 'blocked', sha: entry.sha, manifestId: entry.manifestId, reasonCode: error.reasonCode ?? null, reason: errorHead(error.detail ?? error.message) });
+    return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message, ...(error.reasonCode && { reasonCode: error.reasonCode }), worktree: runner.worktree };
   }
 }
 /** Live processes whose working directory is inside, or whose command line names, the runner worktree. */
@@ -693,8 +748,8 @@ export async function retryRunner(root, config = {}, { target = null, recoverUnk
       attempt.error = current.error ?? 'Interrupted execution recovered by runner retry';
     }
   }
-  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', at: new Date().toISOString(), ...(recovered && { recoveredUnknownStart: recovered }) }];
-  current.status = 'PENDING'; current.error = null;
+  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', ...(current.reasonCode && { reasonCode: current.reasonCode }), at: new Date().toISOString(), ...(recovered && { recoveredUnknownStart: recovered }) }];
+  current.status = 'PENDING'; current.error = null; delete current.reasonCode; delete current.blockedAt;
   await saveProgress(root, config, target, state);
   return { status: 'PASS', ...(target && { target }), current: current.manifestId, next: 'runner start --once' };
 }
@@ -773,6 +828,8 @@ export async function startRunner(root, config, { once = false, service = false,
   const onEvent = async event => {
     lastEvent = { event: event.event, target: event.target ?? null, at: new Date().toISOString() };
     await recordEvent(root, { at: lastEvent.at, ...event });
+    // A block or a decision for a person reaches the desktop; the notification never holds up the pass.
+    notifyDesktop(root, config, event).catch(() => {});
     await beat(); await report(event);
   };
   // A pass can run for an hour (execution, native visual capture); the heartbeat keeps beating while the process is

@@ -32,8 +32,16 @@ const RULES = [
     make: () => ({ title: '分支衝突', steps: ['在交付分支上解決衝突，或讓基準分支與交付分支重新對齊', '回到這裡重試'], command: null }) }
 ];
 
-export function diagnose(text) {
+/** A runner reasonCode decides first; an environment block still tells a login from the network by its text. */
+const BY_CODE = {
+  environment: text => (RULES.find(rule => rule.kind === 'auth').test.test(text) ? RULES.find(rule => rule.kind === 'auth') : RULES.find(rule => rule.kind === 'network')),
+  stalled: () => ({ kind: 'stalled', make: () => ({ title: '修復沒有進展', steps: ['看最後兩次驗收的失敗項，判斷是應用真的做不到，還是驗收誤判', '是驗收誤判時回報 ProtoFlow；是需求或原型的問題時先修改原型', '處理後重試；要放寬判定可調高 `policy.stallRounds`（0 為關閉）'], command: null }) }),
+  'repair-limit': () => ({ kind: 'repair-limit', make: () => ({ title: '修復次數用完', steps: ['看最後一次驗收的失敗項與執行紀錄', '處理後重試；需要更多次自動修復時調高 `policy.maxRepairAttempts`'], command: null }) })
+};
+export function diagnose(text, reasonCode = null) {
   if (typeof text !== 'string' || !text.trim()) return null;
+  const coded = BY_CODE[reasonCode]?.(text);
+  if (coded) return { kind: coded.kind, ...(reasonCode === 'environment' && { reasonCode }), ...coded.make(text) };
   for (const rule of RULES) {
     if (typeof rule.test === 'function' ? rule.test(text) : rule.test.test(text)) return { kind: rule.kind, ...rule.make(text) };
   }

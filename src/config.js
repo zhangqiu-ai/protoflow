@@ -18,8 +18,10 @@ export const configSchema = {
       id: { type: 'string', pattern: '^[a-zA-Z0-9_.-]+$' }, prototypeFiles: { type: 'array', minItems: 1, items: { type: 'string' } }, prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 }, component: { type: 'string', minLength: 1 }, priority: { enum: ['critical', 'high', 'normal', 'low'] }, geometryTolerance: { type: 'number', minimum: 0 }, maxDiffRatio: { type: 'number', minimum: 0, maximum: 1 }
     } } },
     classification: { type: 'object', additionalProperties: false, properties: { rules: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['pattern', 'level'], properties: { pattern: { type: 'string' }, level: { enum: ['L0', 'L1', 'L2', 'L3'] } } } } } },
-    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, transientRetries: { type: 'integer', minimum: 0, maximum: 5 }, transientRetryDelayMs: { type: 'integer', minimum: 0, maximum: 600000 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' }, executor: { type: 'object', additionalProperties: false, required: ['primary'], properties: { primary: { enum: ['claude', 'codex'] }, fallback: { enum: ['claude', 'codex'] }, routes: { type: 'object', additionalProperties: false, properties: { frontend: { enum: ['claude', 'codex'] }, backend: { enum: ['claude', 'codex'] } } } } } } },
+    policy: { type: 'object', additionalProperties: false, properties: { maxRepairAttempts: { type: 'integer', minimum: 0, maximum: 10 }, stallRounds: { type: 'integer', minimum: 0, maximum: 10 }, transientRetries: { type: 'integer', minimum: 0, maximum: 5 }, transientRetryDelayMs: { type: 'integer', minimum: 0, maximum: 600000 }, requireHumanReview: { type: 'boolean' }, sequentialVersions: { type: 'boolean' }, autoApprove: { type: 'boolean' }, executor: { type: 'object', additionalProperties: false, required: ['primary'], properties: { primary: { enum: ['claude', 'codex'] }, fallback: { enum: ['claude', 'codex'] }, routes: { type: 'object', additionalProperties: false, properties: { frontend: { enum: ['claude', 'codex'] }, backend: { enum: ['claude', 'codex'] } } } } } } },
     watch: { type: 'object', additionalProperties: false, properties: { pollMs: { type: 'integer', minimum: 20 }, idleMs: { type: 'integer', minimum: 20 } } },
+    // A desktop notification (macOS) when a version blocks or work waits for a person; on by default.
+    notifications: { type: 'object', additionalProperties: false, properties: { desktop: { type: 'boolean' } } },
     // Proposal 0004: how the dashboard names the project and which person approves versions from it.
     dashboard: { type: 'object', additionalProperties: false, properties: { name: { type: 'string', minLength: 1, maxLength: 80 }, reviewer: { type: 'string', minLength: 1, maxLength: 120, not: { pattern: '^ai:' } } } },
     // Proposal 0003 §6: GitHub Issues intake, triage and implementation (schemaVersion 1 projects use one implicit target).
@@ -64,7 +66,7 @@ export const configSchemaV2 = {
   type: 'object', required: ['schemaVersion', 'prototypeDir', 'targets'], additionalProperties: false,
   properties: {
     schemaVersion: { const: 2 }, prototypeDir: shared.prototypeDir, source: shared.source, runner: shared.runner,
-    classification: shared.classification, policy: shared.policy, watch: shared.watch, dashboard: shared.dashboard, adapters: shared.adapters,
+    classification: shared.classification, policy: shared.policy, watch: shared.watch, notifications: shared.notifications, dashboard: shared.dashboard, adapters: shared.adapters,
     // Proposal 0003 §6: GitHub Issues intake, triage and (P5) implementation.
     issues: shared.issues,
     anchors: { type: 'object', additionalProperties: false, properties: {

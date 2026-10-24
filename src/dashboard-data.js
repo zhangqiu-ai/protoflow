@@ -162,7 +162,7 @@ async function streamSnapshot(root, config, stream, events) {
   const versions = [];
   for (const entry of entries.slice(-12).reverse()) {
     const manifest = await manifestOf(entry.manifestId);
-    versions.push({ manifestId: entry.manifestId, sha: entry.sha, ordinal: entry.ordinal ?? null, summary: manifest?.summary ?? manifest?.source?.message ?? null, level: manifest?.level ?? null, status: entry.status, attempts: entry.attempts?.length ?? 0, planId: entry.planId ?? null, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, error: entry.error ? short(entry.error, 300) : null });
+    versions.push({ manifestId: entry.manifestId, sha: entry.sha, ordinal: entry.ordinal ?? null, summary: manifest?.summary ?? manifest?.source?.message ?? null, level: manifest?.level ?? null, status: entry.status, attempts: entry.attempts?.length ?? 0, planId: entry.planId ?? null, verificationId: entry.verificationId ?? null, deliveryId: entry.deliveryId ?? null, completedAt: entry.completedAt ?? null, error: entry.error ? short(entry.error, 300) : null });
   }
   const deliveries = (await deliveryStatus(root, config, stream).catch(() => ({ deliveries: [] }))).deliveries.slice(-8).reverse().map(delivery => ({ id: delivery.id, status: delivery.status, pr: delivery.pr?.url ?? null, prNumber: delivery.pr?.number ?? null, commit: delivery.commit ?? null, mergeCommit: delivery.mergeCommit ?? null, versions: delivery.versions ?? [], error: delivery.error ? short(delivery.error, 300) : null, manualMerge: delivery.manualMerge ?? null, independentReviewId: delivery.independentReviewId ?? null, updatedAt: delivery.updatedAt ?? delivery.createdAt ?? null }));
   // A delivery the independent review rejected carries its findings, so a person can send the version back for repair.
@@ -175,7 +175,7 @@ async function streamSnapshot(root, config, stream, events) {
   }
   return {
     target: stream, runner: runner ? { status: runner.status, worktree: runner.worktree, branch: runner.branch } : null, stage, phase: running?.phase ?? null, phaseStartedAt: running?.startedAt ?? null,
-    current: current && { manifestId: current.manifestId, sha: current.sha, status: current.status, attempts: current.attempts?.length ?? 0, attemptStartedAt: attempt?.startedAt ?? null, planId: current.planId ?? null, error: current.error ? short(current.error, 400) : null, summary: (await manifestOf(current.manifestId))?.summary ?? null, level: (await manifestOf(current.manifestId))?.level ?? null },
+    current: current && { manifestId: current.manifestId, sha: current.sha, status: current.status, attempts: current.attempts?.length ?? 0, attemptStartedAt: attempt?.startedAt ?? null, planId: current.planId ?? null, error: current.error ? short(current.error, 400) : null, reasonCode: current.reasonCode ?? null, blockedAt: current.blockedAt ?? (current.status === 'BLOCKED' ? attempt?.completedAt ?? null : null), summary: (await manifestOf(current.manifestId))?.summary ?? null, level: (await manifestOf(current.manifestId))?.level ?? null },
     lastEvent: last, live, verification: verificationSummary(found?.report), versions, deliveries
   };
 }
@@ -215,23 +215,25 @@ async function pendingReviews(root, config, streams) {
 function attention({ streams, issues, reviews, service, config }) {
   const items = [];
   for (const stream of streams) {
-    if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, actions: ['retry'] });
+    if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, reasonCode: stream.current.reasonCode, since: stream.current.blockedAt, actions: ['retry'] });
     for (const delivery of stream.deliveries) {
-      if (delivery.status === 'PR_OPEN_MANUAL' && !delivery.manualMerge) items.push({ kind: 'manual-merge', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, prNumber: delivery.prNumber, commit: delivery.commit, title: `PR #${delivery.prNumber ?? '?'}`, actions: ['merge'] });
+      if (delivery.status === 'PR_OPEN_MANUAL' && !delivery.manualMerge) items.push({ kind: 'manual-merge', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, prNumber: delivery.prNumber, commit: delivery.commit, title: `PR #${delivery.prNumber ?? '?'}`, since: delivery.updatedAt, actions: ['merge'] });
       if (['BLOCKED', 'FAIL'].includes(delivery.status)) {
         const sendBack = delivery.review?.status === 'FAIL' && delivery.review.findings.length > 0;
         const version = stream.versions.find(item => item.manifestId === delivery.versions.at(-1));
-        items.push({ kind: sendBack ? 'review-rejected' : 'delivery-blocked', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, title: sendBack ? version?.summary ?? delivery.id : delivery.id, reason: sendBack ? delivery.review.summary : delivery.error, findings: sendBack ? delivery.review.findings : undefined, reviewId: delivery.review?.id, actions: sendBack ? ['request-changes'] : [] });
+        items.push({ kind: sendBack ? 'review-rejected' : 'delivery-blocked', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, title: sendBack ? version?.summary ?? delivery.id : delivery.id, reason: sendBack ? delivery.review.summary : delivery.error, findings: sendBack ? delivery.review.findings : undefined, reviewId: delivery.review?.id, since: delivery.updatedAt, actions: sendBack ? ['request-changes'] : [] });
       }
     }
   }
   for (const issue of issues) {
     if (['needs-human', 'blocked', 'rejected'].includes(issue.status)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, actions: ['handback'] });
   }
-  for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, actions: ['approve'] });
-  if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, actions: [] });
-  // A blocked item says what to do about it when its reason is a known failure (an expired login, the network...).
-  for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked') item.diagnosis = diagnose(item.reason);
+  for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, since: review.completedAt, actions: ['approve'] });
+  if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
+  // A blocked item says what to do about it: by its runner reasonCode first, else when its reason is a known failure.
+  for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked') item.diagnosis = diagnose(item.reason, item.reasonCode);
+  // How long each item has waited for a person, when it is known.
+  for (const item of items) item.since ??= null;
   return items;
 }
 
