@@ -10,7 +10,8 @@ const PHASE = { execute: '執行者', build: '建置', functional: '功能測試
 const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面'], ['visual', '視覺']];
 const ICON = {
   merge: 'M5 3v12M13 3v3a4 4 0 0 1-4 4H5', tag: 'M3 3h6l6 6-6 6-6-6zM6.5 6.5h.01', issue: 'M9 2.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM9 6v3.5M9 12.2h.01',
-  retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', review: 'M7.5 3a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM11 11l4 4', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4'
+  retry: 'M3.5 9a5.5 5.5 0 1 0 1.6-3.9M3.5 3.5v3h3', review: 'M7.5 3a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM11 11l4 4', alert: 'M9 3 2.5 14.5h13zM9 7.5v3M9 12.6h.01', check: 'm4 9.5 3.2 3L14 6', back: 'M10 3 5 8l5 5', clock: 'M8 1.8a6.2 6.2 0 1 0 0 12.4A6.2 6.2 0 0 0 8 1.8zM8 5v3.3l2 1.4',
+  grid: 'M3.5 3.5h4v4h-4zM10.5 3.5h4v4h-4zM3.5 10.5h4v4h-4zM10.5 10.5h4v4h-4z'
 };
 
 /** Element helper: h('div.card', {attr}, ...children); strings become text nodes. */
@@ -103,17 +104,20 @@ function toast(text, bad = false) {
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { box.hidden = true; }, bad ? 9000 : 5000);
 }
 
-// ---- data: one EventSource per view, reconnecting on its own ----
-let source = null;
-function subscribe(url, render) {
-  source?.close();
-  source = new EventSource(url);
-  source.onopen = () => { conn.textContent = '即時'; conn.className = 'conn live'; };
-  source.onerror = () => { conn.textContent = '重新連線中'; conn.className = 'conn'; };
-  // Entrance motion plays once per view; later pushes redraw in place without replaying it.
-  source.onmessage = message => { render(JSON.parse(message.data)); setTimeout(() => document.body.classList.add('settled'), 900); };
-  source.addEventListener('failure', message => toast(`讀取失敗：${JSON.parse(message.data).error}`, true));
+// ---- data: the overview stream feeds the sidebar for the whole visit (and the overview page); a project page adds its own ----
+let source = null, overviewData = null;
+const viewing = () => source ?? overview;
+const setConn = live => { conn.textContent = live ? '即時' : '重新連線中'; conn.className = live ? 'conn live' : 'conn'; };
+function watch(stream, onData) {
+  stream.onopen = () => { if (stream === viewing()) setConn(true); };
+  stream.onerror = () => { if (stream === viewing()) setConn(false); };
+  stream.onmessage = message => onData(JSON.parse(message.data));
+  stream.addEventListener('failure', message => { if (stream === viewing()) toast(`讀取失敗：${JSON.parse(message.data).error}`, true); });
+  return stream;
 }
+// Entrance motion plays once per view; later pushes redraw in place without replaying it.
+function paint(render, data) { render(data); app.classList.remove('swap'); setTimeout(() => document.body.classList.add('settled'), 900); }
+const overview = watch(new EventSource('/api/stream'), data => { overviewData = data; renderSide(data); if (!source) paint(renderOverview, data); });
 // The service mints a new token each time it starts, so a page left open across a restart (an upgrade, a launchd
 // relaunch) holds a stale one: on that refusal, read the current token from a fresh copy of the page and send once more.
 async function freshToken() {
@@ -369,14 +373,114 @@ function renderProject(snapshot) {
 const rerender = () => { if (lastProject) renderProject(lastProject); };
 setInterval(() => document.querySelectorAll('[data-since]').forEach(node => { if (node.dataset.since) node.textContent = elapsed(node.dataset.since); }), 1000);
 
+// ---- sidebar: every project on every view, with where it is and what waits for a person ----
+const side = document.getElementById('side'), navList = document.getElementById('nav-list'), navInd = side.querySelector('.nav-ind'), menu = document.getElementById('menu'), scrim = document.getElementById('scrim');
+const narrow = matchMedia('(max-width:900px)');
+const stored = key => { try { return localStorage.getItem(key); } catch { return null; } };
+const store = (key, value) => { try { localStorage.setItem(key, value); } catch { /* private window: the choice lasts this visit */ } };
+/** The stream that most needs a look (blocked, then working), else whether every target is done. */
+function headline(project) {
+  if (project.error) return { label: '讀取失敗', tone: 'bad', stream: null };
+  const streams = project.streams ?? [], where = stream => streams.length > 1 ? ` · ${targetName(stream.target)}` : '';
+  const blocked = streams.find(stream => stream.stage === 'blocked');
+  if (blocked) return { label: `阻塞${where(blocked)}`, tone: 'bad', stream: blocked };
+  const working = streams.find(active);
+  if (working) return { label: `${STAGE_LABEL[working.stage] ?? working.stage}${where(working)}`, tone: 'now', stream: working };
+  const finished = streams.filter(stream => position(stream).at === STAGES.length).length;
+  if (finished && finished === streams.length) return { label: '完成', tone: 'ok', stream: streams[0] };
+  return { label: finished ? `${finished}/${streams.length} 完成` : '閒置', tone: 'idle', stream: streams[0] ?? null };
+}
+const segments = stream => {
+  const { at, tone } = stream ? position(stream) : { at: -1 };
+  return h('span.nav-segs', { 'aria-hidden': 'true' }, STAGES.map((_, i) => h(`i${i < at ? '.done' : i === at ? (tone === 'bad' ? '.bad' : '.now') : ''}`)));
+};
+const currentId = () => /^#\/p\/([0-9a-f]{12})$/.exec(location.hash)?.[1] ?? null;
+function renderSide(data = overviewData) {
+  if (!data) return;
+  const here = currentId(), projects = data.projects;
+  const focused = navList.contains(document.activeElement) ? document.activeElement.getAttribute('href') : null;
+  const due = projects.reduce((sum, project) => sum + (project.attention ?? 0), 0);
+  const item = (href, tile, name, sub, count, on, tip) => h(`a.nav-item${on ? '.here' : ''}`, { href, 'aria-current': on ? 'page' : null, 'data-tip': tip },
+    h(`span.nav-tile${tile.home ? '.home' : ''}`, { 'data-due': count || null }, tile.glyph, tile.tone ? h(`i.nav-dot.${tile.tone}`) : null),
+    h('span.nav-text', {}, h('b', {}, name), sub), count ? h('span.nav-due', { title: `${count} 件等你決定` }, String(count)) : null);
+  navList.replaceChildren(
+    item('#/', { home: true, glyph: icon(ICON.grid, 16) }, '總覽', h('small', {}, `${projects.length} 個專案`), due, !here, `總覽 · ${projects.length} 個專案`),
+    h('span.nav-label', { 'aria-hidden': 'true' }, '專案'),
+    ...projects.map(project => {
+      const head = headline(project);
+      return item(`#/p/${project.id}`, { glyph: initial(project.name), tone: head.tone }, project.name,
+        h('small', {}, h(`span.nav-state.${head.tone}`, {}, head.label), segments(head.stream)), project.attention, project.id === here, `${project.name} · ${head.label}`);
+    }));
+  if (focused) navList.querySelector(`a[href="${focused}"]`)?.focus();
+  placeIndicator();
+}
+/** The highlight glides to the current item instead of jumping. */
+function placeIndicator() {
+  const on = navList.querySelector('.nav-item.here');
+  navInd.style.opacity = on ? '1' : '0';
+  if (on) { navInd.style.transform = `translateY(${on.offsetTop}px)`; navInd.style.height = `${on.offsetHeight}px`; }
+  requestAnimationFrame(() => navInd.classList.add('ready'));
+}
+const syncMenu = () => menu.setAttribute('aria-expanded', String(narrow.matches ? document.body.classList.contains('side-open') : !document.body.classList.contains('side-mini')));
+function setMini(on) { document.body.classList.toggle('side-mini', on); store('protoflow.sidebar', on ? 'mini' : 'full'); syncMenu(); }
+function setDrawer(open) { document.body.classList.toggle('side-open', open); scrim.hidden = !open; syncMenu(); }
+menu.addEventListener('click', () => narrow.matches ? setDrawer(!document.body.classList.contains('side-open')) : setMini(!document.body.classList.contains('side-mini')));
+scrim.addEventListener('click', () => setDrawer(false));
+// Picking the page already shown fires no hashchange, so the drawer closes on the click itself.
+navList.addEventListener('click', event => { if (event.target.closest('.nav-item')) setDrawer(false); });
+narrow.addEventListener('change', () => setDrawer(false));
+// A collapsed sidebar names each project in a tip beside it, positioned outside the scrolling list.
+const tip = h('div.nav-tip', { 'aria-hidden': 'true', hidden: true });
+document.body.append(tip);
+const showTip = event => {
+  const link = event.target.closest?.('.nav-item');
+  if (!link || narrow.matches || !document.body.classList.contains('side-mini')) { tip.hidden = true; return; }
+  const box = link.getBoundingClientRect();
+  tip.textContent = link.dataset.tip; tip.style.top = `${box.top + box.height / 2}px`; tip.style.left = `${box.right + 12}px`; tip.hidden = false;
+};
+navList.addEventListener('pointerover', showTip); navList.addEventListener('focusin', showTip);
+navList.addEventListener('pointerleave', () => { tip.hidden = true; }); navList.addEventListener('focusout', () => { tip.hidden = true; });
+side.addEventListener('transitionend', event => { if (event.target === side) placeIndicator(); });
+document.addEventListener('keydown', event => {
+  if (document.querySelector('dialog[open]') || event.target.closest?.('input,textarea,select,[contenteditable]')) return;
+  if (event.key === 'Escape' && document.body.classList.contains('side-open')) return setDrawer(false);
+  if (event.key === '[' && !event.metaKey && !event.ctrlKey && !event.altKey) return menu.click();
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  const links = [...navList.querySelectorAll('a.nav-item')], step = event.key === 'ArrowDown' ? 1 : -1;
+  // ⌥↑↓ switches project from anywhere; plain ↑↓ moves focus within the list.
+  if (event.altKey) {
+    // From the address, not the highlight: a quick second press lands before hashchange redraws the list.
+    const at = currentId() ? `#/p/${currentId()}` : '#/';
+    const next = links[links.findIndex(link => link.getAttribute('href') === at) + step];
+    if (next) { event.preventDefault(); location.hash = next.getAttribute('href'); }
+  } else if (links.includes(document.activeElement)) {
+    event.preventDefault();
+    links[Math.min(links.length - 1, Math.max(0, links.indexOf(document.activeElement) + step))].focus();
+  }
+});
+if (stored('protoflow.sidebar') === 'mini') document.body.classList.add('side-mini');
+syncMenu();
+requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add('side-ready')));
+
 function route() {
-  const match = /^#\/p\/([0-9a-f]{12})$/.exec(location.hash);
+  const id = currentId();
   lastProject = null;
   done.clear();
   document.body.classList.remove('settled');
+  // The previous view dims until the next one paints, so a switch never flashes an empty page.
+  if (app.childElementCount) app.classList.add('swap');
   window.scrollTo(0, 0);
-  if (match) subscribe(`/api/projects/${match[1]}/stream`, renderProject);
-  else subscribe('/api/stream', renderOverview);
+  source?.close();
+  source = null;
+  setDrawer(false);
+  renderSide();
+  if (id) {
+    crumb.textContent = overviewData?.projects.find(project => project.id === id)?.name ?? '';
+    source = watch(new EventSource(`/api/projects/${id}/stream`), data => paint(renderProject, data));
+  } else {
+    setConn(overview.readyState === EventSource.OPEN);
+    if (overviewData) paint(renderOverview, overviewData);
+  }
 }
 window.addEventListener('hashchange', route);
 route();

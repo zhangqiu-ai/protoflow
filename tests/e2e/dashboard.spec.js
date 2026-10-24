@@ -17,7 +17,7 @@ test.afterAll(async () => { await dashboard?.close(); await fixture?.cleanup(); 
 
 test('the overview lists every registered project with its stage and what needs a person', async ({ page }) => {
   await page.goto(url);
-  const card = page.getByRole('link', { name: /Fixture App/ });
+  const card = page.getByRole('main').getByRole('link', { name: /Fixture App/ });
   await expect(card).toBeVisible();
   await expect(card).toContainText('實作');
   await expect(card.locator('.due')).toHaveText('待你2');
@@ -96,6 +96,57 @@ test('a page left open across a service restart picks up the new token instead o
   await expect(page.locator('#toast')).toContainText('核准並合併：完成');
   expect(calls.length).toBe(sent + 1);
   expect(calls.at(-1)).toEqual({ action: 'merge', target: null, deliveryId: 'DLV-fixture-1' });
+});
+
+test('the sidebar lists every project on every page, switches between them and folds away', async ({ page }) => {
+  const other = await dashboardFixture({ executing: false });
+  await addProject(fixture.root, { home: other.home });
+  await addProject(other.root, { home: other.home, name: 'Second App' });
+  const server = createDashboardServer({ home: other.home, port: 0, service: false, pollMs: 200 });
+  const base = await server.listen();
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(base);
+    const nav = page.getByRole('navigation', { name: '專案' }), toggle = page.getByRole('button', { name: '專案側邊欄' });
+    const first = nav.getByRole('link', { name: /Fixture App/ }), second = nav.getByRole('link', { name: /Second App/ });
+    await expect(nav.locator('.nav-item')).toHaveCount(3);
+    await expect(nav.getByRole('link', { name: /總覽/ })).toHaveAttribute('aria-current', 'page');
+    // Each project: where its busiest target is, a live dot while it works, and how many decisions wait.
+    await expect(first).toContainText('實作');
+    await expect(first.locator('.nav-dot')).toHaveClass(/now/);
+    await expect(first.locator('.nav-due')).toHaveText('2');
+    await first.click();
+    await expect(page).toHaveURL(new RegExp(`#/p/${id}$`));
+    await expect(page.locator('.track li.now')).toHaveText('實作');
+    await expect(first).toHaveAttribute('aria-current', 'page');
+    // ⌥↓ / ⌥↑ step through the list from anywhere on the page; the highlight follows.
+    await page.keyboard.press('Alt+ArrowDown');
+    await expect(page).toHaveURL(new RegExp(`#/p/${await projectId(other.root)}$`));
+    await expect(second).toHaveAttribute('aria-current', 'page');
+    await expect.poll(() => page.locator('.nav-ind').evaluate(node => node.style.transform)).toBe(`translateY(${await second.evaluate(node => node.offsetTop)}px)`);
+    await page.keyboard.press('Alt+ArrowUp');
+    await page.keyboard.press('Alt+ArrowUp');
+    await expect(page.getByRole('heading', { level: 1 })).toContainText('2 個專案');
+    // [ folds the sidebar to tiles, remembered across a reload; a tip names the project under the pointer.
+    await page.keyboard.press('[');
+    await expect(page.locator('body')).toHaveClass(/side-mini/);
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await page.reload();
+    await expect(page.locator('body')).toHaveClass(/side-mini/);
+    await first.hover();
+    await expect(page.locator('.nav-tip')).toHaveText('Fixture App · 實作');
+    await toggle.click();
+    await expect(page.locator('body')).not.toHaveClass(/side-mini/);
+    // On a phone the sidebar is a drawer: closed until asked for, and it closes once a page is picked.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(nav).toBeHidden();
+    await toggle.click();
+    await expect(nav).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await second.click();
+    await expect(nav).toBeHidden();
+    await expect(page).toHaveURL(/#\/p\//);
+  } finally { await server.close(); await other.cleanup(); }
 });
 
 test('motion is switched off when the system asks for reduced motion', async ({ page }) => {
