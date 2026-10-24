@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createReview, decideReview, createBaseline, loadArtifact, applicationFingerprint } from './workflow.js';
 import { loadProgress, saveProgress, deliveryStatePath, deliveryBranch, runnerStatePath, isMultiTarget } from './streams.js';
 import { projectPath, readJson, writeJson, id, hash, RUNTIME_DIRS } from './util.js';
@@ -77,6 +79,99 @@ async function integrateBase(config, worktree, target, options, base) {
     throw diverged(`Integrating base ${base.sha} changed target ${target} application content; reverify on the current base`);
   }
   return { baseSha: base.sha, previousHead: head, commit: await git(worktree, ['rev-parse', 'HEAD']) };
+}
+
+/** Files `git add -A` could commit that differ from HEAD (tracked or untracked-but-not-ignored), without runtime output. */
+async function pendingChanges(worktree) {
+  const tracked = (await git(worktree, ['diff', '--name-only', '-z', 'HEAD'])).split('\0');
+  const untracked = (await git(worktree, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0');
+  return [...new Set([...tracked, ...untracked])].filter(file => file && !file.split('/').some(part => EXCLUDED.includes(part)));
+}
+
+/**
+ * A single-target stream builds each version on the base its delivery will be reviewed against. When people moved
+ * the base after the last delivery merged, a worktree whose commits are all in the base and which holds no other
+ * change fast-forwards to it. Otherwise the version would be built on a stale base and its delivery could never be
+ * reviewed, so it blocks before anything runs (`runner rebase` starts the undelivered versions over on the base).
+ * Several targets integrate or reverify at delivery instead.
+ */
+export async function alignWorktreeToBase(worktree, config) {
+  const options = config.runner?.delivery;
+  if (!options || isMultiTarget(config)) return null;
+  const base = await currentBase(worktree, options);
+  await ensureCommit(worktree, base);
+  if (await isAncestor(worktree, base.sha, 'HEAD')) return null;
+  const head = await git(worktree, ['rev-parse', 'HEAD']);
+  const ahead = (await git(worktree, ['rev-list', '--count', `${base.sha}..${head}`])).trim();
+  const changes = await pendingChanges(worktree);
+  if (ahead !== '0' || changes.length) {
+    const detail = [ahead !== '0' && `${ahead} commit(s) not in the base`, changes.length && `uncommitted changes in ${changes.slice(0, 5).join(', ')}`].filter(Boolean).join(' and ');
+    throw Object.assign(new Error(`Base ${options.baseBranch} moved to ${base.sha.slice(0, 7)} but the runner worktree has ${detail}; a version built there could not be delivered. Merge or retire its delivery, or run runner rebase to start the undelivered versions over on the current base`), { code: 'BASE_MOVED', baseSha: base.sha });
+  }
+  await git(worktree, ['merge', '--ff-only', base.sha]);
+  return { from: head, to: base.sha };
+}
+
+/**
+ * The undelivered work of a single-target stream was built on a base that has moved, so its delivery can never be
+ * reviewed. Retire it: every unpublished, unsettled delivery is revoked, the worktree's commits and uncommitted
+ * changes are kept under an archive ref, the worktree is reset to the current base, and the versions those changes
+ * carried (delivered or accepted but undelivered, and the current one) run again from scratch.
+ */
+export async function rebaseDeliveries(root, config, worktree) {
+  const options = config.runner?.delivery;
+  if (!options) throw new Error('runner rebase needs runner.delivery');
+  if (isMultiTarget(config)) throw new Error('runner rebase supports single-target streams only; several targets integrate or reverify a moved base at delivery');
+  const source = await loadProgress(root, config, null);
+  const state = await deliveryStatus(root, config, null);
+  const base = await currentBase(worktree, options);
+  await ensureCommit(worktree, base);
+  const head = await git(worktree, ['rev-parse', 'HEAD']);
+  if (await isAncestor(worktree, base.sha, head)) throw new Error(`Base ${options.baseBranch} (${base.sha.slice(0, 7)}) is already in the runner worktree; nothing to rebase`);
+  for (const delivery of state.deliveries.filter(item => item.status === 'MERGED')) {
+    if (delivery.mergeCommit && !await isAncestor(worktree, delivery.mergeCommit, base.sha)) throw new Error(`Merged delivery ${delivery.id} is not in base ${base.sha.slice(0, 7)}; the base was rewritten, resolve it externally`);
+  }
+  const open = state.deliveries.find(item => item.status === 'PR_OPEN_MANUAL');
+  if (open) throw new Error(`Delivery ${open.id} has an open pull request${open.pr ? ` #${open.pr.number}` : ''}; merge or close it before rebasing`);
+  const retired = state.deliveries.filter(item => !settled(item));
+  const destination = await resolveDeliveryDestination(worktree, options.remote);
+  const remote = /^([a-f0-9]{40})\s/.exec(await git(worktree, ['ls-remote', destination.url, `refs/heads/${deliveryBranch(config, null)}`]))?.[1] ?? null;
+  if (remote) await ensureCommit(worktree, { sha: remote, url: destination.url });
+  for (const delivery of retired) {
+    if (!unpublished(delivery)) throw new Error(`Delivery ${delivery.id} was pushed or has a pull request; close it externally before rebasing`);
+    if (remote && delivery.commit && (remote === delivery.commit || await isAncestor(worktree, delivery.commit, remote))) throw new Error(`Delivery ${delivery.id} may already be on the remote branch; resolve it externally`);
+  }
+  const ids = new Set(retired.map(item => item.id));
+  const first = source.entries.findIndex(entry => entry.status !== 'PASS' || !entry.deliveryId || ids.has(entry.deliveryId));
+  if (first === -1) throw new Error('No undelivered version to run again');
+  const settledHere = source.entries.slice(first).find(entry => entry.deliveryId && !ids.has(entry.deliveryId));
+  if (settledHere) throw new Error(`Version ${settledHere.manifestId} after the undelivered ones has settled delivery ${settledHere.deliveryId}; resolve it externally`);
+
+  // Keep everything the worktree holds (commits and uncommitted, unignored files) under one archive commit.
+  const at = new Date().toISOString(), ref = `refs/protoflow/rebased/${at.replace(/[:.]/g, '-')}`;
+  const changes = await pendingChanges(worktree);
+  let archive = head;
+  if (changes.length) {
+    // The index is reset with the worktree right after; staging here only builds the archive tree.
+    await git(worktree, ['add', '-A', '--', ...changes]);
+    archive = await git(worktree, ['commit-tree', await git(worktree, ['write-tree']), '-p', head, '-m', `ProtoFlow: uncommitted runner changes before rebasing onto ${base.sha.slice(0, 7)}`]);
+  }
+  await git(worktree, ['update-ref', ref, archive]);
+  const untracked = (await git(worktree, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(file => file && !file.split('/').some(part => EXCLUDED.includes(part)));
+  await git(worktree, ['reset', '-q', '--hard', base.sha]);
+  for (const file of untracked) await fs.rm(path.join(worktree, file), { force: true });
+
+  const reason = `Base ${options.baseBranch} moved to ${base.sha} after the runner worktree forked; retired by runner rebase, the versions run again on the current base (archive ${ref})`;
+  for (const delivery of retired) {
+    delivery.revocation = { at, previousStatus: delivery.status, reason, staleBase: { from: delivery.baseSha ?? null, to: base.sha }, archive: ref };
+    delivery.status = 'REVOKED';
+  }
+  const restarted = source.entries.slice(first);
+  source.rebased = [...(source.rebased ?? []), { at, from: head, to: base.sha, archive: ref, deliveries: [...ids], entries: restarted }];
+  source.entries = [...source.entries.slice(0, first), ...restarted.map(entry => ({ sha: entry.sha, manifestId: entry.manifestId, prototypeHash: entry.prototypeHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [] }))];
+  source.completedSha = source.entries[first - 1]?.sha ?? null;
+  await saveDelivery(root, config, null, state); await saveProgress(root, config, null, source);
+  return { at, from: head, to: base.sha, archive: ref, deliveries: [...ids], versions: restarted.map(entry => entry.manifestId) };
 }
 
 /** Delivery records; with several targets pass a target, or omit it to get every target's records. */
