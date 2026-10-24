@@ -129,6 +129,19 @@ function stripStyles(text) {
     .replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*')/gi, '');
 }
 
+// A navigation target names the screen it opens: a page navigator linking to `home.permission` or
+// `account.password.html`, often with the screen id shown beside the label, changes no permission or password
+// handling. Targets and text that only repeats one are left out; links to other origins stay (they are L2).
+function withoutNavigation(text) {
+  const targets = new Set();
+  const stripped = text.replace(/\s(data-go|href)\s*=\s*("[^"]*"|'[^']*')/gi, (attribute, name, value) => {
+    if (name.toLowerCase() === 'href' && /^["']\s*(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value)) return attribute;
+    targets.add(value.slice(1, -1).trim());
+    return '';
+  }).replace(/(\sdata-act\s*=\s*["'])go:([^"']*)/gi, (_, prefix, target) => { targets.add(target.trim()); return prefix; });
+  return stripped.replace(/>([^<]*)</g, (node, content) => targets.has(content.trim()) ? '><' : node);
+}
+
 function inferredLevel(file, before, after) {
   const extension = path.extname(file).toLowerCase();
   if (extension === '.css') return 'L0';
@@ -136,7 +149,10 @@ function inferredLevel(file, before, after) {
   // Markup is compared tag by tag: generated pages often sit on one line, and the whole line would otherwise
   // count as changed, so an untouched `go:settings.storage` in the sidebar could raise a visual edit to L2.
   const markup = /\.(?:html?|vue|svelte)$/i.test(file);
-  const tags = text => markup && typeof text === 'string' ? text.replace(/>\s*</g, '>\n<') : text;
+  // Styles are visual, and an SVG namespace (`xmlns="http://www.w3.org/2000/svg"`, also inside a CSS data URL) is
+  // a name, not a request, so neither raises a page to L2.
+  const tags = text => markup && typeof text === 'string'
+    ? withoutNavigation(stripStyles(text)).replace(/\sxmlns(?::[\w-]+)?\s*=\s*(?:"[^"]*"|'[^']*')/gi, '').replace(/>\s*</g, '>\n<') : text;
   const { added, removed } = changedLines(tags(before), tags(after));
   const delta = [...removed, ...added].join('\n').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ');
   if (/\b(auth(?:entication|orization)?|oauth|permission|rbac|password|secret|jwt|csrf|encryption|security|architecture|migration|middleware)\b/i.test(delta)) return 'L3';
