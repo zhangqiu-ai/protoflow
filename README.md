@@ -201,7 +201,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 ## 儀表板（提案 0004）
 
-`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：圓環與管線呈現各 target 的階段，總覽卡片即時顯示進行中的版本、階段與代理最新動作，終端機即時顯示執行代理正在做的事（讀檔、編輯、命令），原型與 App 截圖並排放在仿真機框、可點開大圖並排或疊圖比對，另有角色模型、Issue、交付與事件；淺色／深色與手機寬度皆可用。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、把獨立審查否決的版本帶著發現退回重修、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
+`protoflow dashboard service install` 在本機常駐一個網頁（`http://127.0.0.1:7420/`），一次看所有登記的專案：每頁左側的側邊欄列出所有專案的階段與待你數量，可點選或以 ⌥↑↓ 直接切換、收合成圖示；圓環與管線呈現各 target 的階段，總覽卡片即時顯示進行中的版本、階段與代理最新動作，終端機即時顯示執行代理正在做的事（讀檔、編輯、命令），原型與 App 截圖並排放在仿真機框、可點開大圖並排或疊圖比對，另有角色模型、Issue、交付與事件；淺色／深色與手機寬度皆可用。需要人決定的事可直接在面板核准：合併 `merge: "manual"` 的交付 PR（只合併審查過的 commit）、把 `needs-human` 的 Issue 交回 AI、人工核准版本、把獨立審查否決的版本帶著發現退回重修、重試阻塞的版本；每個操作以你的身分執行並留下紀錄。資料來自各專案自己的 `.protoflow/`，不依賴 Claude session。見 [docs/dashboard.md](docs/dashboard.md)。
 
 ## Claude 規劃與驗收、GitHub Issues（提案 0003）
 
