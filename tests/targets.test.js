@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { loadConfig, configSchemaV2 } from '../src/config.js';
 import { captureExternal } from '../src/drivers/external.js';
-import { scenesFor, targetSettings, targetVariants } from '../src/targets.js';
+import { scenesFor, targetSettings, targetVariants, retryNotRun } from '../src/targets.js';
 import { staticContract } from '../src/anchors.js';
 
 const exec = promisify(execFile);
@@ -91,6 +91,19 @@ test('external driver responses are validated; failures are NOT_RUN unless the d
   assert.match((await driver('process.exit(4)')).reason, /driver ios failed \(exit 4\)/);
   assert.match((await driver(respond({ schemaVersion: 1, status: 'PASS', screenshot: '../../etc/passwd' }))).reason, /escapes its output directory/);
   assert.equal((await captureExternal(root, { id: 'x', driver: {} }, { outputDir: 'out' })).status, 'NOT_RUN');
+});
+
+test('a capture that produced no result is taken once more; an application FAIL is not', async () => {
+  const sequence = outcomes => { const calls = []; return { calls, capture: async () => { calls.push(1); return outcomes[calls.length - 1]; } }; };
+  const flaky = sequence([{ status: 'NOT_RUN', reason: 'the XCUITest capture produced no result (xcodebuild exit null)' }, { status: 'PASS', capture: {} }]);
+  const recovered = await retryNotRun(flaky.capture);
+  assert.deepEqual([recovered.status, flaky.calls.length, recovered.retried.status], ['PASS', 2, 'NOT_RUN']);
+  assert.match(recovered.retried.reason, /produced no result/);
+  const failing = sequence([{ status: 'FAIL', reason: 'screen anchor did not appear' }]);
+  assert.deepEqual([(await retryNotRun(failing.capture)).status, failing.calls.length], ['FAIL', 1]);
+  const absent = sequence([{ status: 'NOT_RUN', reason: 'no simulator' }, { status: 'NOT_RUN', reason: 'no simulator' }]);
+  const still = await retryNotRun(absent.capture);
+  assert.deepEqual([still.status, absent.calls.length, still.retried.reason], ['NOT_RUN', 2, 'no simulator']);
 });
 
 test('CLI anchors suggest writes a draft patch; contract show and doctor read v2 projects', async t => {
