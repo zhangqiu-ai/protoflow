@@ -68,6 +68,9 @@ test('content scrolled out of a scroll view is rendered: visible, and part of it
   assert.deepEqual([elements['goal.discuss'].visible, elements['goal.recent.1'].visible, elements['goal.drawer'].visible], [true, true, false]);
   assert.deepEqual(elements['goal.discuss'].bounds, { x: 58, y: 837, width: 130, height: 36 });
   assert.equal(elements.goal.text, 'Run 10K Discuss with AI Ordering cards');
+  // A tab bar floating over the scroll view reads after its content, as in document order, not between the fold.
+  tree.children.push({ type: 'tabBar', frame: frame(0, 722, 402, 84), children: [{ type: 'button', identifier: 'goal.tab', label: 'Growth', frame: frame(0, 722, 100, 84) }] });
+  assert.equal(byAnchor(anchorFacts(tree, { anchors: ['goal'], screen: 'goal', content: frame(0, 62, 402, 778) })).goal.text, 'Run 10K Discuss with AI Ordering cards Growth');
 });
 
 test('a flattened container\'s own label is an accessible name, not text it shows', () => {

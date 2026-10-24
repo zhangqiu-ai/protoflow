@@ -78,26 +78,35 @@ export function scrolledOut(tree) {
 /**
  * Visible text inside a frame, for containers that the platform reports as leaves: React Native (Fabric) flattens the
  * accessibility tree, so a View's text and buttons are siblings that lie within its frame rather than its children.
- * Text scrolled out of a scroll view belongs to the container that holds the scroll view.
+ * Text scrolled out of a scroll view belongs to the container that holds the scroll view. A scroll view's content reads
+ * as one block placed where the scroll view is, like the DOM's document order: a tab bar floating over the scroll view
+ * reads after it, not between the content above and below the fold.
  */
 export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
   const frame = frameOf(container);
-  const found = [];
+  const found = [], owner = new Map(), outer = new Map();
   const within = item => inside(frameOf(item), frame) || (scrolled.has(item) && within(scrolled.get(item)));
-  const visit = item => {
+  const visit = (item, scroller) => {
     if (item === container || item.visible === false) return;
     if (within(item) && !TEXT_ENTRY.has(item.type)) {
-      if (LABELLED.has(item.type) && item.label) { found.push(item); return; }
-      if (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window') { found.push(item); return; }
+      const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
+      if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
-    for (const child of item.children ?? []) visit(child);
+    if (SCROLLERS.has(item.type)) outer.set(item, scroller);
+    for (const child of item.children ?? []) visit(child, SCROLLERS.has(item.type) ? item : scroller);
   };
-  visit(tree);
+  visit(tree, null);
   // A labelled leaf that encloses other text is a flattened container (a tab bar named "Main navigation"): its label
   // is an accessible name, which the DOM's innerText leaves out as well.
   const encloses = (outer, inner) => outer !== inner && inside(frameOf(inner), frameOf(outer));
   const text = found.filter(item => LABELLED.has(item.type) || !found.some(other => encloses(item, other)));
-  const parts = readingOrder(text).map(item => item.label);
+  const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
+  const ordered = (items, depth) => {
+    const units = new Map();
+    for (const item of items) { const key = chain(item)[depth] ?? item; units.set(key, [...(units.get(key) ?? []), item]); }
+    return readingOrder([...units.keys()]).flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
+  };
+  const parts = ordered(text, 0).map(item => item.label);
   return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
 }
 

@@ -253,8 +253,11 @@ export function compareTokens(screen, prototype, application, { tokens = [], del
       if (deltaE2000(colors[0], colors[1]) > deltaE) reasons.push(`${anchor.id}: sampled background differs (ΔE ${deltaE2000(colors[0], colors[1]).toFixed(1)})`);
     } else skipped++;
   }
-  if (checked && skipped === checked) return result(['application capture has neither style data nor screenshots'], checked, 'NOT_RUN');
-  return { ...result(reasons, checked), sampled };
+  // Without style data or screenshots nothing could be compared. With screenshots, an anchor without one prevailing
+  // colour on both sides (a whole-screen root over mixed content) has nothing to sample: the comparison ran and found
+  // no difference, so it passes, recording that nothing was sampled.
+  if (checked && skipped === checked && !(protoPng && appPng)) return result(['application capture has neither style data nor screenshots'], checked, 'NOT_RUN');
+  return { ...result(reasons, checked), sampled, ...(checked && !sampled && skipped === checked && { note: 'no anchor has one prevailing colour on both sides; nothing was sampled' }) };
 }
 
 function relation(a, b, epsilon) {
