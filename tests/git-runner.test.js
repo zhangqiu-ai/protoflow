@@ -133,6 +133,9 @@ test('runner supersede folds the blocked version into the newest one and keeps t
   await fs.access(path.join(root, result.archive, `${blocked.manifestId}.json`));
   assert.equal((await versionQueue(root, config)).current.id, later.manifestId);
   assert.equal(await fs.readFile(path.join(runner.worktree, 'app.html'), 'utf8'), '<button id="button">Work in progress</button>');
+  // The timeline records how the blocked version ended.
+  const events = (await fs.readFile(path.join(root, '.protoflow/runner/events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.event === 'superseded').map(event => [event.sha, event.manifestId, event.into, event.superseded, event.archive]), [[blocked.sha, blocked.manifestId, later.manifestId, [blocked.manifestId], result.archive]]);
 
   // The next run takes the combined version from the kept worktree; nothing is left to supersede.
   assert.equal((await runOnce(root, config)).status, 'BLOCKED');
