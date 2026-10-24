@@ -57,17 +57,36 @@ const inside = (inner, outer) => {
   return inner.width > 0 && inner.height > 0 && x >= outer.x && x <= outer.x + outer.width && y >= outer.y && y <= outer.y + outer.height;
 };
 
+const SCROLLERS = new Set(['scrollView', 'table', 'collectionView']);
+/**
+ * Content a scroll view has scrolled out of sight is still on the page: the web counts an element below the fold as
+ * visible, and its text as part of its container. Maps each node whose centre lies outside its nearest scroll view, or
+ * whose scroll view is itself scrolled out (a horizontal row below the fold), to that scroll view, so visibility and
+ * container text treat it as rendered rather than hidden.
+ */
+export function scrolledOut(tree) {
+  const scrolled = new Map();
+  const visit = (node, scroller) => {
+    const frame = frameOf(node);
+    if (scroller && frame.width > 0 && frame.height > 0 && (scrolled.has(scroller) || !inside(frame, frameOf(scroller)))) scrolled.set(node, scroller);
+    for (const child of node.children ?? []) visit(child, SCROLLERS.has(node.type) ? node : scroller);
+  };
+  visit(tree, null);
+  return scrolled;
+}
+
 /**
  * Visible text inside a frame, for containers that the platform reports as leaves: React Native (Fabric) flattens the
  * accessibility tree, so a View's text and buttons are siblings that lie within its frame rather than its children.
+ * Text scrolled out of a scroll view belongs to the container that holds the scroll view.
  */
-export function textWithin(tree, container) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
   const frame = frameOf(container);
   const found = [];
+  const within = item => inside(frameOf(item), frame) || (scrolled.has(item) && within(scrolled.get(item)));
   const visit = item => {
     if (item === container || item.visible === false) return;
-    const own = frameOf(item);
-    if (inside(own, frame) && !TEXT_ENTRY.has(item.type)) {
+    if (within(item) && !TEXT_ENTRY.has(item.type)) {
       if (LABELLED.has(item.type) && item.label) { found.push(item); return; }
       if (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window') { found.push(item); return; }
     }
@@ -86,12 +105,12 @@ export function textWithin(tree, container) {
  * The element's own text: field value/placeholder, nothing for controls (web reports '' for checkboxes), the label of
  * text and buttons, else the visible text it contains (by hierarchy, or by geometry when the tree is flattened).
  */
-export function elementText(node, tree = null) {
+export function elementText(node, tree = null, scrolled = undefined) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
   if (CONTROLS.has(node.type)) return '';
   if (LABELLED.has(node.type)) return node.label ?? '';
   if (node.children?.length) return subtreeText(node);
-  return tree && !node.label ? textWithin(tree, node) : node.label ?? '';
+  return tree && !node.label ? textWithin(tree, node, scrolled) : node.label ?? '';
 }
 
 function collect(node, byId = new Map()) {
@@ -110,6 +129,7 @@ const intersects = (a, b) => a.width > 0 && a.height > 0 && a.x < b.x + b.width 
  */
 export function anchorFacts(tree, { anchors, screen, content }) {
   const byId = collect(tree);
+  const scrolled = scrolledOut(tree);
   const elements = [], missing = [];
   for (const anchor of anchors) {
     const nodes = byId.get(anchor) ?? [];
@@ -121,14 +141,14 @@ export function anchorFacts(tree, { anchors, screen, content }) {
       : { x: frame.x - content.x, y: frame.y - content.y, width: frame.width, height: frame.height };
     elements.push({
       anchor, count: nodes.length,
-      visible: anchor === screen || (node.visible !== false && intersects(frame, content)),
+      visible: anchor === screen || (node.visible !== false && (intersects(frame, content) || scrolled.has(node))),
       enabled: node.enabled !== false,
       interactive: INTERACTIVE.has(node.type),
       editable: EDITABLE.has(node.type),
       inputType: INPUT_TYPES[node.type] ?? null,
       role: node.type,
       bounds,
-      text: elementText(node, tree)
+      text: elementText(node, tree, scrolled)
     });
   }
   return { elements, missing };

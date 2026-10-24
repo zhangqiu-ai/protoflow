@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { anchorFromResource, resourceFromAnchor, nodeType, normalizeCapture, androidResponse } from '../src/drivers/android-tree.js';
+import { anchorFromResource, resourceFromAnchor, nodeType, normalizeCapture, androidResponse, restoreScrolled } from '../src/drivers/android-tree.js';
 
 const box = (left, top, right, bottom) => ({ left, top, right, bottom });
 const node = (fields, children) => ({ enabled: true, visible: true, ...fields, ...(children && { children }) });
@@ -85,6 +85,33 @@ test('a UiAutomator capture becomes protocol facts in dp relative to the content
   assert.equal(facts['tasks.add'].interactive, true);
   // Present in the tree but not visible to the user.
   assert.deepEqual([facts['tasks.error'].count, facts['tasks.error'].visible], [1, false]);
+});
+
+test('content a scroll view has scrolled out of sight keeps its own size and counts as rendered', () => {
+  // A React Native goal screen as UiAutomator reports it: below the scroll view's bottom edge (2328 px) a node keeps its
+  // true top but its bottom is clamped, it is not visible to the user, and only boundsInParent keeps its size.
+  const scroll = node({ className: 'android.widget.ScrollView', scrollable: true, bounds: box(0, 298, 1080, 2328), size: { width: 1080, height: 2030 } }, [
+    node({ className: 'android.view.ViewGroup', resourceId: 'goal.title', text: 'Run 10K', bounds: box(0, 298, 1080, 400), size: { width: 1080, height: 150 }, visible: true }),
+    node({ className: 'android.view.ViewGroup', resourceId: 'goal.chart', bounds: box(48, 1969, 1032, 2328), size: { width: 984, height: 432 } }),
+    node({ className: 'android.widget.Button', resourceId: 'goal.discuss', text: 'Discuss with AI', clickable: true, visible: false, bounds: box(174, 2678, 547, 2328), size: { width: 373, height: 108 } }),
+    node({ className: 'android.widget.TextView', resourceId: 'goal.hint', text: 'Saved', visible: false, bounds: box(60, 600, 400, 660), size: { width: 340, height: 60 } })
+  ]);
+  const screen = { status: 'PASS', density: 3, screen: { width: 1080, height: 2400 }, insets: { left: 0, top: 72, right: 0, bottom: 63 }, keyboardVisible: false,
+    tree: node({ className: 'android.widget.FrameLayout', bounds: box(0, 0, 1080, 2400) }, [
+      node({ className: 'android.view.ViewGroup', resourceId: 'goal', bounds: box(0, 136, 1080, 2328) }), scroll
+    ]) };
+  const restored = restoreScrolled(screen.tree).children[1].children;
+  // Scrolled above the top edge: the top is clamped and the true bottom kept.
+  assert.deepEqual(restored[0].bounds, box(0, 250, 1080, 400));
+  assert.deepEqual(restored[1].bounds, box(48, 1969, 1032, 2401));
+  assert.deepEqual([restored[2].bounds, restored[2].visible], [box(174, 2678, 547, 2786), true]);
+  // Hidden inside the scroll view, not clipped: stays hidden.
+  assert.equal(restored[3].visible, false);
+  const { response } = androidResponse(screen, screenshot(), { anchors: ['goal', 'goal.chart', 'goal.discuss', 'goal.hint'], screen: 'goal' });
+  const facts = Object.fromEntries(response.elements.map(item => [item.anchor, item]));
+  assert.deepEqual([facts['goal.discuss'].visible, facts['goal.discuss'].bounds.height, facts['goal.chart'].bounds.height], [true, 36, 144]);
+  assert.equal(facts['goal.hint'].visible, false);
+  assert.equal(facts.goal.text, 'Run 10K Discuss with AI');
 });
 
 test('typed text, keyboards and failed captures', () => {
