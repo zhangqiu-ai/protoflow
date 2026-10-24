@@ -8,7 +8,8 @@ const REASON = {
   'repair-limit': '修復次數用完',
   'needs-human': '規劃代理需要人決定',
   execution: '執行代理失敗',
-  'not-run': '驗收無法執行'
+  'not-run': '驗收無法執行',
+  'base-moved': '基底分支已移動'
 };
 
 /**

@@ -479,10 +479,11 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     if (error.code !== 'BASE_MOVED') {
       await onEvent({ event: 'base-check-failed', sha: entry.sha, manifestId: entry.manifestId, reason: String(error.stderr || error.message).trim().slice(-300) });
     } else {
-      entry.status = 'BLOCKED'; entry.error = error.message; runner.status = 'BLOCKED';
+      entry.status = 'BLOCKED'; entry.error = error.message; entry.reasonCode = 'base-moved'; entry.blockedAt = new Date().toISOString(); runner.status = 'BLOCKED';
       await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
       await onEvent({ event: 'base-moved', sha: entry.sha, manifestId: entry.manifestId, baseSha: error.baseSha, reason: error.message });
-      return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message };
+      await onEvent({ event: 'blocked', sha: entry.sha, manifestId: entry.manifestId, reasonCode: 'base-moved', reason: errorHead(error.message) });
+      return { status: 'BLOCKED', manifestId: entry.manifestId, sha: entry.sha, reason: error.message, reasonCode: 'base-moved' };
     }
   }
   entry.status = 'RUNNING'; entry.startedAt = new Date().toISOString();
