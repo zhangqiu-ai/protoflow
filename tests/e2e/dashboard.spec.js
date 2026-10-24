@@ -1,5 +1,7 @@
 // Dashboard acceptance in a real browser (proposal 0004). FAKE project state; actions are recorded, not executed.
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { dashboardFixture } from '../helpers/dashboard-fixture.js';
 import { addProject, projectId } from '../../src/dashboard-data.js';
 import { createDashboardServer } from '../../src/dashboard-server.js';
@@ -109,7 +111,7 @@ test('the sidebar lists every project on every page, switches between them and f
     await page.goto(base);
     const nav = page.getByRole('navigation', { name: '專案' }), toggle = page.getByRole('button', { name: '專案側邊欄' });
     const first = nav.getByRole('link', { name: /Fixture App/ }), second = nav.getByRole('link', { name: /Second App/ });
-    await expect(nav.locator('.nav-item')).toHaveCount(3);
+    await expect(nav.locator('.nav-item')).toHaveCount(4);
     await expect(nav.getByRole('link', { name: /總覽/ })).toHaveAttribute('aria-current', 'page');
     // Each project: where its busiest target is, a live dot while it works, and how many decisions wait.
     await expect(first).toContainText('實作');
@@ -124,6 +126,7 @@ test('the sidebar lists every project on every page, switches between them and f
     await expect(page).toHaveURL(new RegExp(`#/p/${await projectId(other.root)}$`));
     await expect(second).toHaveAttribute('aria-current', 'page');
     await expect.poll(() => page.locator('.nav-ind').evaluate(node => node.style.transform)).toBe(`translateY(${await second.evaluate(node => node.offsetTop)}px)`);
+    await page.keyboard.press('Alt+ArrowUp');
     await page.keyboard.press('Alt+ArrowUp');
     await page.keyboard.press('Alt+ArrowUp');
     await expect(page.getByRole('heading', { level: 1 })).toContainText('2 個專案');
@@ -149,6 +152,61 @@ test('the sidebar lists every project on every page, switches between them and f
   } finally { await server.close(); await other.cleanup(); }
 });
 
+test('the inbox gathers what waits across projects, most urgent first, with the fix for a known failure', async ({ page, context }) => {
+  const blocked = await dashboardFixture({ blockedError: 'Claude execution FAIL (EXEC-fixture, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed' });
+  await addProject(blocked.root, { home: blocked.home });
+  const sent = [];
+  const server = createDashboardServer({ home: blocked.home, port: 0, service: false, pollMs: 200, actions: async (root, body) => { sent.push(body); return { status: 'PASS', next: 'FAKE FIXTURE action recorded' }; } });
+  const base = await server.listen();
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+    // FAKE notifications: recorded instead of shown; the test decides when the page counts as hidden.
+    await page.addInitScript(() => {
+      window.__notes = [];
+      window.Notification = class { static permission = 'granted'; static requestPermission = async () => 'granted'; constructor(title, options) { this.title = title; this.options = options; window.__notes.push(this); } close() {} };
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => window.__hidden === true });
+      localStorage.setItem('protoflow.notify', 'on');
+    });
+    await page.goto(base);
+    // The tab says how many decisions wait, in its title and icon.
+    await expect(page).toHaveTitle('(3) ProtoFlow 儀表板');
+    await expect(page.locator('#favicon')).toHaveAttribute('href', /^data:image\/svg\+xml,.*%3E3%3C/);
+    await page.getByRole('main').getByRole('link', { name: '3 件等你決定' }).click();
+    await expect(page).toHaveURL(/#\/inbox$/);
+    await expect(page.getByRole('navigation', { name: '專案' }).getByRole('link', { name: /等你/ })).toHaveAttribute('aria-current', 'page');
+    const group = page.getByRole('region', { name: 'Fixture App' });
+    await expect(group.locator('.ask')).toHaveCount(3);
+    // Blocked work leads; its card names the expired login, the command to run and the steps before retrying.
+    const first = group.locator('.ask').first();
+    await expect(first).toContainText('阻塞');
+    await expect(first.locator('.diag')).toContainText('Claude 登入失效');
+    await expect(first.locator('.diag ol li code').first()).toHaveText('claude');
+    await first.getByRole('button', { name: '複製命令 claude' }).click();
+    await expect(page.locator('#toast')).toHaveText('已複製：claude');
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('claude');
+    page.once('dialog', dialog => { expect(dialog.message()).toContain('Claude 登入失效'); dialog.accept(); });
+    await first.getByRole('button', { name: '已處理，重試' }).click();
+    await expect(first.locator('.signed')).toContainText('已重新排入');
+    expect(sent.at(-1)).toEqual({ action: 'retry', target: null });
+    // Notifications: switched on here; a new item while the page is hidden becomes a desktop notification.
+    await expect(page.getByRole('button', { name: '桌面通知已開啟' })).toHaveAttribute('aria-pressed', 'true');
+    await page.evaluate(() => { window.__hidden = true; });
+    const issues = path.join(blocked.root, '.protoflow/issues/state.json');
+    const state = JSON.parse(await fs.readFile(issues, 'utf8'));
+    state.issues['6'].status = 'needs-human';
+    await fs.writeFile(issues, JSON.stringify(state));
+    await expect.poll(() => page.evaluate(() => window.__notes.map(note => note.title))).toEqual(['Fixture App · Issue 等你']);
+    await expect(page).toHaveTitle('(4) ProtoFlow 儀表板');
+    await page.evaluate(() => window.__notes[0].onclick());
+    await expect(page).toHaveURL(new RegExp(`#/p/${await projectId(blocked.root)}$`));
+    // Switched off, nothing more is sent.
+    await page.evaluate(() => { window.__hidden = false; });
+    await page.goto(`${base}#/inbox`);
+    await page.getByRole('button', { name: '桌面通知已開啟' }).click();
+    await expect(page.getByRole('button', { name: '開啟桌面通知' })).toHaveAttribute('aria-pressed', 'false');
+  } finally { await server.close(); await blocked.cleanup(); }
+});
+
 test('motion is switched off when the system asks for reduced motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto(`${url}#/p/${id}`);
@@ -158,7 +216,7 @@ test('motion is switched off when the system asks for reduced motion', async ({ 
 
 test('the layout fits a phone width without horizontal scroll', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const hash of ['', `#/p/${id}`]) {
+  for (const hash of ['', '#/inbox', `#/p/${id}`]) {
     await page.goto(`${url}${hash}`);
     await expect(page.locator('#conn')).toHaveText('即時');
     await page.waitForTimeout(200);
