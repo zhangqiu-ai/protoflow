@@ -193,11 +193,13 @@ Compose 與 Flutter 注意事項：
 
 | 協定欄位 | iOS 來源 | Android 來源 |
 |---|---|---|
-| `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density |
-| `visible` | frame 與內容區域相交且尺寸大於 0 | `isVisibleToUser` 且與內容區域相交 |
-| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
+| `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density。捲動區外的節點被裁切時，以 `boundsInParent` 的尺寸還原（見下） |
+| `visible` | frame 與內容區域相交且尺寸大於 0，或是捲動區已捲出畫面的內容 | `isVisibleToUser` 且與內容區域相交，或是捲動區已捲出畫面的內容 |
+| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
 | `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型；可勾選的 `Button`（`ToggleButton`、帶 checked 狀態的 React Native 按鈕）視為按鈕，文字取其標籤 |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
+
+**捲出畫面的內容**：網頁原型在 Playwright 中把折線以下的元素算作可見，文字也算進容器；原生平台只回報螢幕上的部分。為使兩邊一致，位於捲動區（iOS 的 `scrollView`／`table`／`collectionView`，Android 的 `isScrollable` 節點或 `ScrollView`、`HorizontalScrollView`、`RecyclerView`、`ListView`）內、中心落在捲動區之外的元素（或其所在的捲動區本身已捲出，例如折線以下的橫向列表）視為已渲染：`visible` 為 true，文字算進包含該捲動區的容器。不在任何捲動區內的畫面外元素（例如停在螢幕外的抽屜）仍不可見。Android 的 UiAutomator 還會把捲出節點的螢幕邊界裁到捲動區邊緣並回報 `isVisibleToUser` 為 false；驅動器另外回報節點的 `boundsInParent` 尺寸與 `isScrollable`，正規化時被夾在捲動區邊緣的那一側依尺寸往外還原（在下方的保留真實上緣，在上方的保留真實下緣），並恢復可見。捲動區內未被裁切卻不可見的節點（例如透明度為 0）仍不可見。實測 siyue（React Native）在 iPhone 上原型可見、應用判為不可見的錨點從 31 個降為 0 個。
 
 步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
 

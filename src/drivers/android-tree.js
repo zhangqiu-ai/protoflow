@@ -4,7 +4,8 @@ import { nativeResponse } from './native-tree.js';
  * Normalise the raw UiAutomator snapshot written by drivers/android (CaptureTest) into the native-tree vocabulary.
  * Raw capture: { status, reason?, density, screen: { width, height } (px), insets: { left, top, right, bottom } (px),
  * keyboardVisible, tree } with nodes { className, resourceId, text, contentDescription, hint, showingHint, checkable,
- * clickable, editable, password, enabled, visible, bounds: { left, top, right, bottom } (px), children }.
+ * clickable, editable, password, enabled, visible, bounds: { left, top, right, bottom } (px), size: { width, height } (px),
+ * scrollable, children }.
  */
 
 /**
@@ -31,6 +32,7 @@ export function nodeType(node) {
   // its text, like a web button with aria-pressed.
   if (node.checkable) return /Switch/.test(cls) ? 'switch' : /RadioButton/.test(cls) ? 'radioButton' : /CheckBox/.test(cls) ? 'checkBox' : /Button$/.test(cls) ? 'button' : 'checkBox';
   if (/SeekBar|Slider/.test(cls)) return 'slider';
+  if (scrolls(node)) return 'scrollView';
   if (/Button/.test(cls)) return 'button';
   if (node.clickable && label && !node.children?.length) return 'button';
   // Compose / React Native pressables: a clickable container whose content is only text is one action.
@@ -42,6 +44,31 @@ export function nodeType(node) {
 }
 
 const interactive = node => node.clickable || node.editable || node.checkable;
+const scrolls = node => node.scrollable === true || /(?:Horizontal)?ScrollView$|RecyclerView|ListView/.test(shortClass(node.className));
+
+/**
+ * UiAutomator clips a node's screen bounds to each ancestor and reports content a scroll view has scrolled out of
+ * sight as not visible to the user, though it is rendered (the web counts it as visible below the fold). The driver
+ * also reports the node's own size, so its bounds are restored: an edge clamped to the nearest scroll view's edge
+ * moves out by the missing size (a node below keeps its true top, a node above its true bottom), and a node that was
+ * clipped away is visible again. A node hidden inside a scroll view is not clipped and stays hidden.
+ */
+export function restoreScrolled(node, clip = null) {
+  let restored = node;
+  if (clip && node.size && node.bounds) {
+    const bounds = { ...node.bounds };
+    const extend = (start, end, length) => {
+      if (bounds[end] - bounds[start] >= length) return false;
+      if (bounds[start] === clip[start] && bounds[end] !== clip[end]) bounds[start] = bounds[end] - length;
+      else bounds[end] = bounds[start] + length;
+      return true;
+    };
+    const vertical = extend('top', 'bottom', node.size.height), horizontal = extend('left', 'right', node.size.width);
+    if (vertical || horizontal) restored = { ...node, bounds, visible: true };
+  }
+  const children = node.children?.map(child => restoreScrolled(child, scrolls(node) ? node.bounds : clip));
+  return children ? { ...restored, children } : restored;
+}
 function onlyText(children) {
   return children.every(child => !interactive(child) && (child.children?.length ? onlyText(child.children) : true)) && texts(children).length > 0;
 }
@@ -85,7 +112,7 @@ export function normalizeCapture(raw) {
       x: insets.left / density, y: insets.top / density,
       width: (screen.width - insets.left - insets.right) / density, height: (screen.height - insets.top - insets.bottom) / density
     },
-    tree: { type: 'application', label: '', enabled: true, frame: { x: 0, y: 0, width: screen.width / density, height: screen.height / density }, children: [normalizeNode(raw.tree, density)] }
+    tree: { type: 'application', label: '', enabled: true, frame: { x: 0, y: 0, width: screen.width / density, height: screen.height / density }, children: [normalizeNode(restoreScrolled(raw.tree), density)] }
   };
 }
 

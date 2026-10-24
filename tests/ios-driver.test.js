@@ -48,6 +48,28 @@ test('React Native flattens the tree: container text is collected by geometry, c
   assert.equal(elements['tasks.input'].text, 'New task');
 });
 
+test('content scrolled out of a scroll view is rendered: visible, and part of its container text', () => {
+  const frame = (x, y, width, height) => ({ x, y, width, height });
+  // React Native on iOS: the screen View is a leaf, its scroll content lies below the 778 pt content area.
+  const tree = { type: 'application', frame: frame(0, 0, 402, 874), children: [
+    { type: 'other', identifier: 'goal', label: '', frame: frame(0, 62, 402, 778) },
+    { type: 'scrollView', frame: frame(0, 116, 402, 724), children: [
+      { type: 'staticText', identifier: 'goal.title', label: 'Run 10K', frame: frame(16, 122, 300, 40) },
+      { type: 'button', identifier: 'goal.discuss', label: 'Discuss with AI', frame: frame(58, 899, 130, 36) },
+      // A horizontal row below the fold: its first item is inside the row, the row is scrolled out.
+      { type: 'scrollView', identifier: 'goal.recent', frame: frame(0, 960, 402, 120), children: [
+        { type: 'button', identifier: 'goal.recent.1', label: 'Ordering cards', frame: frame(16, 960, 160, 120) }
+      ] }
+    ] },
+    // Outside any scroll view (a drawer parked off screen): not rendered on the page.
+    { type: 'button', identifier: 'goal.drawer', label: 'Settings', frame: frame(-320, 62, 300, 44) }
+  ] };
+  const elements = byAnchor(anchorFacts(tree, { anchors: ['goal', 'goal.discuss', 'goal.recent.1', 'goal.drawer'], screen: 'goal', content: frame(0, 62, 402, 778) }));
+  assert.deepEqual([elements['goal.discuss'].visible, elements['goal.recent.1'].visible, elements['goal.drawer'].visible], [true, true, false]);
+  assert.deepEqual(elements['goal.discuss'].bounds, { x: 58, y: 837, width: 130, height: 36 });
+  assert.equal(elements.goal.text, 'Run 10K Discuss with AI Ordering cards');
+});
+
 test('a flattened container\'s own label is an accessible name, not text it shows', () => {
   const tree = { type: 'application', frame: { x: 0, y: 0, width: 400, height: 800 }, children: [
     { type: 'other', identifier: 'page', frame: { x: 0, y: 0, width: 400, height: 800 } },

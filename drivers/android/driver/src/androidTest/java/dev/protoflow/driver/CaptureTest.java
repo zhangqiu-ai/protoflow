@@ -286,6 +286,10 @@ public class CaptureTest {
         item.put("checkable", node.isCheckable()).put("checked", node.isChecked()).put("clickable", node.isClickable());
         item.put("editable", node.isEditable()).put("password", node.isPassword()).put("enabled", node.isEnabled()).put("visible", node.isVisibleToUser());
         item.put("bounds", new JSONObject().put("left", bounds.left).put("top", bounds.top).put("right", bounds.right).put("bottom", bounds.bottom));
+        Rect local = new Rect();
+        node.getBoundsInParent(local);
+        item.put("size", new JSONObject().put("width", local.width()).put("height", local.height()));
+        item.put("scrollable", node.isScrollable());
         JSONArray children = new JSONArray();
         for (int index = 0; index < node.getChildCount(); index++) {
             AccessibilityNodeInfo child = node.getChild(index);
