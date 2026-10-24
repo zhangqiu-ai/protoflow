@@ -309,4 +309,4 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
-| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）提案與實作紀錄 |
+| [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）提案與實作紀錄；維護者豁免（0005，提案中，尚未實作） |
