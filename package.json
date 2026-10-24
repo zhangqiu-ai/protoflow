@@ -1,6 +1,6 @@
 {
   "name": "@zhangqiu-ai/protoflow",
-  "version": "0.3.44",
+  "version": "0.3.45",
   "description": "Shared prototype-driven engineering engine and Codex Skill",
   "type": "module",
   "engines": {

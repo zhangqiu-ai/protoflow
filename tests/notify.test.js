@@ -4,7 +4,7 @@ import { notificationFor, notifyDesktop } from '../src/notify.js';
 
 test('a blocked version, a blocked issue fix and an issue for a maintainer reach the desktop; other events do not', () => {
   const blocked = notificationFor({ event: 'blocked', target: 'mobile', reasonCode: 'environment', reason: 'Claude execution cannot run in this environment: OAuth token has expired\nmore' }, 'siyue');
-  assert.deepEqual(blocked, { title: 'ProtoFlow · siyue · mobile', subtitle: '版本阻塞：環境問題（登入或網路），修好後重試', message: 'Claude execution cannot run in this environment: OAuth token has expired' });
+  assert.deepEqual(blocked, { title: 'ProtoFlow · siyue · mobile', subtitle: '版本阻塞：環境問題（登入、網路或建置環境），修好後重試', message: 'Claude execution cannot run in this environment: OAuth token has expired' });
   assert.equal(notificationFor({ event: 'blocked', reasonCode: 'stalled', reason: 'x' }, 'app').subtitle, '版本阻塞：修復沒有進展');
   assert.equal(notificationFor({ event: 'blocked', reasonCode: 'base-moved', reason: 'x' }, 'app').subtitle, '版本阻塞：基底分支已移動');
   assert.equal(notificationFor({ event: 'blocked', reasonCode: null, reason: 'x' }, 'app').subtitle, '版本阻塞：需要處理');

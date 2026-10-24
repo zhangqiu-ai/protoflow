@@ -4,6 +4,9 @@ import Ajv from 'ajv';
 import { readJson, projectPath } from './util.js';
 
 const command = { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['argv'], properties: { argv: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }, timeoutMs: { type: 'integer', minimum: 1, maximum: 3600000 } } }] };
+// A build command may name what it must produce (`outputs`, relative to the worktree root the build runs in): a build that
+// exits 0 without them failed (Expo prebuild exits 0 when pod install fails).
+const buildCommand = { anyOf: [command.anyOf[0], { ...command.anyOf[1], properties: { ...command.anyOf[1].properties, outputs: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1, not: { pattern: '^/|(^|/)\\.\\.(/|$)' } } } } }] };
 const functionalCommand = { anyOf: [...command.anyOf, { type: 'object', additionalProperties: false, required: ['adapter'], properties: { adapter: { const: 'acceptance' } } }] };
 const selectorPair = { type: 'object', required: ['prototype', 'application'], properties: { prototype: { type: 'string', minLength: 1 }, application: { type: 'string', minLength: 1 } }, additionalProperties: false };
 export const configSchema = {
@@ -31,7 +34,7 @@ export const configSchema = {
       targets: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } },
       all: { type: 'boolean' }, maxTriagePerSync: { type: 'integer', minimum: 1, maximum: 20 }, remote: { type: 'string', pattern: '^[A-Za-z0-9_.-]+$' }
     } },
-    verification: { type: 'object', additionalProperties: false, properties: { build: command, functional: functionalCommand } },
+    verification: { type: 'object', additionalProperties: false, properties: { build: buildCommand, functional: functionalCommand } },
     adapters: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['codex', 'claude', 'planner', 'independentReview', 'specKit', 'bmad'].map(key => [key, { type: 'object', additionalProperties: false, properties: key === 'codex' ? { command, ignoreUserConfig: { type: 'boolean' } } : key === 'independentReview' ? { provider: { enum: ['claude', 'codex'] }, command } : ['claude', 'planner'].includes(key) ? { command } : { command, install: command } }])) },
     visual: { type: 'object', additionalProperties: false, properties: {
       mode: { enum: ['browser', 'native', 'adapter'] },
@@ -47,7 +50,7 @@ const tier = { enum: ['required', 'advisory', 'off'] };
 configSchema.properties.adapters.properties.acceptance = { type: 'object', additionalProperties: false, required: ['command'], properties: { command: command.anyOf[1], options: { type: 'object' } } };
 const shared = configSchema.properties;
 const driver = { type: 'object', required: ['kind'], additionalProperties: false, properties: {
-  kind: { enum: ['playwright-web', 'playwright-electron', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command: shared.verification.properties.build,
+  kind: { enum: ['playwright-web', 'playwright-electron', 'external'] }, urlTemplate: { type: 'string', minLength: 1 }, command,
   // playwright-electron: entry relative to the target root, route template ('#/{screen}' or a page path), optional binary.
   main: { type: 'string', minLength: 1 }, route: { type: 'string', minLength: 1 }, executablePath: { type: 'string', minLength: 1 },
   args: { type: 'array', items: { type: 'string' } }, env: { type: 'object', additionalProperties: { type: 'string' } }
@@ -84,10 +87,10 @@ export const configSchemaV2 = {
       // One codebase, several runtimes (React Native, Flutter): the target stays the unit of FIFO and delivery and every
       // required variant must PASS (docs/proposals/0002 D5). Variant fields override the target's.
       variants: { type: 'array', minItems: 1, items: { type: 'object', required: ['id', 'driver'], additionalProperties: false, properties: {
-        id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' }, required: { type: 'boolean' }, driver, build: command,
+        id: { type: 'string', pattern: '^[a-z][a-z0-9-]*$' }, required: { type: 'boolean' }, driver, build: buildCommand,
         locator, tiers: targetTiers, regression, viewport, visual, layout, tokens, deviations, timeoutMs
       } } },
-      build: command, functional: command,
+      build: buildCommand, functional: command,
       locator, tiers: targetTiers, regression, viewport, visual, layout, tokens, deviations, timeoutMs
     } } }
   }

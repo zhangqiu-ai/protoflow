@@ -169,6 +169,8 @@ test('a runner reasonCode decides the diagnosis first, and a blocked version say
   const login = diagnose('Claude execution cannot run in this environment (EXEC-1, exit 1): OAuth token has expired', 'environment');
   assert.deepEqual([login.kind, login.reasonCode, login.command], ['auth', 'environment', 'claude']);
   assert.equal(diagnose('Codex execution cannot run in this environment: getaddrinfo ENOTFOUND api.openai.com', 'environment').kind, 'network');
+  const build = diagnose('Build cannot run in this environment (VER-1, build): [!] Unable to locate the executable `cmake`. (hermes-engine fell back to a source build); retried after 60s: FAIL', 'environment');
+  assert.deepEqual([build.kind, build.reasonCode], ['build-environment', 'environment']); assert.match(build.steps.join(' '), /HERMES_ENGINE_TARBALL_PATH/);
   // A code the dashboard does not know falls back to the text.
   assert.equal(diagnose('Executor timed out after 1800000ms', 'execution').kind, 'timeout');
   const since = '2026-10-24T10:00:00.000Z';

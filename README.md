@@ -152,6 +152,8 @@ protoflow runner status --project /path/to/app
   - 供應端的暫時性故障（限流、5xx、串流中斷）會自動重試，次數與間隔由 `policy.transientRetries`、`policy.transientRetryDelayMs` 設定，不計入修復次數。
   - 執行失敗或逾時算一次 attempt，在 `policy.maxRepairAttempts` 內進入下一輪修復，用盡才 BLOCKED。
   - 登入失效或網路完全連不上（DNS、拒絕連線、代理通道失敗）屬於環境問題：立即 BLOCKED，`reasonCode` 為 `environment`，不重試也不計入修復次數。
+  - build 因機器而失敗（下載中斷、連線逾時、hermes-engine 退回原始碼建置而缺 cmake）時，等 `policy.transientRetryDelayMs` 後重跑一次；仍失敗則 functional 與視覺比對記為 NOT_RUN，版本 BLOCKED、`reasonCode` 為 `environment`，不進入修復。該 attempt 改過建置輸入（`package.json`、lockfile、`app.json`、Podfile、`ios/`、`android/` 等）時照常修復。
+  - build 命令可用 `outputs` 列出必須產出的檔案或目錄（相對於執行建置的 worktree 根目錄）；exit 0 但缺少產出，或輸出含 Expo 吞掉的 `pod install` 失敗時，build 記為 FAIL。
   - 連續 `policy.stallRounds` 輪（預設 2，0 為關閉）修復後失敗項沒有減少時提前 BLOCKED，`reasonCode` 為 `stalled`，不把剩下的修復次數耗在同樣的失敗上。
   - `runner status` 的 `blocked` 列出卡住版本的 `reasonCode`、開始時間與原始錯誤前幾行；macOS 上版本阻塞或 Issue 需要人決定時發出桌面通知，可用 `notifications.desktop: false` 關閉。
   - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。

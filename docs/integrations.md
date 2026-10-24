@@ -147,7 +147,7 @@ workspace-write 只允許寫入專案 worktree，且禁止網路。有些工具�
 
 ## 視覺／功能驗證
 
-`verification.build`、`functional` 是 argv 命令。functional 必須接目標專案持久保存的 Playwright regression assets；目標應用的登入 fixture、routes、server 啟動和 API mock 由專案測試負責。引擎測試使用真實 Playwright runner，沒有以手動 browser clicks 取代 E2E。
+`verification.build`、`functional` 是 argv 命令。build（含 target 與變體的 `build`）可加 `outputs`：必須產出的檔案或目錄，相對於執行建置的 worktree 根目錄（Runner 在 `.protoflow/runner/worktree-*` 建置，不是專案 checkout），不可為絕對路徑或含 `..`；命令 exit 0 但缺少任一產出時 build 記為 FAIL。functional 必須接目標專案持久保存的 Playwright regression assets；目標應用的登入 fixture、routes、server 啟動和 API mock 由專案測試負責。引擎測試使用真實 Playwright runner，沒有以手動 browser clicks 取代 E2E。
 
 `visual.scenes` 指定 URL／viewport／fixture／steps／masks／mappings。相對路徑解析為 project-contained file URL，http(s) URL 需先啟動 target server。fixture 透過 `window.__PROTOFLOW_FIXTURE__`、`fixture.localStorage`、`fixture.cookies` 注入；產品需配合消費 fixture。動態時間／隨機資料要自行固定或 mask，外框仍參與 geometry/style 檢查。
 

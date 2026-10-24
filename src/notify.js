@@ -3,7 +3,7 @@ import { runCommand } from './util.js';
 
 /** Why a blocked version waits, in the words the dashboard uses. */
 const REASON = {
-  environment: '環境問題（登入或網路），修好後重試',
+  environment: '環境問題（登入、網路或建置環境），修好後重試',
   stalled: '修復沒有進展',
   'repair-limit': '修復次數用完',
   'needs-human': '規劃代理需要人決定',
