@@ -8,6 +8,7 @@ import { deliveryStatus } from './delivery.js';
 import { recordedVerdict } from './delivery-review.js';
 import { HEARTBEAT, EVENTS } from './runner.js';
 import { serviceStatus } from './runner-service.js';
+import { diagnose } from './dashboard-diagnosis.js';
 
 /**
  * Proposal 0004: everything the dashboard shows, read from a project's own engine state. Nothing here writes to a
@@ -229,6 +230,8 @@ function attention({ streams, issues, reviews, service, config }) {
   }
   for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, actions: ['approve'] });
   if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, actions: [] });
+  // A blocked item says what to do about it when its reason is a known failure (an expired login, the network...).
+  for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked') item.diagnosis = diagnose(item.reason);
   return items;
 }
 
