@@ -278,3 +278,20 @@ test('T1 structure keeps static text that repeats a dynamic field text', () => {
   assert.equal(compareStructure(page, state, shot('Password Sign in', ''), shot('Password Password Sign in', 'Password')).status, 'PASS');
   assert.equal(compareStructure(page, state, shot('Password Sign in', ''), shot('Sign in', 'Password')).status, 'FAIL');
 });
+
+test('T1 structure removes a longer dynamic text before a shorter one it contains', () => {
+  const page = { anchors: [
+    { id: 'tasks', role: 'screen', parent: null },
+    { id: 'tasks.titlebar', role: 'element', parent: 'tasks', dynamic: true },
+    { id: 'tasks.context', role: 'element', parent: 'tasks', dynamic: true },
+    { id: 'tasks.board', role: 'element', parent: 'tasks' }
+  ] };
+  const shot = board => ({ elements: {
+    tasks: { count: 1, visible: true, bounds: box(0, 0, 400, 300), text: `Tasks Work Tasks Quotes ${board}` },
+    'tasks.titlebar': { count: 1, visible: true, bounds: box(0, 0, 400, 20), text: 'Tasks' },
+    'tasks.context': { count: 1, visible: true, bounds: box(0, 20, 100, 280), text: 'Work Tasks Quotes' },
+    'tasks.board': { count: 1, visible: true, bounds: box(100, 20, 300, 280), text: board }
+  } });
+  assert.deepEqual(compareStructure(page, state, shot('Table Board New task'), shot('Table Board New task')).reasons, []);
+  assert.deepEqual(compareStructure(page, state, shot('Table Board New task'), shot('Table Board')).reasons, ['tasks: text "Table Board New task" vs "Table Board"', 'tasks.board: text "Table Board New task" vs "Table Board"']);
+});
