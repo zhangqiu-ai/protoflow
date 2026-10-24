@@ -367,6 +367,40 @@ export async function supersedeVersions(root, config, { from }) {
   return { manifest, superseded: folded.map(entry => entry.manifestId), archive };
 }
 
+/**
+ * Classify a blocked version again with the current engine: its level was fixed when it was scanned, so a corrected
+ * classification would never reach it. The frozen prototype must be unchanged; only the manifest is rebuilt. The old
+ * manifest is archived, and the entry starts over (its attempts are kept in `state.reclassified`). A version the
+ * current engine classifies the same is left alone.
+ */
+export async function reclassifyVersion(root, config, { from, engineVersion }) {
+  const state = await sourceStatus(root);
+  const index = state.entries.findIndex(entry => entry.manifestId === from);
+  if (index === -1) throw new Error(`Unknown source version ${from}`);
+  const entry = state.entries[index];
+  if (entry.status === 'PASS') throw new Error('An accepted version cannot be reclassified');
+  const repository = await repositoryFor(root, config.source);
+  const baseSha = index > 0 ? state.entries[index - 1].sha : config.source.startSha ?? null;
+  const before = baseSha ? await gitSnapshot(repository, baseSha, config, { allowEmpty: true }) : { files: {}, hash: snapshotHash({}) };
+  const after = await gitSnapshot(repository, entry.sha, config, { allowEmpty: true });
+  const manifestPath = await projectPath(root, `.protoflow/manifests/${entry.manifestId}.json`);
+  const previous = await readJson(manifestPath, null);
+  if (!previous) throw new Error(`Manifest not found: ${entry.manifestId}`);
+  if (previous.afterHash !== after.hash || previous.beforeHash !== before.hash) throw new Error(`The frozen prototype of ${entry.manifestId} no longer matches its source commits; it cannot be reclassified`);
+  const level = classifyChanges(before, after, config).level;
+  if (level === previous.level) throw new Error(`The current engine classifies ${entry.manifestId} as ${level} too; nothing to reclassify`);
+  const at = new Date().toISOString(), archive = `.protoflow/reclassified/${at.replace(/[:.]/g, '-')}`;
+  const target = await projectPath(root, `${archive}/${entry.manifestId}.json`);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.rename(manifestPath, target);
+  const record = { at, manifestId: entry.manifestId, from: previous.level, to: level, previousManifestHash: hash(previous), engineVersion, archive };
+  const manifest = await publishCheckpoint(root, config, repository, entry.sha, before, after, entry.ordinal, { reclassified: record });
+  state.reclassified = [...(state.reclassified ?? []), { ...record, manifestHash: hash(manifest), entry }];
+  state.entries[index] = { sha: entry.sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [] };
+  await saveSourceState(root, state);
+  return { manifest, ...record };
+}
+
 /** Scan the first-parent branch stream. Advance the durable cursor only after each frozen checkpoint exists. */
 export async function scanSource(root, config) {
   const source = config.source;

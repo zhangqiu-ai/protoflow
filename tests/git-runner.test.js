@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { scanSource, sourceStatus, git, gitSnapshot } from '../src/source.js';
-import { runOnce, retryRunner, supersedeRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
+import { runOnce, retryRunner, supersedeRunner, reclassifyRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
 import { verify, createReview, decideReview } from '../src/workflow.js';
 import { loadVersion } from '../src/versions.js';
@@ -139,6 +139,40 @@ test('runner supersede folds the blocked version into the newest one and keeps t
   state = await sourceStatus(root);
   assert.equal(state.entries[0].attempts.length, 1);
   await assert.rejects(supersedeRunner(root, config), /No later prototype version/);
+});
+
+test('runner reclassify rebuilds a blocked version\'s manifest with the current engine and records both levels', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config);
+  assert.equal((await runOnce(root, config)).status, 'BLOCKED');
+  const [blocked] = (await sourceStatus(root)).entries;
+  const manifestPath = path.join(root, `.protoflow/manifests/${blocked.manifestId}.json`);
+  const current = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  // The current engine agrees with the frozen level: nothing changes.
+  await assert.rejects(reclassifyRunner(root, config), new RegExp(`classifies ${blocked.manifestId} as ${current.level} too`));
+  // An older engine froze the version as L3.
+  const frozen = { ...current, level: 'L3', requires: { ...current.requires, spec: true, architecture: true } };
+  await fs.writeFile(manifestPath, JSON.stringify(frozen, null, 2));
+  const runner = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/state.json'), 'utf8'));
+  await fs.writeFile(path.join(runner.worktree, 'app.html'), '<button id="button">Work in progress</button>');
+
+  const result = await reclassifyRunner(root, config);
+  assert.deepEqual([result.status, result.manifestId, result.from, result.to], ['PASS', blocked.manifestId, 'L3', current.level]);
+  assert.equal(result.engineVersion, JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version);
+  assert.equal(result.previousManifestHash, hash(frozen));
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+  assert.equal(manifest.level, current.level); assert.equal(manifest.afterHash, current.afterHash);
+  assert.equal(result.manifestHash, hash(manifest));
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, result.archive, `${blocked.manifestId}.json`), 'utf8')), frozen);
+  const state = await sourceStatus(root);
+  assert.deepEqual([state.entries[0].status, state.entries[0].attempts.length], ['PENDING', 0]);
+  assert.deepEqual([state.reclassified[0].from, state.reclassified[0].to, state.reclassified[0].entry.attempts.length], ['L3', current.level, 1]);
+  const events = (await fs.readFile(path.join(root, '.protoflow/runner/events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.event === 'reclassified').map(event => [event.manifestId, event.from, event.to, event.engineVersion]), [[blocked.manifestId, 'L3', current.level, result.engineVersion]]);
+  assert.equal(await fs.readFile(path.join(runner.worktree, 'app.html'), 'utf8'), '<button id="button">Work in progress</button>');
+  // The version runs again from the kept worktree.
+  assert.equal((await runOnce(root, config)).status, 'BLOCKED');
+  assert.equal((await sourceStatus(root)).entries[0].attempts.length, 1);
 });
 
 test('runner supersede refuses a version that is not blocked', async t => {
