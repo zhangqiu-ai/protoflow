@@ -106,14 +106,27 @@ export function driverRequest(target, settings, scene, screen, state, outputDir)
   };
 }
 
+/** Run a capture, and once more if it produced no result (NOT_RUN); the retried outcome records the first reason. */
+export async function retryNotRun(capture, signal) {
+  const first = await capture();
+  if (first.status !== 'NOT_RUN' || signal?.aborted) return first;
+  const second = await capture();
+  return { ...second, retried: { status: first.status, reason: String(first.reason ?? '').slice(-500) } };
+}
+
 async function captureApplication(root, config, target, settings, browser, scene, request, hooks) {
   if (target.driver?.kind === 'external') {
-    // External drivers are supervised child processes like the browser itself.
-    let pid = null;
-    await hooks.onBeforeSpawn?.('visual-driver');
-    const outcome = await captureExternal(root, target, request, { signal: hooks.signal, onStart: async childPid => { pid = childPid; await hooks.onStart?.('visual-driver', childPid); } });
-    await hooks.onFinish?.('visual-driver', pid, { status: outcome.status, processGroupActive: false });
-    return outcome;
+    // External drivers are supervised child processes like the browser itself. A capture that produced no result
+    // (NOT_RUN: the simulator or the test runner failed, as XCUITest does now and then) is taken once more before the
+    // scene is reported NOT_RUN; an application that cannot reach the state (FAIL) is never retried.
+    const capture = async () => {
+      let pid = null;
+      await hooks.onBeforeSpawn?.('visual-driver');
+      const outcome = await captureExternal(root, target, request, { signal: hooks.signal, onStart: async childPid => { pid = childPid; await hooks.onStart?.('visual-driver', childPid); } });
+      await hooks.onFinish?.('visual-driver', pid, { status: outcome.status, processGroupActive: false });
+      return outcome;
+    };
+    return retryNotRun(capture, hooks.signal);
   }
   if (target.driver?.kind === 'playwright-electron') return captureElectron(root, target, settings, request, hooks);
   if (target.driver?.kind !== 'playwright-web') return { status: 'NOT_RUN', reason: `driver kind ${target.driver?.kind} is not available in this phase` };
@@ -249,6 +262,7 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         }
       }
       const app = await captureApplication(root, config, target, settings, browser, scene, request, hooks);
+      if (app.retried) entry.captureRetry = app.retried;
       const write = async (name, buffer) => { const file = path.join(sceneDir, `${name}.png`); await writeFile(file, buffer); entry.artifacts.push(file); };
       await write('prototype', prototype.screenshot);
       if (app.runtime) {

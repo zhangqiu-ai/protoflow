@@ -127,6 +127,12 @@ test('T2 sampling compares dominant colour inside each side’s bounds when the 
   assert.match(compareTokens(screen, left, right).reasons.join(), /home\.go: sampled background differs/);
   delete right.screenshot;
   assert.equal(compareTokens(screen, left, right).status, 'NOT_RUN');
+  // Screenshots without one prevailing colour in any anchor: compared, nothing to sample, so not NOT_RUN.
+  const stripes = () => { const png = solid(400, 300, [255, 255, 255]); for (let x = 0; x < 400; x += 3) { paint(png, box(x, 0, 1, 300), [13, 118, 110]); paint(png, box(x + 1, 0, 1, 300), [185, 28, 28]); } return PNG.sync.write(png); };
+  left.screenshot = stripes(); right.screenshot = stripes();
+  const unsampled = compareTokens(screen, left, right);
+  assert.deepEqual([unsampled.status, unsampled.sampled], ['PASS', 0]);
+  assert.match(unsampled.note, /nothing was sampled/);
 });
 
 test('T2 sampling skips dynamic content and elements without one prevailing colour', () => {
