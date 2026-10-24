@@ -31,7 +31,7 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 
 先 `doctor`、`source scan`、`queue`，核對 frozen checkpoint 與 mapping，再於既有授權範圍啟動 `runner start [--once]`。Runner 在隔離 worktree 逐筆 execute／verify／bounded repair，Skill 本身不常駐、不擴大登入權限；常駐服務（`runner service install`，macOS launchd）只在使用者明確要求時安裝，之後以 `runner service status` 檢查健康。進度與需要人決定的事可引導使用者看儀表板（`dashboard service install` 同樣只在使用者要求時安裝，見共享引擎 `docs/dashboard.md`）；面板上的核准由使用者本人按下，代理不代為核准。source state 的 scannedSha 與 completedSha 不同，只有前版全部 PASS 才可前進。`runner status` 顯示每版 attempts、verificationId 與 worktree；多目標時以 `targets.<id>.summary`／progress 判讀，source entries 狀態由各 target 合成（`statusBasis: "targets"`），不要把 state.json 的掃描時 PENDING 當成未完成；截圖須綁定 manifestHash／prototypeHash／Git SHA。
 
-BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實際錯誤、保存已有修改，解決原因後才 `runner retry`。操作設定修改需先 `runner configure` 保存前後設定綁定，再 retry；不能變更來源與 mapping 所有權。不刪除／偽造進度、不跳到較新 SHA、不關閉 FIFO。歷史重寫應明確報告並停止。GitHub 推送／新建遠端分支必須在使用者已授權的具體範圍；本機 Git fixture 必須標記為 fixture，不能冒充真實來源驗收。L2／L3 規格與人工 ADR 邊界沿用既有流程，Runner 可配置 `runner.spec`／`runner.adr`。
+BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實際錯誤、保存已有修改，解決原因後才 `runner retry`。操作設定修改需先 `runner configure` 保存前後設定綁定，再 retry；不能變更來源與 mapping 所有權。不刪除／偽造進度、不跳到較新 SHA、不關閉 FIFO；後續原型版本已修正卡住的版本時由人執行 `runner supersede`，舊引擎誤判等級時由人執行 `runner reclassify`，不手動改寫 manifest 或 source state。歷史重寫應明確報告並停止。GitHub 推送／新建遠端分支必須在使用者已授權的具體範圍；本機 Git fixture 必須標記為 fixture，不能冒充真實來源驗收。L2／L3 規格與人工 ADR 邊界沿用既有流程，Runner 可配置 `runner.spec`／`runner.adr`。
 
 以下 session／watch 步驟只供未配置 Git source 的相容本機設計流程。
 

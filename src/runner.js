@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
-import { git, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
+import { git, reclassifyVersion, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
 import { isMultiTarget, streamTargets, loadProgress, saveProgress, runnerStatePath, worktreeSuffix, progressSummary, sourceView } from './streams.js';
 import { assertDelivered, syncDeliveries, deliveryStatus, AUTOMATED_REVIEWER } from './delivery.js';
 import { recordedVerdict, isRejectingVerdict, assertIndependentReview, interruptedProvider } from './delivery-review.js';
@@ -625,27 +625,49 @@ async function recoverUnknownStarts(root, config, target, current) {
  * the implementation already there. Single-target streams only; the version must be blocked or stopped, with nothing
  * running.
  */
-export async function supersedeRunner(root, config = {}, { target = null } = {}) {
-  if (isMultiTarget(config)) throw new Error('runner supersede supports single-target streams only');
+async function blockedCurrent(root, config, target, command, verb) {
+  if (isMultiTarget(config)) throw new Error(`runner ${command} supports single-target streams only`);
   const state = await loadProgress(root, config, target);
   const current = state.entries.find(entry => entry.status !== 'PASS');
-  if (!current || !['BLOCKED', 'STOPPED'].includes(current.status)) throw new Error('runner supersede needs a blocked or stopped current version');
+  if (!current || !['BLOCKED', 'STOPPED'].includes(current.status)) throw new Error(`runner ${command} needs a blocked or stopped current version`);
   for (const entry of state.entries) assertNoActiveProcesses(entry);
   const statePath = runnerStatePath(config, target);
   const runner = await readJson(await projectPath(root, statePath), null);
-  if (runner?.status === 'RUNNING') throw new Error('Stop the runner before superseding its current version');
-  const result = await supersedeVersions(root, config, { from: current.manifestId });
-  if (runner?.worktree) {
-    // The worktree keeps its application changes; its frozen copies of the replaced manifests are synced again.
-    for (const id of [...result.superseded, result.manifest.id]) {
-      await fs.rm(await projectPath(runner.worktree, `.protoflow/manifests/${id}.json`), { force: true });
-      await fs.rm(await projectPath(runner.worktree, `.protoflow/versions/${id}`), { recursive: true, force: true });
-    }
-    runner.status = 'IDLE'; runner.current = null;
-    await saveRunner(root, runner, statePath);
+  if (runner?.status === 'RUNNING') throw new Error(`Stop the runner before ${verb} its current version`);
+  return { current, runner, statePath };
+}
+// The worktree keeps its application changes; its frozen copies of the replaced manifests are synced again.
+async function resyncManifests(root, runner, statePath, ids) {
+  if (!runner?.worktree) return;
+  for (const id of ids) {
+    await fs.rm(await projectPath(runner.worktree, `.protoflow/manifests/${id}.json`), { force: true });
+    await fs.rm(await projectPath(runner.worktree, `.protoflow/versions/${id}`), { recursive: true, force: true });
   }
+  runner.status = 'IDLE'; runner.current = null;
+  await saveRunner(root, runner, statePath);
+}
+export async function supersedeRunner(root, config = {}, { target = null } = {}) {
+  const { current, runner, statePath } = await blockedCurrent(root, config, target, 'supersede', 'superseding');
+  const result = await supersedeVersions(root, config, { from: current.manifestId });
+  await resyncManifests(root, runner, statePath, [...result.superseded, result.manifest.id]);
   return { status: 'PASS', superseded: result.superseded, manifestId: result.manifest.id, level: result.manifest.level,
     manifestHash: hash(result.manifest), archive: result.archive,
+    next: result.manifest.requires?.architecture ? 'bind the ADR to manifestHash, then runner start' : 'runner start' };
+}
+/**
+ * A version's level is fixed when it is scanned. When a later engine classifies it differently (a misread change
+ * blocked it on a spec or ADR it does not need), a person reclassifies the blocked current version: the manifest is
+ * rebuilt from the same frozen prototype, the old one archived, and the worktree kept. The levels and the engine
+ * version are recorded in the source state and as a `reclassified` event.
+ */
+export async function reclassifyRunner(root, config = {}, { target = null } = {}) {
+  const { current, runner, statePath } = await blockedCurrent(root, config, target, 'reclassify', 'reclassifying');
+  const result = await reclassifyVersion(root, config, { from: current.manifestId, engineVersion: ENGINE_VERSION });
+  await resyncManifests(root, runner, statePath, [result.manifestId]);
+  const manifestHash = hash(result.manifest);
+  await recordEvent(root, { at: result.at, event: 'reclassified', target, sha: current.sha, manifestId: result.manifestId, from: result.from, to: result.to, previousManifestHash: result.previousManifestHash, manifestHash, engineVersion: result.engineVersion });
+  return { status: 'PASS', manifestId: result.manifestId, from: result.from, to: result.to, engineVersion: result.engineVersion,
+    previousManifestHash: result.previousManifestHash, manifestHash, archive: result.archive,
     next: result.manifest.requires?.architecture ? 'bind the ADR to manifestHash, then runner start' : 'runner start' };
 }
 export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false } = {}) {
