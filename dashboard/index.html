@@ -8,13 +8,22 @@
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
+<nav class="side" id="side" aria-label="專案">
+  <a class="brand" href="#/" aria-label="ProtoFlow 所有專案"><svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true"><rect x="2" y="2" width="17" height="17" rx="5" fill="currentColor"></rect><rect x="11" y="11" width="17" height="17" rx="5" fill="#0FA98F" fill-opacity=".9"></rect></svg><span>ProtoFlow</span></a>
+  <div class="nav" id="nav"><i class="nav-ind" aria-hidden="true"></i><div class="nav-list" id="nav-list"></div></div>
+  <p class="nav-keys" aria-hidden="true"><kbd>⌥</kbd><kbd>↑</kbd><kbd>↓</kbd> 切換　<kbd>[</kbd> 收合</p>
+</nav>
+<div class="scrim" id="scrim" hidden></div>
+<div class="stage">
 <header class="bar">
+  <button class="menu" id="menu" type="button" aria-label="專案側邊欄" aria-controls="side" aria-expanded="true"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><rect x="2.5" y="3" width="13" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"></rect><path d="M7 3v12" stroke="currentColor" stroke-width="1.6"></path></svg></button>
   <a class="brand" href="#/" aria-label="ProtoFlow 所有專案"><svg width="28" height="28" viewBox="0 0 30 30" aria-hidden="true"><rect x="2" y="2" width="17" height="17" rx="5" fill="currentColor"></rect><rect x="11" y="11" width="17" height="17" rx="5" fill="#0FA98F" fill-opacity=".9"></rect></svg>ProtoFlow</a>
   <span class="crumb" id="crumb"></span>
   <span class="conn" id="conn" role="status" aria-live="polite">連線中</span>
   <span class="ver" id="ver"></span>
 </header>
 <main id="app" class="wrap"></main>
+</div>
 <div id="toast" role="status" aria-live="polite" hidden></div>
 <script type="module" src="/assets/app.js"></script>
 </body>
