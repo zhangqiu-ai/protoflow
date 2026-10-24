@@ -6,6 +6,8 @@ import { normalizeText } from './anchors.js';
  * Tiered acceptance over two captures of the same screen state: the frozen prototype and one application target.
  * A capture is { viewport: {width, height, scale}, screenshot: PNG Buffer, elements: { [anchorId]: element } } where
  * element = { count, visible, enabled, interactive, editable, bounds: {x,y,width,height}, text, index?, inputType?, style? }.
+ * An application capture may add occluded: [{x,y,width,height}], viewport regions a system overlay covers (a software
+ * keyboard kept up after a final fill/clear step); tokens and visual leave those pixels out on both sides.
  * Bounds and style lengths are in viewport units (CSS px or platform points); screenshots are in device pixels.
  */
 
@@ -18,6 +20,8 @@ function uniqueAnchors(screen) {
   return [...seen.values()];
 }
 const element = (capture, id) => capture.elements?.[id] ?? { count: 0, visible: false };
+const overlaps = (a, b) => a.width > 0 && a.height > 0 && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+const occludes = (capture, box) => Boolean(box) && (capture.occluded ?? []).some(region => overlaps(region, box));
 
 /** Sibling order by document index when both sides report it, otherwise by reading order of bounds. */
 function siblingOrder(capture, ids, byIndex) {
@@ -237,10 +241,10 @@ export function compareTokens(screen, prototype, application, { tokens = [], del
       if (weights.every(value => value !== null) && weights[0] !== weights[1]) reasons.push(`${anchor.id}: font weight ${weights[0]} vs ${weights[1]}`);
       const radii = [px(left.style.borderRadius), px(right.style.borderRadius)];
       if (radii.every(value => value !== null) && Math.abs(radii[0] - radii[1]) > radius) reasons.push(`${anchor.id}: border radius ${radii[0]} vs ${radii[1]}`);
-    } else if (protoPng && appPng && left.bounds && right.bounds && !anchor.dynamic) {
+    } else if (protoPng && appPng && left.bounds && right.bounds && !anchor.dynamic && !occludes(application, left.bounds) && !occludes(application, right.bounds)) {
       // Without platform style data, compare the dominant colour inside each side's own bounds. Dynamic content
       // changes what fills the bounds, and an element without one prevailing colour (a gradient, a switch's track and
-      // knob) has no stable dominant colour, so neither is sampled.
+      // knob) has no stable dominant colour, so neither is sampled. Nor is an element a keyboard partly covers.
       const a = crop(protoPng, left.bounds, prototype.viewport?.scale ?? 1), b = crop(appPng, right.bounds, application.viewport?.scale ?? 1);
       if (!a || !b) { skipped++; continue; }
       const colors = [dominantColor(a), dominantColor(b)];
@@ -363,6 +367,9 @@ export function compareVisual(screen, prototype, application, { mode = 'pixel', 
   // Dynamic text differs by design; mask it on both sides at each side's own position.
   mask(left, screen.anchors.filter(anchor => anchor.dynamic).map(anchor => element(prototype, anchor.id).bounds).filter(Boolean), scale);
   mask(right, screen.anchors.filter(anchor => anchor.dynamic).map(anchor => element(application, anchor.id).bounds).filter(Boolean), appScale);
+  // A keyboard kept up after a final fill/clear covers the same viewport region on both sides.
+  mask(left, application.occluded ?? [], scale);
+  mask(right, application.occluded ?? [], appScale);
   const reasons = [];
   let checked = 0, images = null, score;
   const regions = screen.anchors.filter(anchor => !anchor.repeat && anchor.role !== 'screen' && element(prototype, anchor.id).visible && element(application, anchor.id).visible);

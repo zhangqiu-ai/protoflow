@@ -230,6 +230,19 @@ test('T4 visual: pixel mode and perceptual SSIM, with dynamic anchors masked', (
   assert.equal(compareVisual(screen, left, { ...right, screenshot: PNG.sync.write(solid(200, 150, [240, 240, 240])) }, { mode: 'pixel' }).status, 'FAIL');
 });
 
+test('T2 and T4 leave a region the application reports as occluded (a keyboard kept up after fill) out on both sides', () => {
+  const left = capture(), right = { ...capture(), occluded: [box(0, 180, 400, 120)] };
+  for (const element of Object.values(right.elements)) delete element.style;
+  left.screenshot = PNG.sync.write(paint(solid(400, 300, [240, 240, 240]), box(20, 190, 200, 20), [13, 118, 110]));
+  // The keyboard covers the bottom of the application screen, including the list item's background.
+  right.screenshot = PNG.sync.write(paint(solid(400, 300, [240, 240, 240]), box(0, 180, 400, 120), [30, 30, 30]));
+  const tokens = compareTokens(screen, left, right);
+  assert.doesNotMatch(tokens.reasons.join(), /home\.item/);
+  assert.equal(compareVisual(screen, left, right, { mode: 'pixel' }).status, 'PASS');
+  assert.equal(compareVisual(screen, left, { ...right, occluded: undefined }, { mode: 'pixel' }).status, 'FAIL');
+  assert.match(compareTokens(screen, left, { ...right, occluded: undefined }).reasons.join(), /home\.item: sampled background differs/);
+});
+
 test('tier verdict honours required, advisory and off policies', () => {
   const tiers = { structure: { status: 'PASS' }, tokens: { status: 'PASS' }, layout: { status: 'PASS' }, visual: { status: 'FAIL' } };
   assert.equal(tierVerdict(tiers, {}), 'FAIL');

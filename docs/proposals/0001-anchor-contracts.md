@@ -256,6 +256,7 @@ ProtoFlow 的目標是通用的原型驅動開發：同一份 HTML 原型，驅�
 
 - `status` 只表示驅動器是否完成擷取；驗收判斷一律由引擎依合約與回傳資料計算。
 - `style` 可選。驅動器無法提供時，T2 改由截圖在錨點 bounds 內取樣（§7.2）。
+- `occluded` 可選：系統覆蓋層遮住的 viewport 區域（目前只有最後一步為 `fill`／`clear` 時保留的軟體鍵盤，見 [原生 target：鍵盤](../native-targets.md#鍵盤)）。T2 不取樣與之相交的元素，T4 在兩側同一區域遮罩。
 - 模擬器／裝置不可用、驅動器缺失、逾時：該 target 的視覺相關層記 `NOT_RUN` 並附原因，永遠不會變成 PASS。
 - 所有路徑相對 `outputDir`，引擎計算並保存每個檔案的 SHA256，與現行 `artifactHashes` 一致。
 
