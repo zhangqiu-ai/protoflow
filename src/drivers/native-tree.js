@@ -17,13 +17,20 @@ const INPUT_TYPES = { textField: 'text', secureTextField: 'password', searchFiel
 
 const frameOf = node => node.frame ?? { x: 0, y: 0, width: 0, height: 0 };
 
-/** Reading order: rows top to bottom (centres within half the smaller height share a row), then left to right. */
+/**
+ * Reading order: rows top to bottom, then left to right. Two elements share a row when their centres are within half
+ * the smaller height, or when they sit side by side (no horizontal overlap) and one's centre lies within the other's
+ * height: a tall ring or icon beside a stack of text lines reads first, as in the DOM of a media-object layout.
+ */
 export function readingOrder(nodes) {
   return [...nodes].sort((a, b) => {
     const fa = frameOf(a), fb = frameOf(b);
     const ca = fa.y + fa.height / 2, cb = fb.y + fb.height / 2;
     const tolerance = Math.max(1, Math.min(fa.height, fb.height) / 2);
-    return Math.abs(ca - cb) > tolerance ? ca - cb : fa.x - fb.x;
+    const sideBySide = fa.x + fa.width <= fb.x || fb.x + fb.width <= fa.x;
+    const within = (centre, frame) => centre >= frame.y && centre <= frame.y + frame.height;
+    const sameRow = Math.abs(ca - cb) <= tolerance || (sideBySide && (within(ca, fb) || within(cb, fa)));
+    return sameRow ? fa.x - fb.x : ca - cb;
   });
 }
 
@@ -37,19 +44,30 @@ function fieldText(node) {
 }
 
 /**
+ * Join a container's text parts (nodes in reading order). Native controls often repeat a visible label as their
+ * accessible name (a switch named like the title beside it), so a control's label that matches other text in the
+ * container is left out wherever it stands, and consecutive duplicates collapse.
+ */
+function joinText(nodes) {
+  const shown = new Set(nodes.filter(item => !CONTROLS.has(item.type)).map(item => item.label));
+  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label)).map(item => item.label);
+  return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
+}
+
+/**
  * Visible text of a subtree, like the DOM's innerText: labels of text, buttons and controls in reading order, never
- * typed field values. Consecutive duplicates collapse, because native controls often repeat their visible label.
+ * typed field values.
  */
 export function subtreeText(node) {
   const parts = [];
   const visit = item => {
     if (TEXT_ENTRY.has(item.type) || item.visible === false) return;
-    if (LABELLED.has(item.type) && item.label) { parts.push(item.label); return; }
-    if (!item.children?.length) { if (item.label) parts.push(item.label); return; }
+    if (LABELLED.has(item.type) && item.label) { parts.push(item); return; }
+    if (!item.children?.length) { if (item.label) parts.push(item); return; }
     for (const child of readingOrder(item.children)) visit(child);
   };
   visit(node);
-  return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
+  return joinText(parts);
 }
 
 const inside = (inner, outer) => {
@@ -106,8 +124,7 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
     for (const item of items) { const key = chain(item)[depth] ?? item; units.set(key, [...(units.get(key) ?? []), item]); }
     return readingOrder([...units.keys()]).flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
   };
-  const parts = ordered(text, 0).map(item => item.label);
-  return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
+  return joinText(ordered(text, 0));
 }
 
 /**
