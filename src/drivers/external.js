@@ -54,5 +54,5 @@ export async function captureExternal(root, target, request, hooks = {}) {
     if (path.relative(outputDir, file).startsWith('..')) return { status: 'NOT_RUN', reason: 'driver screenshot path escapes its output directory' };
     screenshot = await readFile(file);
   }
-  return { status: 'PASS', capture: { viewport: response.viewport ?? request.viewport, screenshot, elements: response.elements } };
+  return { status: 'PASS', capture: { viewport: response.viewport ?? request.viewport, screenshot, elements: response.elements, ...(response.occluded?.length && { occluded: response.occluded }) } };
 }

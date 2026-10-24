@@ -141,6 +141,19 @@ test('typed text, keyboards and failed captures', () => {
   assert.deepEqual([PNG.sync.read(odd.png).width, PNG.sync.read(odd.png).height], [1080, 2190]);
 });
 
+test('a keyboard kept up after a final fill is reported as occluded in dp; after any other step it fails', () => {
+  // Gboard over the bottom 900 px (dp 500..800), clipped to the 755 dp content area that starts at 24 dp.
+  const typing = { ...raw, keyboardVisible: true, keyboardFrame: box(0, 1500, 1080, 2400) };
+  const fill = [{ action: 'tap', anchor: 'tasks.add' }, { action: 'fill', anchor: 'tasks.input', value: 'W' }];
+  const { response } = androidResponse(typing, screenshot(), { anchors, screen: 'tasks', steps: fill });
+  assert.equal(response.status, 'PASS');
+  assert.deepEqual(response.occluded, [{ x: 0, y: 476, width: 360, height: 279 }]);
+  assert.equal(androidResponse(typing, screenshot(), { anchors, screen: 'tasks', steps: [{ action: 'clear', anchor: 'tasks.input' }] }).response.status, 'PASS');
+  assert.equal(androidResponse(typing, screenshot(), { anchors, screen: 'tasks', steps: [...fill, { action: 'tap', anchor: 'tasks.add' }] }).response.status, 'FAIL');
+  assert.equal(androidResponse({ ...raw, keyboardVisible: true }, screenshot(), { anchors, screen: 'tasks', steps: fill }).response.status, 'NOT_RUN');
+  assert.equal(androidResponse(raw, screenshot(), { anchors, screen: 'tasks', steps: fill }).response.occluded, undefined);
+});
+
 test('Compose: composed buttons take their text, placeholders shown as child text count only for the field', () => {
   const compose = structuredClone(raw);
   const form = compose.tree.children[0].children[2];

@@ -47,6 +47,34 @@
     "log": {
       "type": "string"
     },
+    "occluded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number",
+            "minimum": 0
+          },
+          "height": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    },
     "elements": {
       "type": "array",
       "items": {

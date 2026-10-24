@@ -125,7 +125,11 @@ public class CaptureTest {
         }
         device.waitForIdle();
         SystemClock.sleep(300);
-        result.put("keyboardVisible", keyboardVisible(automation));
+        boolean keyboard = keyboardVisible(automation);
+        result.put("keyboardVisible", keyboard);
+        // A state that ends while typing may keep the keyboard up; the engine leaves its frame out of the comparison.
+        Rect ime = keyboard ? imeBounds(automation) : null;
+        if (ime != null) result.put("keyboardFrame", new JSONObject().put("left", ime.left).put("top", ime.top).put("right", ime.right).put("bottom", ime.bottom));
         result.put("tree", stableTree(automation));
         if (!screenshot(automation, new File(out, "device.png"))) return result.put("status", "FAIL").put("reason", "screenshot failed");
         return result.put("status", "PASS").put("screenshot", "device.png");
@@ -247,14 +251,19 @@ public class CaptureTest {
     }
 
     private boolean imeOnScreen(UiAutomation automation) {
+        return imeBounds(automation) != null;
+    }
+
+    /** Screen bounds (px) of the input method window, or null when no keyboard is on screen. */
+    private Rect imeBounds(UiAutomation automation) {
         if (android.os.Build.VERSION.SDK_INT >= 34) automation.clearCache();
         Rect bounds = new Rect();
         for (AccessibilityWindowInfo window : automation.getWindows()) {
             if (window.getType() != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
             window.getBoundsInScreen(bounds);
-            if (!bounds.isEmpty()) return true;
+            if (!bounds.isEmpty()) return bounds;
         }
-        return false;
+        return null;
     }
 
     private boolean screenshot(UiAutomation automation, File file) throws Exception {

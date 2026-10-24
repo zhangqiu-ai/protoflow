@@ -204,7 +204,7 @@ async function main() {
   const screenshot = raw.status === 'PASS' ? await pull('device.png', true) : null;
   if (raw.status === 'PASS' && !screenshot) return notRun('the device screenshot could not be retrieved');
   if (screenshot) await writeFile(path.join(outputDir, 'device.png'), screenshot);
-  const { response, png } = androidResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame });
+  const { response, png } = androidResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, steps: request.steps });
   if (png) await writeFile(path.join(outputDir, 'screen.png'), png);
   respond({ ...response, log: `avd ${values.avd} (${serial}), density ${raw.density ?? '?'}${installed.replaced ? `; replaced an installed ${values.package} signed with another key` : ''}` });
 }

@@ -82,12 +82,18 @@ final class CaptureTests: XCTestCase {
         let snapshot = try app.snapshot()
         let screenshot = XCUIScreen.main.screenshot()
         try screenshot.pngRepresentation.write(to: output.appendingPathComponent("device.png"))
+        let keyboard = app.keyboards.firstMatch
         result = [
             "status": "PASS",
-            "keyboardVisible": app.keyboards.firstMatch.exists,
+            "keyboardVisible": keyboard.exists,
             "tree": serialize(snapshot),
             "screenshot": "device.png"
         ]
+        // A state that ends while typing may keep the keyboard up; the engine leaves its frame out of the comparison.
+        if keyboard.exists {
+            let frame = keyboard.frame
+            result["keyboardFrame"] = ["x": frame.origin.x, "y": frame.origin.y, "width": frame.size.width, "height": frame.size.height]
+        }
     }
 
     /// A failed capture still keeps what the screen showed: the screenshot and tree are evidence, never compared.
