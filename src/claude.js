@@ -58,7 +58,11 @@ export function readClaudeTrace(trace, { executor = false } = {}) {
   if (!Array.isArray(init.tools) || init.tools.some(tool => !allowed.has(tool))) throw claudeBlocked(`Claude session offered tools beyond ${scope}: ${(init.tools ?? []).filter(tool => !allowed.has(tool)).join(', ') || 'none listed'}`);
   if (!modes.includes(init.permissionMode)) throw claudeBlocked(`Claude session ran in permission mode ${init.permissionMode}, not ${modes.join(' or ')}`);
   if ((init.mcp_servers ?? []).length) throw claudeBlocked('Claude session loaded MCP servers');
-  const used = events.flatMap(event => event.type === 'assistant' ? (event.message?.content ?? []).filter(item => item?.type === 'tool_use').map(item => item.name) : []);
+  const calls = events.flatMap(event => event.type === 'assistant' ? (event.message?.content ?? []).filter(item => item?.type === 'tool_use') : []);
+  // A call to a tool the session does not have (a model writing `bash` for `Bash`) is refused by the CLI and runs
+  // nothing: it is not a use. Any other call outside the set is, whatever its result.
+  const refused = new Set(events.flatMap(event => event.type === 'user' && Array.isArray(event.message?.content) ? event.message.content.filter(item => item?.type === 'tool_result' && item.is_error && /^<tool_use_error>Error: No such tool available: /.test(typeof item.content === 'string' ? item.content : '')).map(item => item.tool_use_id) : []));
+  const used = calls.filter(item => !(item.id && refused.has(item.id) && !init.tools.includes(item.name))).map(item => item.name);
   const forbidden = used.filter(name => !allowed.has(name));
   if (forbidden.length) throw claudeBlocked(`Claude session used tools beyond ${scope}: ${[...new Set(forbidden)].join(', ')}`);
   const results = events.filter(event => event.type === 'result');

@@ -137,5 +137,13 @@ test('the executor may edit and run sandboxed commands, nothing else; its trace 
   assert.equal(readClaudeTrace(jsonl([executorInit, edit, done({ structured_output: undefined })]), { executor: true }).output, null);
   assert.throws(() => readClaudeTrace(jsonl([executorInit, edit, done()])), /offered tools beyond read-only: Edit, Write, Bash/);
   assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Read', 'WebFetch'], permissionMode: 'acceptEdits' }), done()]), { executor: true }), /beyond the executor set: WebFetch/);
+  // A wrongly cased tool name the CLI refused ran nothing (siyue EXEC-1792940051735); an accepted or unanswered call still fails.
+  const call = (id, name) => ({ type: 'assistant', session_id: 'session-0001', message: { content: [{ type: 'tool_use', id, name, input: { command: 'true' } }] } });
+  const refused = id => ({ type: 'user', session_id: 'session-0001', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content: '<tool_use_error>Error: No such tool available: bash. Tool names are case-sensitive: call Bash instead.</tool_use_error>' }] } });
+  assert.deepEqual(readClaudeTrace(jsonl([executorInit, call('toolu_1', 'bash'), refused('toolu_1'), edit, done({ structured_output: undefined })]), { executor: true }).toolsUsed, ['Edit', 'Bash']);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit, call('toolu_1', 'bash'), done()]), { executor: true }), /used tools beyond the executor set: bash/);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit, call('toolu_1', 'bash'), refused('toolu_2'), done()]), { executor: true }), /used tools beyond the executor set: bash/);
+  const ran = { type: 'user', session_id: 'session-0001', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: 'exit 1' }] } };
+  assert.throws(() => readClaudeTrace(jsonl([init(), call('toolu_1', 'Write'), ran, done()])), /used tools beyond read-only: Write/);
   assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Read'], permissionMode: 'bypassPermissions' }), done()]), { executor: true }), /not dontAsk or acceptEdits/);
 });
