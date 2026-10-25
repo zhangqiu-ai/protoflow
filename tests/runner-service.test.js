@@ -124,7 +124,7 @@ test('FAKE launchctl only: the dashboard service runs `dashboard serve` at login
   assert.equal(result.status, 'PASS', JSON.stringify(result)); assert.equal(result.url, 'http://127.0.0.1:7499/');
   assert.equal(result.plist, path.join(home, 'Library/LaunchAgents', `${DASHBOARD_LABEL}.plist`));
   const plist = await fs.readFile(result.plist, 'utf8');
-  for (const fragment of ['<string>dashboard</string>', '<string>serve</string>', '<string>--port</string>', '<string>7499</string>', '<key>HTTPS_PROXY</key>', `<string>${path.join(home, '.protoflow', 'dashboard.out.log')}</string>`]) assert.ok(plist.includes(fragment), fragment);
+  for (const fragment of ['<string>dashboard</string>', '<string>serve</string>', '<string>--service</string>', '<string>--port</string>', '<string>7499</string>', '<key>HTTPS_PROXY</key>', `<string>${path.join(home, '.protoflow', 'dashboard.out.log')}</string>`]) assert.ok(plist.includes(fragment), fragment);
   assert.deepEqual(result.tools, { git: path.join(bin, 'git'), gh: path.join(bin, 'gh') });
   assert.deepEqual((await launchctlCalls()).at(-1), ['bootstrap', 'gui/501', result.plist]);
   assert.equal((await dashboardServiceStatus({ ...options, port: 7499, fetchImpl: async () => ({ ok: true }) })).status, 'HEALTHY');

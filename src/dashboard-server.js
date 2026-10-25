@@ -143,12 +143,48 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
   };
 }
 
-/** `protoflow dashboard serve`: runs until SIGINT/SIGTERM. */
-export async function serveDashboard({ port = 7420, home, onListen = () => {} } = {}) {
+const ENGINE_PACKAGE = new URL('../package.json', import.meta.url);
+const engineVersion = async () => JSON.parse(await fs.readFile(ENGINE_PACKAGE, 'utf8')).version;
+
+/**
+ * Resolves with the new version once the engine checkout on disk is no longer the version this process loaded (a pull
+ * or a release): a project config using a field the loaded schema does not know would otherwise fail to read until
+ * someone restarts the dashboard. A read failure (mid-checkout) is retried on the next check.
+ */
+export function watchEngineVersion(loaded, { intervalMs = 5000, read = engineVersion } = {}) {
+  let timer;
+  const changed = new Promise(resolve => {
+    const check = async () => {
+      const current = await read().catch(() => loaded);
+      if (current !== loaded) return resolve(current);
+      timer = setTimeout(check, intervalMs);
+    };
+    timer = setTimeout(check, intervalMs);
+  });
+  return { changed, stop: () => clearTimeout(timer) };
+}
+
+/**
+ * `protoflow dashboard serve`: runs until SIGINT/SIGTERM. Under the LaunchAgent it also stops when the engine on disk
+ * changes version, and launchd (KeepAlive) starts it again on the new code; in the foreground it only says so.
+ */
+export async function serveDashboard({ port = 7420, home, onListen = () => {}, reloadOnUpgrade = false, log = event => console.log(JSON.stringify(event)), watch = watchEngineVersion } = {}) {
+  const loaded = await engineVersion();
   const dashboard = createDashboardServer({ port, home });
   const url = await dashboard.listen();
   await onListen(url);
-  await new Promise(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve); });
+  const engine = watch(loaded);
+  let stop;
+  const signal = new Promise(resolve => { stop = () => resolve(null); process.once('SIGINT', stop); process.once('SIGTERM', stop); });
+  let upgraded = await Promise.race([signal, engine.changed]);
+  if (upgraded !== null && !reloadOnUpgrade) {
+    log({ event: 'engine-upgraded', loaded, current: upgraded, hint: 'restart `protoflow dashboard serve` to read configs with the new engine' });
+    upgraded = await signal;
+  }
+  engine.stop();
+  process.off('SIGINT', stop);
+  process.off('SIGTERM', stop);
   await dashboard.close();
-  return { status: 'STOPPED', url };
+  if (upgraded) log({ event: 'engine-upgraded', loaded, current: upgraded, action: 'exit for launchd to restart on the new engine' });
+  return upgraded ? { status: 'RELOAD', url, loaded, current: upgraded } : { status: 'STOPPED', url };
 }
