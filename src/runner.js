@@ -503,10 +503,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
   if (queue.current?.id !== entry.manifestId) throw new Error(`Runner queue mismatch: expected ${entry.manifestId}, got ${queue.current?.id}`);
   // A single-target delivery is reviewed against the current base: build the version there, or block before running.
   try {
-    const aligned = await alignWorktreeToBase(runner.worktree, config);
+    const aligned = await alignWorktreeToBase(runner.worktree, config, root);
     if (aligned) {
       runner.base = aligned.to; await saveRunner(root, runner, statePath);
-      await onEvent({ event: 'base-aligned', sha: entry.sha, manifestId: entry.manifestId, from: aligned.from, to: aligned.to });
+      await onEvent({ event: 'base-aligned', sha: entry.sha, manifestId: entry.manifestId, from: aligned.from, to: aligned.to, ...(aligned.carried && { carried: aligned.carried }) });
     }
   } catch (error) {
     // An unreachable remote does not stop the version: delivery checks the base again before anything is reviewed.
