@@ -63,6 +63,7 @@ reviewer 在 worktree 中只讀，看得到的是 worktree 的 VER 副本。為�
 - `verificationHash`：`hash(主 root .protoflow/verifications/<verificationId>.json 解析後的 JSON)`，交付、approval 與 commit trailer 使用的權威值。
 - `verificationFile`：reviewer 工作目錄（被 review 的 worktree）中的副本路徑 `.protoflow/verifications/<verificationId>.json`。
 - `verificationFileHash`：`hash(verificationFile 解析後的 JSON)`。
+- `waivers`（只在該版驗收用到維護者豁免時出現，[提案 0005](proposals/0005-maintainer-waivers.md)）：`[{ id, scene, variant, tier, findings }]`。review prompt 說明這些發現已由維護者核准為該原型版本的引擎限制：reviewer 仍可回報疑慮，但不能只因被豁免的發現判 FAIL。
 
 `hash(x)` 是 `JSON.stringify(x)`（保留檔案中的 key 順序、無空白）UTF-8 bytes 的小寫 hex SHA-256；字串或檔案 bytes 則直接計算。兩份 VER 除了舊版主 root 的 `runnerWorktree` 外必須相同，否則在 provider 執行前 BLOCKED；因此新紀錄的 `verificationHash` 等於 `verificationFileHash`。review prompt 逐字說明上述定義，並要求 reviewer 以 `verificationFileHash` 比對它讀到的檔案。
 

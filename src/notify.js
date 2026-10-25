@@ -13,14 +13,15 @@ const REASON = {
 };
 
 /**
- * The desktop notification for a runner event that needs a person: a version that blocked, an issue fix that blocked
- * or an issue a maintainer decides. Other events give null.
+ * The desktop notification for a runner event that needs a person: a version that blocked, an issue fix that blocked,
+ * an issue a maintainer decides or a waiver request (proposal 0005). Other events give null.
  */
 export function notificationFor(event, project) {
   const where = event.target ? `${project} · ${event.target}` : project;
   const first = text => String(text ?? '').split('\n')[0].slice(0, 160);
   if (event.event === 'blocked') return { title: `ProtoFlow · ${where}`, subtitle: `版本阻塞：${REASON[event.reasonCode] ?? '需要處理'}`, message: first(event.reason) };
   if (event.event === 'issue-blocked') return { title: `ProtoFlow · ${where}`, subtitle: 'Issue 修復阻塞', message: first(event.reason) };
+  if (event.event === 'waiver-requested') return { title: `ProtoFlow · ${where}`, subtitle: '豁免待核准', message: first(`${event.scene}${event.variant ? ` / ${event.variant}` : ''} · ${event.tier}：${event.findings} 項發現，執行代理標示為引擎限制`) };
   if (event.event === 'issue-triaged' && event.status === 'needs-human') return { title: `ProtoFlow · ${where}`, subtitle: `Issue #${event.number} 需要人決定`, message: '' };
   return null;
 }

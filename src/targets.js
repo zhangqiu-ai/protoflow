@@ -7,7 +7,8 @@ import { captureWeb } from './drivers/web.js';
 import { captureExternal } from './drivers/external.js';
 import { captureElectron, captureElectronPrototype } from './drivers/electron.js';
 import { compareStructure, compareTokens, compareLayout, compareVisual, tierVerdict, flattenTokens, TIERS } from './tiers.js';
-import { projectPath, writeJson, readJson } from './util.js';
+import { projectPath, writeJson, readJson, hash } from './util.js';
+import { listWaivers, applyWaivers } from './waivers.js';
 import { PNG } from 'pngjs';
 
 const SAME_TECHNOLOGY = new Set(['web', 'electron']);
@@ -142,22 +143,26 @@ async function captureApplication(root, config, target, settings, browser, scene
 }
 
 const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-function renderReport(target, scenes) {
+function renderReport(target, scenes, waivers = []) {
   const rows = scenes.map(scene => {
-    const tiers = TIERS.map(tier => `<td class="${escapeHtml(scene.tiers[tier]?.status ?? 'NOT_RUN')}">${escapeHtml(scene.tiers[tier]?.status ?? 'NOT_RUN')}</td>`).join('');
-    const reasons = [scene.reason, ...TIERS.flatMap(tier => (scene.tiers[tier]?.reasons ?? []).map(reason => `${tier}: ${reason}`))].filter(Boolean);
+    const tiers = TIERS.map(tier => { const status = scene.tiers[tier]?.status ?? 'NOT_RUN', waiver = scene.tiers[tier]?.waiver; return `<td class="${escapeHtml(waiver ? 'WAIVED' : status)}">${escapeHtml(status)}${waiver ? ` (waived: ${escapeHtml(waiver.id)})` : ''}</td>`; }).join('');
+    const waived = waivers.filter(item => item.scene === scene.id).map(item => `Waiver ${item.id} (${item.tier}): ${item.reason}${item.engineIssue ? ` — ${item.engineIssue}` : ''}; the ${item.tier} findings below were waived by a maintainer`);
+    const skipped = (scene.waiverSkipped ?? []).map(item => `Waiver ${item.id} (${item.tier}) not applied: ${item.why}`);
+    const reasons = [scene.reason, ...waived, ...skipped, ...TIERS.flatMap(tier => (scene.tiers[tier]?.reasons ?? []).map(reason => `${tier}: ${reason}`))].filter(Boolean);
     const image = name => scene.artifacts.find(file => file.endsWith(`/${name}.png`));
     const images = ['prototype', 'application', 'diff'].filter(image).map(name => `<figure><figcaption>${name}</figcaption><img alt="${name}" src="${escapeHtml(path.relative(path.dirname(scene.reportDir), image(name)))}"></figure>`).join('');
     return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}</h2><table><tr><th>structure</th><th>tokens</th><th>layout</th><th>visual</th></tr><tr>${tiers}</tr></table><ul>${reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><div class="images">${images}</div></section>`;
   }).join('');
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow anchor review</title><style>body{font:15px system-ui;margin:24px;background:#fafafa;color:#111}section{border:1px solid #ddd;background:#fff;padding:16px;margin:20px 0}td,th{border:1px solid #ddd;padding:4px 10px}.PASS{color:#06713b}.FAIL{color:#b00020;font-weight:700}.NOT_RUN{color:#8a6d00}.images{display:flex;gap:12px;flex-wrap:wrap}figure{margin:0;max-width:32%}img{max-width:100%;border:1px solid #eee}</style><h1>ProtoFlow anchor review — target ${escapeHtml(target.id)}${target.variant ? ` / ${escapeHtml(target.variant)}` : ''} (${escapeHtml(target.platform)})</h1><p>T1 structure, T2 tokens, T3 layout, T4 visual. Required tiers decide acceptance; advisory tiers are informational.</p>${rows}</html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow anchor review</title><style>body{font:15px system-ui;margin:24px;background:#fafafa;color:#111}section{border:1px solid #ddd;background:#fff;padding:16px;margin:20px 0}td,th{border:1px solid #ddd;padding:4px 10px}.PASS{color:#06713b}.FAIL{color:#b00020;font-weight:700}.NOT_RUN{color:#8a6d00}.WAIVED{color:#7a4cc2;font-weight:700}.images{display:flex;gap:12px;flex-wrap:wrap}figure{margin:0;max-width:32%}img{max-width:100%;border:1px solid #eee}</style><h1>ProtoFlow anchor review — target ${escapeHtml(target.id)}${target.variant ? ` / ${escapeHtml(target.variant)}` : ''} (${escapeHtml(target.platform)})</h1><p>T1 structure, T2 tokens, T3 layout, T4 visual. Required tiers decide acceptance; advisory tiers are informational. A tier marked waived failed, and a maintainer approved a waiver for exactly these findings of this prototype version.</p>${rows}</html>`;
 }
 
 function summarize(scenes, policy) {
   const tiers = {};
   for (const tier of TIERS) {
-    const statuses = scenes.map(scene => scene.tiers[tier]?.status ?? 'NOT_RUN');
-    tiers[tier] = { policy: policy[tier] ?? 'required', status: statuses.includes('FAIL') ? 'FAIL' : statuses.length && statuses.every(status => status === 'PASS') ? 'PASS' : 'NOT_RUN' };
+    // A waived tier keeps FAIL on its scene; the summary is the gate's view and counts it separately.
+    const statuses = scenes.map(scene => scene.tiers[tier]?.waiver ? 'PASS' : scene.tiers[tier]?.status ?? 'NOT_RUN');
+    const waived = scenes.filter(scene => scene.tiers[tier]?.waiver).length;
+    tiers[tier] = { policy: policy[tier] ?? 'required', status: statuses.includes('FAIL') ? 'FAIL' : statuses.length && statuses.every(status => status === 'PASS') ? 'PASS' : 'NOT_RUN', ...(waived && { waived }) };
   }
   return tiers;
 }
@@ -192,7 +197,8 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
   const required = results.filter(item => item.variant.required);
   const tiers = Object.fromEntries(TIERS.map(tier => [tier, {
     policy: required.some(item => item.result.tiers?.[tier]?.policy === 'required') ? 'required' : required[0]?.result.tiers?.[tier]?.policy ?? 'required',
-    status: combine(required.map(item => item.result.tiers?.[tier]?.status ?? 'NOT_RUN'))
+    status: combine(required.map(item => item.result.tiers?.[tier]?.status ?? 'NOT_RUN')),
+    ...(results.some(item => item.result.tiers?.[tier]?.waived) && { waived: results.reduce((sum, item) => sum + (item.result.tiers?.[tier]?.waived ?? 0), 0) })
   }]));
   const failing = results.filter(item => item.result.status !== 'PASS').map(item => `${item.variant.variant}${item.variant.required ? '' : ' (optional)'}: ${item.result.reason ?? item.result.status}`);
   const first = results[0].result;
@@ -200,6 +206,7 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
     status: combine(required.map(item => item.result.status)), mode: 'anchors', target: first.target, platform: first.platform, regression: first.regression, tiers,
     scenes: results.flatMap(item => (item.result.scenes ?? []).map(scene => ({ ...scene, variant: item.variant.variant }))),
     artifacts: results.flatMap(item => item.result.artifacts ?? []), prototypeSource: 'version', contract: first.contract,
+    ...(results.some(item => item.result.waivers?.length) && { waivers: results.flatMap(item => item.result.waivers ?? []) }),
     variants: Object.fromEntries(results.map(item => [item.variant.variant, { required: item.variant.required, status: item.result.status, tiers: item.result.tiers, ...(item.result.reason && { reason: item.result.reason }) }])),
     ...(failing.length && { reason: failing.join('; ') })
   };
@@ -222,8 +229,9 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
   const attribute = config.anchors?.attribute ?? 'data-pf';
   const hooks = { signal, onBeforeSpawn, onStart, onFinish };
   const outRelative = path.relative(await realpath(root), outDir).split(path.sep).join('/');
+  const waivers = await listWaivers(root), manifestHash = hash(manifest);
   const run = async browser => {
-    const results = [];
+    const results = [], usedWaivers = [];
     const artifacts = [];
     for (const scene of scenes) {
       if (signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
@@ -285,9 +293,9 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
           artifacts.push(...entry.artifacts); results.push(entry); continue;
         }
         // Reviewed platform conventions (target.deviations): an anchor allowed to differ in a tier is left out of that
-        // tier's comparison; the screen anchor always stays. Structure (T1) is never waived.
-        const waived = tier => new Set((target.deviations ?? []).filter(item => item.allow.includes(tier)).map(item => item.anchor));
-        const without = tier => { const skip = waived(tier); return skip.size ? { ...screen, anchors: screen.anchors.filter(anchor => anchor.role === 'screen' || !skip.has(anchor.id)) } : screen; };
+        // tier's comparison; the screen anchor always stays. Structure (T1) never has a deviation.
+        const deviated = tier => new Set((target.deviations ?? []).filter(item => item.allow.includes(tier)).map(item => item.anchor));
+        const without = tier => { const skip = deviated(tier); return skip.size ? { ...screen, anchors: screen.anchors.filter(anchor => anchor.role === 'screen' || !skip.has(anchor.id)) } : screen; };
         const tiers = {
           structure: compareStructure(screen, state, prototype, app.capture, { native: !['web', 'electron'].includes(target.platform) }),
           tokens: compareTokens(without('tokens'), prototype, app.capture, { tokens, ...settings.tokens }),
@@ -301,7 +309,11 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
           const { images, ...rest } = tiers[tier];
           entry.tiers[tier] = settings.tiers[tier] === 'off' ? { status: 'NOT_RUN', reasons: ['tier is off for this target'] } : rest;
         }
-        entry.status = tierVerdict(entry.tiers, settings.tiers);
+        // Proposal 0005: an approved maintainer waiver lets a failed T1–T3 tier pass the gate while it keeps its findings.
+        const exempt = applyWaivers(waivers, { target: target.id, manifestHash, scene: { id, variant: target.variant ?? null, tiers: entry.tiers }, policy: settings.tiers });
+        entry.status = tierVerdict(exempt.gate, settings.tiers);
+        if (exempt.applied.length) { entry.waived = exempt.applied.map(item => ({ tier: item.tier, waiverId: item.id })); usedWaivers.push(...exempt.applied); }
+        if (exempt.skipped.length) entry.waiverSkipped = exempt.skipped;
         const elements = path.join(sceneDir, 'elements.json');
         await writeFile(elements, `${JSON.stringify({ prototype: prototype.elements, application: app.capture.elements }, null, 2)}\n`);
         entry.artifacts.push(elements);
@@ -311,12 +323,12 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
     }
     const report = reportFile;
     await mkdir(path.dirname(report), { recursive: true });
-    await writeFile(report, renderReport(target, results));
+    await writeFile(report, renderReport(target, results, usedWaivers));
     artifacts.push(report);
     const statuses = results.map(scene => scene.status);
     const status = statuses.includes('FAIL') ? 'FAIL' : statuses.every(item => item === 'PASS') ? 'PASS' : 'NOT_RUN';
     const failing = results.filter(scene => scene.status !== 'PASS').map(scene => `${scene.id}: ${scene.reason ?? TIERS.filter(tier => scene.tiers[tier]?.status === 'FAIL').join(', ')}`);
-    return { status, mode: 'anchors', target: target.id, platform: target.platform, regression: settings.regression, tiers: summarize(results, settings.tiers), scenes: results.map(({ reportDir, ...scene }) => scene), artifacts, prototypeSource: 'version', contract: { extractorVersion: contract.extractorVersion, screens: Object.keys(contract.screens) }, ...(failing.length && { reason: failing.join('; ') }) };
+    return { status, mode: 'anchors', target: target.id, platform: target.platform, regression: settings.regression, tiers: summarize(results, settings.tiers), scenes: results.map(({ reportDir, ...scene }) => scene), artifacts, prototypeSource: 'version', contract: { extractorVersion: contract.extractorVersion, screens: Object.keys(contract.screens) }, ...(usedWaivers.length && { waivers: usedWaivers }), ...(failing.length && { reason: failing.join('; ') }) };
   };
   return superviseBrowser(outDir, hooks, run);
 }

@@ -19,7 +19,8 @@ import { installService, uninstallService, serviceStatus, installDashboardServic
 import { dashboardSnapshot, addProject, removeProject, listProjects } from './dashboard-data.js';
 import { serveDashboard } from './dashboard-server.js';
 import { versionQueue } from './queue.js';
-import { syncDeliveries, deliveryStatus } from './delivery.js';
+import { syncDeliveries, deliveryReport } from './delivery.js';
+import { requestWaiver, listWaivers, loadWaiver } from './waivers.js';
 import { syncIssues, issuesStatus } from './issues.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from './workflow.js';
 
@@ -62,6 +63,12 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          Explicit fresh independent review of the selected current attempt:
                                          an unattested PASS after restart, a BLOCKED attempt before approval,
                                          or a transient network BLOCK after approval/push (never a FAIL verdict)
+  waiver request --verification id --scene id --tier structure|tokens|layout [--variant id]
+         --reason text [--engine-issue url] --requested-by name|ai:<agent>
+                                         Ask the maintainer to waive one failing scene tier of one prototype version
+                                         (findings copied from the verification; policy.waivers.reviewers decide it
+                                         on the dashboard; visual findings are never waivable)
+  waiver list | show --waiver id         Waivers and their status
   issues sync | status                   Triage labelled GitHub issues with the Claude planner (issues.enabled)
   doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
@@ -89,7 +96,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, port: { type: 'string' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery', 'scene', 'variant', 'tier', 'reason', 'engine-issue', 'requested-by', 'waiver'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -163,8 +170,16 @@ try {
             }
             return syncDeliveries(root, config, { target: values.target ?? null, retryIndependentReview: { deliveryId: requireOption('delivery'), reviewId: requireOption('review') } });
           }
-          if (action === 'status') return deliveryStatus(root, config, values.target ?? null);
+          if (action === 'status') return deliveryReport(root, config, values.target ?? null);
           throw new Error('Use delivery sync|status');
+        case 'waiver':
+          if (action === 'request') {
+            const requestedBy = requireOption('requested-by').trim();
+            return requestWaiver(root, config, { verificationId: requireOption('verification'), scene: requireOption('scene'), variant: values.variant ?? null, tier: requireOption('tier'), reason: requireOption('reason'), engineIssue: values['engine-issue'] ?? null, requestedBy: { kind: requestedBy.startsWith('ai:') ? 'ai' : 'human', name: requestedBy } });
+          }
+          if (action === 'list') return { waivers: (await listWaivers(root)).map(({ findings, evidence, ...waiver }) => ({ ...waiver, findings: findings.length })) };
+          if (action === 'show') return loadWaiver(root, requireOption('waiver'));
+          throw new Error('Use waiver request|list|show (a maintainer approves, rejects or revokes on the dashboard)');
         case 'issues':
           if (action === 'sync') return syncIssues(root, config);
           if (action === 'status') return issuesStatus(root);
@@ -224,7 +239,7 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service' || command === 'dashboard';
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || command === 'waiver' && action !== 'request' || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service' || command === 'dashboard';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));

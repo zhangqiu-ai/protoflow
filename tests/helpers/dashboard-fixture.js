@@ -2,16 +2,17 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { findingsHash, waiverHash } from '../../src/waivers.js';
 
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value, null, 2)); };
 // A 1×1 PNG.
 export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
-export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null } = {}) {
+export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null, waivers = false } = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-dashboard-')));
   const root = path.join(base, 'project'), worktree = path.join(root, '.protoflow/runner/worktree-fixture'), home = path.join(base, 'home');
   await write(path.join(root, 'protoflow.config.json'), { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], dashboard: { name: 'Fixture App', reviewer: 'Fixture Person' },
-    policy: { autoApprove, executor: { primary: 'claude', fallback: 'codex', routes: { frontend: 'claude', backend: 'codex' } } },
+    policy: { autoApprove, ...(waivers && { waivers: { reviewers: ['Fixture Person'] } }), executor: { primary: 'claude', fallback: 'codex', routes: { frontend: 'claude', backend: 'codex' } } },
     runner: { delivery: { remote: 'origin', branch: 'protoflow/delivery', baseBranch: 'main', merge: 'manual' } },
     adapters: { claude: { command: { argv: ['node', 'claude-exec-adapter.js', '--model', 'claude-sonnet-5-5'] } }, codex: { command: { argv: ['node', 'codex-adapter.js', '--model', 'gpt-codex'] } }, planner: { command: { argv: ['node', 'claude-adapter.js', '--model', 'claude-opus-5-5'] } }, independentReview: { provider: 'claude', command: { argv: ['node', 'claude-review-adapter.js', '--model', 'claude-opus-5-5'] } } } });
   const sha1 = '1'.repeat(40), sha2 = '2'.repeat(40);
@@ -59,5 +60,21 @@ export async function dashboardFixture({ executing = true, autoApprove = true, r
   await write(path.join(root, '.protoflow/issues/snapshots/ISS-6-000000000000.json'), { title: 'Unit-test the validation' });
   await write(path.join(root, '.protoflow/plans/PLN-issue-5.json'), { plan: { decision: 'needs-human', area: 'frontend', level: 'L1', summary: 'New interaction', questions: ['Should Saved hide on any change?'] } });
   await write(path.join(root, '.protoflow/plans/PLN-issue-6.json'), { plan: { decision: 'implement', area: 'backend', level: 'L1', summary: 'Extract and test', questions: [] } });
+  if (waivers) {
+    // Proposal 0005: VER-fixture-1 passed with an approved waiver on its tokens finding; another request waits for a reviewer.
+    const tokens = ['settings.save: color #000 differs from #2F5BEA'], structure = ['settings.toggle: text "Weekly" vs "Monthly"'];
+    const scope = { target: null, scene: 'settings.initial', variant: null, manifestHash: 'fixture-manifest-hash' };
+    const used = { ...scope, tier: 'tokens', findingsHash: findingsHash(tokens) };
+    await write(path.join(root, '.protoflow/waivers/WVR-fixture-1.json'), { schemaVersion: 1, id: 'WVR-fixture-1', status: 'approved', ...used, manifestId: `git-${sha1}`, verificationId: 'VER-fixture-0', findings: tokens, reason: 'FAKE FIXTURE: token sampling reads the pressed state', engineIssue: 'https://github.com/protoflow-fixture/engine/issues/1', requestedBy: { kind: 'ai', name: 'ai:claude' }, requestedAt: new Date(Date.now() - 7200000).toISOString(), evidence: [], decision: { status: 'approved', reviewer: 'Fixture Person', reviewerKind: 'human', at: new Date(Date.now() - 3600000).toISOString(), notes: '', waiverHash: waiverHash(used) } });
+    const evidence = ['prototype.png', 'application.png'].map(name => `.protoflow/artifacts/WVR-fixture-2/${name}`);
+    for (const file of evidence) await write(path.join(root, file), PNG);
+    await write(path.join(root, '.protoflow/waivers/WVR-fixture-2.json'), { schemaVersion: 1, id: 'WVR-fixture-2', status: 'requested', ...scope, tier: 'structure', findingsHash: findingsHash(structure), manifestId: `git-${sha2}`, verificationId: 'VER-fixture-2', findings: structure, reason: 'FAKE FIXTURE: overlay reading order is an engine limitation', engineIssue: null, requestedBy: { kind: 'ai', name: 'ai:codex' }, requestedAt: new Date(Date.now() - 600000).toISOString(), evidence, decision: null });
+    const file = path.join(root, '.protoflow/verifications/VER-fixture-1.json'), report = JSON.parse(await fs.readFile(file, 'utf8'));
+    const scene = report.visual.scenes[0];
+    scene.status = 'PASS'; scene.tiers.visual = { status: 'PASS', reasons: [] }; scene.tiers.tokens.waiver = { id: 'WVR-fixture-1', waiverHash: waiverHash(used) }; scene.waived = [{ tier: 'tokens', waiverId: 'WVR-fixture-1' }];
+    report.status = 'PASS'; report.visual.status = 'PASS';
+    report.waivers = report.visual.waivers = [{ id: 'WVR-fixture-1', target: null, scene: 'settings.initial', variant: null, tier: 'tokens', findings: tokens, reason: 'FAKE FIXTURE: token sampling reads the pressed state', engineIssue: 'https://github.com/protoflow-fixture/engine/issues/1' }];
+    await write(file, report);
+  }
   return { base, root, worktree, home, sha1, sha2, cleanup: () => fs.rm(base, { recursive: true, force: true }) };
 }

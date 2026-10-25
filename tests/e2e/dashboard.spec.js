@@ -262,3 +262,33 @@ test('a delivery the independent review rejected offers to send the version back
     expect(sent.at(-1)).toEqual({ action: 'request-changes', target: null, deliveryId: 'DLV-fixture-1' });
   } finally { await server.close(); await rejected.cleanup(); }
 });
+
+test('a waiver request shows its screenshots and findings, a waived tier reads as passed with a waiver, and approving sends the bound action', async ({ page }) => {
+  const waived = await dashboardFixture({ waivers: true });
+  await addProject(waived.root, { home: waived.home });
+  const sent = [];
+  const server = createDashboardServer({ home: waived.home, port: 0, service: false, pollMs: 200, actions: async (root, body) => { sent.push(body); return { status: 'PASS', next: 'FAKE FIXTURE action recorded' }; } });
+  const base = await server.listen();
+  try {
+    await page.goto(`${base}#/p/${await projectId(waived.root)}`);
+    const card = page.locator('.ask', { hasText: '豁免待核准' });
+    await expect(card).toContainText('settings.initial · structure');
+    await expect(card).toContainText('overlay reading order is an engine limitation');
+    await expect(card).toContainText('settings.toggle: text "Weekly" vs "Monthly"');
+    await expect(card.locator('.waiver-shots img')).toHaveCount(2);
+    await expect.poll(() => card.locator('.waiver-shots img').first().evaluate(image => image.complete && image.naturalWidth)).toBe(1);
+    // The waived version still waits for a person under autoApprove, and says why.
+    await expect(page.locator('.ask', { hasText: '附豁免通過 1 項' })).toBeVisible();
+    // The scene's tokens tier passed with a waiver, apart from PASS and FAIL.
+    await expect(page.locator('.tiers i.waived')).toHaveCount(1);
+    await expect(page.locator('.pill.waived', { hasText: '附豁免' }).first()).toBeVisible();
+    await expect(page.locator('section[aria-label="維護者豁免"]')).toContainText('WVR-fixture-1');
+    page.once('dialog', dialog => dialog.accept());
+    await card.getByRole('button', { name: '核准豁免' }).click();
+    await expect(card.locator('.signed')).toContainText('已核准豁免');
+    expect(sent.at(-1)).toEqual({ action: 'approve-waiver', waiverId: 'WVR-fixture-2' });
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('section[aria-label="維護者豁免"]').getByRole('button', { name: '撤回' }).click();
+    await expect.poll(() => sent.at(-1)).toEqual({ action: 'revoke-waiver', waiverId: 'WVR-fixture-1' });
+  } finally { await server.close(); await waived.cleanup(); }
+});
