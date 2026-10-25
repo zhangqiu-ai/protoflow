@@ -89,6 +89,6 @@ test('Codex bridge refuses a prompt above the Codex input limit and names the la
   const root = await fixture(t);
   const result = await run(root, { kind: 'implement', instructions: 'Preserve prototype', manifest: { id: 'test' }, git: { status: 'x'.repeat(1100000) } });
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /above the Codex input limit of 1048576; largest fields: git \(\d+\), instructions/);
+  assert.match(result.stderr, /above the Codex input limit of 1048576; largest fields: git\.status \(\d+\), instructions/);
   await assert.rejects(readFile(path.join(root, 'received.json')));
 });
