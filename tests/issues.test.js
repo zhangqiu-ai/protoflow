@@ -326,14 +326,18 @@ test('FAKE gh and CLI only: the dashboard answers a waiting issue as a comment, 
   await assert.rejects(runAction(root, { action: 'answer-issue', number: 28, text: '   ' }), /answer/i);
   await assert.rejects(runAction(root, { action: 'answer-issue', number: 28, text: '<!-- protoflow:triage x -->' }), /ProtoFlow marker/);
   await assert.rejects(runAction(root, { action: 'answer-issue', number: 31, text: 'Dark.' }), /waiting|needs-human|planned/);
-  const answered = await runAction(root, { action: 'answer-issue', number: 28, text: 'Dark by default.' });
+  const answered = await runAction(root, { action: 'answer-issue', number: 28, text: 'Dark by default.' }, { service: false });
   assert.deepEqual([answered.status, answered.removedLabel, answered.actor], ['PASS', 'protoflow:needs-human', 'human:protoflow-bot']);
+  // No runner heartbeat: the answer is on GitHub, and the result says nothing will pick it up until a runner starts.
+  assert.equal(answered.runner, 'stopped'); assert.equal(answered.next, 'Runner 沒在跑，要等它啟動才會處理：執行 protoflow runner service install');
   let db = await gh();
   const issue28 = db.issues.find(item => item.number === 28);
   assert.deepEqual(issue28.labels, ['protoflow']);
   assert.equal(issue28.comments.at(-1).body, 'Dark by default.\n\n<sub>Answered from the ProtoFlow dashboard.</sub>');
-  const closed = await runAction(root, { action: 'close-issue', number: 27, note: 'Duplicate of #26.' });
-  assert.equal(closed.status, 'PASS');
+  await fs.mkdir(path.join(root, '.protoflow/runner'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/runner/heartbeat.json'), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+  const closed = await runAction(root, { action: 'close-issue', number: 27, note: 'Duplicate of #26.' }, { service: false });
+  assert.equal(closed.status, 'PASS'); assert.equal(closed.runner, undefined); assert.equal(closed.next, 'The runner records the issue as closed on its next sync');
   db = await gh();
   const issue27 = db.issues.find(item => item.number === 27);
   assert.deepEqual([issue27.state, issue27.stateReason], ['closed', 'not_planned']);

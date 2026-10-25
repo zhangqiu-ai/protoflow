@@ -289,4 +289,7 @@ test('issues: a waiting issue offers answer, hand back and close; once handed ba
   assert.equal(stopped.waiting, 'runner'); assert.deepEqual(stopped.actions, []); assert.equal(stopped.handedBack.action, 'answer-issue');
   assert.equal(stopped.diagnosis.kind, 'runner-stopped'); assert.match(stopped.diagnosis.command, /^protoflow runner /);
   assert.equal(view.streams[0].stopped, true);
+  // The lane that looks mid-stage says no runner will continue it.
+  const runner = view.attention.find(item => item.kind === 'service');
+  assert.deepEqual([runner.title, runner.reason, runner.diagnosis.kind, runner.diagnosis.title], ['Runner 沒在跑', 'application 有版本等 runner 執行', 'runner-stopped', '版本處理停住了：runner 沒在跑']);
 });

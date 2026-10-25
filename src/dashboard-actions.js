@@ -10,6 +10,8 @@ import { deliveryStatePath, runnerStatePath, loadProgress } from './streams.js';
 import { resolveDeliveryDestination, deliveryGit as git, deliveryGh as gh } from './delivery-scope.js';
 import { openIssues, issuesStatus } from './issues.js';
 import { decideWaiver, findVerification } from './waivers.js';
+import { runnerHealth, runnerAlive } from './dashboard-data.js';
+import { runnerStopped } from './dashboard-diagnosis.js';
 
 /**
  * Proposal 0004 D3: what a person may do from the dashboard. Every action is an existing engine operation under its
@@ -169,7 +171,9 @@ async function retry(root, config, { target = null }) {
 }
 
 /** Run one dashboard action and record it, success or not. */
-export async function runAction(root, request, { now = () => new Date().toISOString() } = {}) {
+// Actions whose effect the runner carries out on its next pass or sync.
+const RUNNER_ACTIONS = { retry: 'version', 'request-changes': 'version', handback: 'issue', 'answer-issue': 'issue', 'close-issue': 'issue' };
+export async function runAction(root, request, { now = () => new Date().toISOString(), service = process.platform === 'darwin' } = {}) {
   const config = await loadConfig(root);
   const { action, ...args } = request ?? {};
   if (!ACTIONS.includes(action)) throw Object.assign(new Error(`Unknown action ${action}`), { statusCode: 400 });
@@ -185,6 +189,11 @@ export async function runAction(root, request, { now = () => new Date().toISOStr
       : action === 'reject-waiver' ? await waiverDecision(root, config, 'rejected', args)
       : action === 'revoke-waiver' ? await waiverDecision(root, config, 'revoked', args)
       : await retry(root, config, args);
+    // Done, but nothing runs it while no runner is running: say so, and how to start one, instead of a next step that never comes.
+    if (RUNNER_ACTIONS[action]) {
+      const { heartbeat, summary } = await runnerHealth(root, { service });
+      if (!runnerAlive({ heartbeat, ...summary })) { const stopped = runnerStopped(summary.status, RUNNER_ACTIONS[action]); Object.assign(result, { runner: 'stopped', next: `Runner 沒在跑，要等它啟動才會處理：執行 ${stopped.command}` }); }
+    }
     await audit(root, { ...record, status: result.status ?? 'PASS', result });
     return result;
   } catch (error) {

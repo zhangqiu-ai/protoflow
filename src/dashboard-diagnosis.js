@@ -44,13 +44,14 @@ const BY_CODE = {
   'repair-limit': () => ({ kind: 'repair-limit', make: () => ({ title: '修復次數用完', steps: ['看最後一次驗收的失敗項與執行紀錄', '處理後重試；需要更多次自動修復時調高 `policy.maxRepairAttempts`'], command: null }) }),
   'base-moved': () => ({ kind: 'base-moved', make: () => ({ title: '基底分支已移動', steps: ['先合併或關閉尚未處理的交付 PR', '原因列出「files the base also changed」時，是基底改到了 worktree 正在改的檔案：把基底上的那些修改撤回，或確認後改走 rebase', '要放棄未交付的版本、在目前的基底重新開始時，執行 `protoflow runner rebase`', '回到這裡重試'], command: 'protoflow runner rebase' }) })
 };
-/** An issue a person handed back waits for a runner that is not running: say how to start it. */
-export function runnerStopped(status) {
+/** Work waits for a runner that is not running (a handed-back issue, a retried or unfinished version): say how to start it. */
+export function runnerStopped(status, work = 'issue') {
   const installed = !['NOT_INSTALLED', 'HEARTBEAT'].includes(status);
-  return { kind: 'runner-stopped', title: 'Issue 處理停住了：runner 沒在跑', steps: [
-    '交回、回答或關閉都已送到 GitHub，但要等 runner 下一次同步才會重新分流或從清單移除',
+  const issue = work === 'issue';
+  return { kind: 'runner-stopped', title: `${issue ? 'Issue 處理' : '版本處理'}停住了：runner 沒在跑`, steps: [
+    issue ? '交回、回答或關閉都已送到 GitHub，但要等 runner 下一次同步才會重新分流或從清單移除' : '重試或未完成的版本已排好，但沒有 runner 執行它；面板上的階段是上次停下的位置，不是正在跑',
     installed ? `Runner 服務已安裝但沒有在跑：以 ${SERVICE} 重新啟動，或在專案目錄執行 \`protoflow runner start --once\`` : '在專案目錄執行 `protoflow runner service install` 讓 runner 常駐，或用 `protoflow runner start --once` 跑一輪',
-    '啟動後幾分鐘內會同步 issue，這張卡片就會消失'
+    issue ? '啟動後幾分鐘內會同步 issue，這張卡片就會消失' : '啟動後這張卡片就會消失，階段恢復即時'
   ], command: installed ? 'protoflow runner start --once' : 'protoflow runner service install' };
 }
 export function diagnose(text, reasonCode = null) {

@@ -272,8 +272,12 @@ function attention({ streams, issues, reviews, service, config, waivers }) {
   for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, waivers: review.waivers ?? 0, since: review.completedAt, actions: ['approve'] });
   for (const waiver of waivers?.waivers ?? []) if (waiver.status === 'requested') items.push({ kind: 'waiver', target: waiver.target, waiverId: waiver.id, title: `${waiver.scene}${waiver.variant ? ` / ${waiver.variant}` : ''} · ${waiver.tier}`, reason: waiver.reason, engineIssue: waiver.engineIssue, findings: waiver.findings, findingCount: waiver.findingCount, requestedBy: waiver.requestedBy, manifestId: waiver.manifestId, verificationId: waiver.verificationId, prototype: waiver.prototype, application: waiver.application, since: waiver.requestedAt, actions: ['approve-waiver', 'reject-waiver'] });
   if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
+  // A version waits to run (retried, or stopped mid-pass) and no runner will run it: say so instead of a stage that looks live.
+  const waitingStreams = streams.filter(stream => stream.stopped);
+  if (waitingStreams.length && !items.some(item => item.kind === 'service')) items.push({ kind: 'service', status: service?.status ?? 'NOT_INSTALLED', title: 'Runner 沒在跑', reason: `${waitingStreams.map(stream => stream.target ?? 'application').join('、')} 有版本等 runner 執行`, since: service?.heartbeat?.at ?? null, actions: [] });
   // A blocked item says what to do about it: by its runner reasonCode first, else when its reason is a known failure.
   for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked' && !item.waiting) item.diagnosis = diagnose(item.reason, item.reasonCode);
+  for (const item of items) if (item.kind === 'service' && !item.diagnosis && !runnerAlive(service)) item.diagnosis = runnerStopped(service?.status, 'version');
   // How long each item has waited for a person, when it is known.
   for (const item of items) item.since ??= null;
   return items;
@@ -288,6 +292,13 @@ async function adrStatus(root, config) {
 }
 
 /** The whole dashboard view of one project. `service: false` skips the launchd query (tests, other systems). */
+/** The runner's health for a project: the supervised service when asked for, else its heartbeat. */
+export async function runnerHealth(root, { service = process.platform === 'darwin', health: knownHealth } = {}) {
+  const heartbeat = await readJson(path.join(root, HEARTBEAT), null);
+  // A caller polling many projects passes the service health it already knows (launchctl is a subprocess).
+  const health = knownHealth !== undefined ? knownHealth : service ? await serviceStatus(root).catch(error => ({ status: 'UNKNOWN', reason: error.message })) : null;
+  return { heartbeat, summary: health ?? (heartbeat ? { status: 'HEARTBEAT', heartbeat, beatAgeSeconds: Math.round((Date.now() - Date.parse(heartbeat.at)) / 1000) } : { status: 'NOT_INSTALLED' }) };
+}
 export async function dashboardSnapshot(root, { service = process.platform === 'darwin', health: knownHealth, eventCount = 60 } = {}) {
   const real = await fs.realpath(root);
   const config = await loadConfig(real);
@@ -297,10 +308,7 @@ export async function dashboardSnapshot(root, { service = process.platform === '
   const issues = await issueSummaries(real);
   const reviews = await pendingReviews(real, config, streams);
   const waivers = await waiverSummaries(real, config);
-  const heartbeat = await readJson(path.join(real, HEARTBEAT), null);
-  // A caller polling many projects passes the service health it already knows (launchctl is a subprocess).
-  const health = knownHealth !== undefined ? knownHealth : service ? await serviceStatus(real).catch(error => ({ status: 'UNKNOWN', reason: error.message })) : null;
-  const summary = health ?? (heartbeat ? { status: 'HEARTBEAT', heartbeat, beatAgeSeconds: Math.round((Date.now() - Date.parse(heartbeat.at)) / 1000) } : { status: 'NOT_INSTALLED' });
+  const { heartbeat, summary } = await runnerHealth(real, { service, health: knownHealth });
   // A stage read from the last event is not live when no runner is running: the lane says it stopped.
   if (!runnerAlive({ heartbeat, ...summary })) for (const stream of streams) if (!['idle', 'blocked'].includes(stream.stage)) stream.stopped = true;
   return {
