@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { syncIssues, issuesStatus, issueSettings } from '../src/issues.js';
 import { normalizeIssuePlan } from '../src/planner.js';
 import { githubApi } from '../src/delivery-scope.js';
+import { hash } from '../src/util.js';
 
 const exec = promisify(execFile);
 const fixtures = new URL('./fixtures/', import.meta.url);
@@ -55,6 +56,12 @@ test('engine rules: L3, incomplete implementation plans and question-less reques
   assert.deepEqual(normalizeIssuePlan({ ...base, targets: [], tests: [] }).engineNotes, ['An implementation plan needs targets', 'An implementation plan needs tests']);
   assert.equal(normalizeIssuePlan({ ...base, decision: 'needs-info' }).decision, 'needs-human');
   assert.equal(normalizeIssuePlan({ ...base, decision: 'reject' }).decision, 'reject');
+  // wait-prototype must name a queued version the planner was shown.
+  const queued = { prototypes: [{ manifestId: 'git-c4ee', targets: ['ios'] }] };
+  assert.equal(normalizeIssuePlan({ ...base, decision: 'wait-prototype', prototypeVersion: 'git-c4ee' }, queued).decision, 'wait-prototype');
+  assert.deepEqual(normalizeIssuePlan({ ...base, decision: 'wait-prototype', prototypeVersion: 'git-other' }, queued).engineNotes, ['wait-prototype names git-other, not one of the queued prototype versions']);
+  assert.equal(normalizeIssuePlan({ ...base, decision: 'wait-prototype' }).decision, 'needs-human');
+  assert.equal(normalizeIssuePlan({ ...base, prototypeVersion: 'git-c4ee' }, queued).prototypeVersion, undefined);
 });
 
 test('FAKE gh and CLI only: authorised issues are triaged once in number order; others wait for a maintainer with write access', async t => {
@@ -68,7 +75,7 @@ test('FAKE gh and CLI only: authorised issues are triaged once in number order; 
   assert.deepEqual(first.results.map(item => [item.number, item.status]), [[1, 'needs-human'], [3, 'planned']]);
   let db = await gh();
   // Status labels are created once; pull requests and unlabelled issues are ignored.
-  assert.deepEqual(db.labels.slice(2), ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done', 'skip'].map(status => `protoflow:${status}`));
+  assert.deepEqual(db.labels.slice(2), ['planned', 'needs-info', 'needs-human', 'rejected', 'waiting-prototype', 'in-progress', 'blocked', 'done', 'skip'].map(status => `protoflow:${status}`));
   const [one, , three] = [1, 2, 3].map(number => db.issues.find(item => item.number === number));
   assert.deepEqual(one.labels, ['protoflow', 'protoflow:needs-human']); assert.equal(one.comments.length, 1);
   assert.match(one.comments[0].body, /ProtoFlow triage \(AI, automated\)[\s\S]*association NONE is not in issues\.authors[\s\S]*remove the `protoflow:needs-human` label/);
@@ -349,4 +356,58 @@ test('FAKE gh and CLI only: the dashboard answers a waiting issue as a comment, 
   assert.equal(state.issues[27].status, 'closed'); assert.equal(state.issues[28].status, 'planned'); assert.equal(state.issues[28].confirmedBy, 'protoflow-bot');
   const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(log.filter(entry => entry.status === 'PASS').map(entry => [entry.action, entry.result.number]), [['answer-issue', 28], ['close-issue', 27]]);
+});
+
+test('FAKE gh and CLI only: an issue a queued prototype version already answers waits for it, follows it when superseded, and closes when it is accepted', async t => {
+  const { root, config, gh, edit, plans, base } = await fixture(t, [issue(28), issue(31)]);
+  // Like mobile #28: the latest accepted prototype lacks the change; c4ee is frozen and queued with it.
+  const manifest = (id, extra = {}) => ({ id, createdAt: `2026-10-25T0${id === 'git-c4ee' ? 1 : 2}:00:00.000Z`, summary: `FAKE FIXTURE ${id}`, level: 'L1', afterHash: `after-${id}`, source: { kind: 'git', identity: 'FAKE-identity', sha: id.slice(4), ordinal: id === 'git-c4ee' ? 2 : 3 }, changes: [{ path: 'prototype/settings.js', type: 'modified' }], ...extra });
+  const write = async (kind, record) => { await fs.mkdir(path.join(root, `.protoflow/${kind}`), { recursive: true }); await fs.writeFile(path.join(root, `.protoflow/${kind}/${record.id}.json`), JSON.stringify(record)); };
+  const accept = (record, target) => write('verifications', { id: `VER-${record.id}-${target}`, manifestId: record.id, status: 'PASS', manifestHash: hash(record), prototypeHash: record.afterHash, target, createdAt: '2026-10-25T05:00:00.000Z' });
+  const c4ee = manifest('git-c4ee');
+  await write('manifests', c4ee);
+  config.issues = { enabled: true, maxTriagePerSync: 1 };
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ decision: 'wait-prototype', prototypeVersion: 'git-c4ee', targets: ['ios'] });
+  await syncIssues(root, config);
+  const input = JSON.parse(await fs.readFile(path.join(base, 'claude-input.json'), 'utf8')).input;
+  assert.match(input, /Newer prototype versions are frozen and queued[\s\S]*decide "wait-prototype"[\s\S]*never say the prototype has not changed/);
+  assert.match(input, /"manifestId":\s*"git-c4ee"[\s\S]*"changedFiles":\s*\[\s*"prototype\/settings\.js"[\s\S]*"frozen":\s*"\.protoflow\/versions\/git-c4ee\/files\/"[\s\S]*"targets":\s*\[\s*"ios",\s*"flutter"\s*\][\s\S]*"current":\s*\[\s*"ios",\s*"flutter"/);
+  let state = await issuesStatus(root);
+  assert.deepEqual([state.issues[28].status, state.issues[28].prototypeVersion, state.issues[28].waitTargets], ['waiting-prototype', 'git-c4ee', ['ios']]);
+  let db = await gh();
+  assert.ok(db.issues[0].labels.includes('protoflow:waiting-prototype'));
+  assert.match(db.issues[0].comments.at(-1).body, /prototype version: `git-c4ee`[\s\S]*waits for prototype version `git-c4ee`[\s\S]*accepted \(and delivered\) for ios/);
+  // #31 waits on the same version for flutter; then the version leaves the queue without a successor: #31 is triaged again.
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ decision: 'wait-prototype', prototypeVersion: 'git-c4ee', targets: ['flutter'] });
+  await syncIssues(root, config);
+  assert.equal((await issuesStatus(root)).issues[31].waitTargets[0], 'flutter');
+  // Still queued: nothing is planned again.
+  const planned = (await plans()).length;
+  assert.deepEqual((await syncIssues(root, config)).results, []);
+  assert.equal((await plans()).length, planned);
+  // runner supersede folds c4ee into dd: both issues follow it.
+  await fs.rename(path.join(root, '.protoflow/manifests/git-c4ee.json'), path.join(base, 'git-c4ee.json'));
+  const dd = manifest('git-dd', { supersedes: ['git-c4ee'] });
+  await write('manifests', dd);
+  await syncIssues(root, config);
+  state = await issuesStatus(root);
+  assert.deepEqual([state.issues[28].prototypeVersion, state.issues[31].prototypeVersion], ['git-dd', 'git-dd']);
+  assert.match(state.issues[28].history.at(-1).reason, /git-c4ee was folded into git-dd/);
+  // Accepted for ios only: #28 closes as completed, #31 (flutter) keeps waiting.
+  await accept(dd, 'ios');
+  const events = [];
+  const closing = await syncIssues(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual(closing.results, [{ number: 28, status: 'done', prototypeVersion: 'git-dd' }]);
+  assert.deepEqual(events.filter(event => event.event === 'issue-done'), [{ event: 'issue-done', number: 28, prototypeVersion: 'git-dd' }]);
+  db = await gh();
+  assert.deepEqual([db.issues[0].state, db.issues[0].stateReason], ['closed', 'completed']);
+  assert.ok(db.issues[0].labels.includes('protoflow:done') && !db.issues[0].labels.includes('protoflow:waiting-prototype'));
+  assert.match(db.issues[0].comments.at(-1).body, /Prototype version `git-dd` \(FAKE FIXTURE git-dd\), which makes the change this issue asks for, was accepted for ios[\s\S]*not a human approval/);
+  assert.equal((await issuesStatus(root)).issues[31].status, 'waiting-prototype');
+  // dd is rebased away without a successor: #31 is triaged again and sees no queued versions.
+  await fs.rm(path.join(root, '.protoflow/manifests/git-dd.json'));
+  process.env.FAKE_CLAUDE_OUTPUT = plan();
+  await syncIssues(root, config);
+  assert.equal((await issuesStatus(root)).issues[31].status, 'planned');
+  assert.match(JSON.parse(await fs.readFile(path.join(base, 'claude-input.json'), 'utf8')).input, /Decide "wait-prototype" only for a version in data\.prototypeVersions; there are none now\./);
 });
