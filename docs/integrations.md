@@ -54,6 +54,8 @@
 
 `execute --context ID` 只產生 request。`--execute` 執行配置命令，stdin 是完整 context 加 `kind:"implement"`／`"repair"`。包含 manifest、prototype diff/hash、mappings、project hashes/Git、spec／ADR、驗證配置，以及 repair 的上一份 verification。完整原型快照保留在 session，adapter 可讀取目標專案目前的原型檔案。adapter 負責修改 mapped application code 和重複測試，不批准 Review／Baseline、不修改 prototype。
 
+**大型原型 diff**：context 整體（以縮排 JSON 計）限制在 900 KiB 內，低於 Codex 1,048,576 字元的輸入上限。單檔 diff 超過 32 KiB，或有一行超過 2,000 字元（例如整頁 HTML 產生在同一行，改一個屬性就等於新舊兩整頁），不放進 context，改為 `diffOmitted: true`，並附上 `diffSize`、`diffLines`、`excerpts`（每處變更前後各約 160 字元）、`frozenAfter`（本版凍結檔 `.protoflow/versions/<manifestId>/files/<path>`）與 `frozenBefore`（依 `beforeHash` 找到的上一版凍結檔）。執行代理自行讀取或比對這兩個檔案。manifest 的 `git.diff` 與各 change 的 `diff` 是同一份內容，只保留後者，前者改為 `diffOmitted` 與大小。仍超過預算時，所有 diff 都改為參照；還是超過就不呼叫執行代理，直接 FAIL，原因列出最大的欄位（含第二層，例如 `anchors.screens`）。這在送出時套用，舊引擎已凍結的 manifest 也適用，不需要重新凍結。EXEC 紀錄保留完整 request（交付審查用它核對 manifest），另在 `sent` 記下實際送出內容的 hash、大小與被省略 diff 的檔案。
+
 內建橋接配置：
 
 ```json

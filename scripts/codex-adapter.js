@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { executorPrompt, assertContextPackage } from '../src/executor-prompt.js';
+import { contextSizes } from '../src/context-budget.js';
 
 // Protocol bridge: structured engine context -> noninteractive Codex stdin.
 let input = '';
@@ -18,8 +19,7 @@ const prompt = executorPrompt(context, contextPackage);
 // Codex rejects prompts above 1,048,576 characters; name the largest Context Package fields instead of failing remotely.
 const CODEX_INPUT_LIMIT = 1048576;
 if (prompt.length > CODEX_INPUT_LIMIT) {
-  const largest = Object.entries(contextPackage).map(([key, value]) => [key, JSON.stringify(value ?? null).length]).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  throw new Error(`Context Package is ${prompt.length} characters, above the Codex input limit of ${CODEX_INPUT_LIMIT}; largest fields: ${largest.map(([key, size]) => `${key} (${size})`).join(', ')}`);
+  throw new Error(`Context Package is ${prompt.length} characters, above the Codex input limit of ${CODEX_INPUT_LIMIT}; largest fields: ${contextSizes(contextPackage).map(([key, size]) => `${key} (${size})`).join(', ')}`);
 }
 const { values } = parseArgs({ options: { model: { type: 'string' }, ephemeral: { type: 'boolean' }, 'ignore-user-config': { type: 'boolean' }, 'add-dir': { type: 'string', multiple: true }, network: { type: 'boolean' } } });
 // Toolchains that write outside the project (Flutter's SDK cache and ~/.dart-tool) need explicit extra writable roots;

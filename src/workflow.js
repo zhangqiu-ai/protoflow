@@ -9,6 +9,7 @@ import { loadVersion } from './versions.js';
 import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
 import { buildEnvironment, swallowedFailure } from './environment.js';
 import { selectTarget, targetSettings, targetVariants, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
+import { fitContext } from './context-budget.js';
 
 const date = () => new Date().toISOString();
 const validId = value => {
@@ -270,12 +271,20 @@ export async function executeContext(root, config, contextId, { execute = false,
     ...(report.build && { build: briefRun(report.build) }), ...(report.functional && { functional: briefRun(report.functional) }),
     ...(artifactHashes && { artifactCount: Object.keys(artifactHashes).length })
   });
-  const request = {
+  const full = {
     ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
     repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }), engineLimits: `.protoflow/engine-limits/${contextId}.json` },
     operatorActions: `.protoflow/operator-actions/${contextId}.json`,
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
+  // Large prototype diffs travel as references to the frozen files; a request still over budget fails here, by part.
+  let request;
+  try { request = await fitContext(root, full); }
+  catch (error) {
+    if (error.reasonCode !== 'context-too-large') throw error;
+    if (!execute) return { status: 'FAIL', contextId, error: error.message };
+    return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request: full, result: { status: 'FAIL', exitCode: null, stdout: '', stderr: error.message, error: error.message }, status: 'FAIL', livePrototypeChanged: false, projectAfter: await applicationFingerprint(root, config, context.target) });
+  }
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
   const command = executorCommand(config, provider);
   const before = await snapshot(root, config);
@@ -288,7 +297,10 @@ export async function executeContext(root, config, contextId, { execute = false,
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
   // Designers may checkpoint concurrently, so a live prototype change is recorded, not attributed to the executor.
   const livePrototypeChanged = (await snapshot(root, config)).hash !== before.hash;
-  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request, result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
+  // The record keeps the whole request (delivery provenance checks its manifest); what the executor received differed only
+  // in diffs referenced by their frozen files, named here with the hash of the request it got.
+  const omitted = (request.manifest?.changes ?? []).filter(change => change.diffOmitted).map(change => change.path);
+  return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request: full, ...((omitted.length || request.manifest?.git?.diffOmitted) && { sent: { hash: hash(request), size: JSON.stringify(request).length, omittedDiffs: omitted, gitDiffOmitted: Boolean(request.manifest?.git?.diffOmitted) } }), result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
 }
 export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, reverify = false } = {}) {
   // `reverify` re-checks an accepted version after its target merged a moved base; the latest PASS then accepts it.
