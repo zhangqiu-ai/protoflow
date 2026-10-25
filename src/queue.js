@@ -77,7 +77,7 @@ async function queueRecords(root, config) {
 }
 
 /** Manifest IDs a target's delivery has finished: merged, or handed to a person as an open PR (merge manual/none). */
-async function deliveredVersions(root, config, target) {
+export async function deliveredVersions(root, config, target) {
   const stream = isMultiTarget(config) ? target : null;
   const state = await readJson(await projectPath(root, deliveryStatePath(config, stream)), { deliveries: [] });
   const finished = new Set(state.deliveries.filter(delivery => ['MERGED', 'PR_OPEN_MANUAL'].includes(delivery.status)).map(delivery => delivery.id));

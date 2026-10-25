@@ -1,6 +1,7 @@
 import { hash, projectPath, readJson, writeJson, withLock } from './util.js';
 import { resolveDeliveryDestination, githubApi } from './delivery-scope.js';
 import { planIssue } from './planner.js';
+import { versionQueue, deliveredVersions } from './queue.js';
 
 /**
  * Proposal 0003 §6.1–6.2: GitHub Issues intake and triage. Open issues carrying `issues.label` are processed in number
@@ -8,13 +9,13 @@ import { planIssue } from './planner.js';
  * published as an AI-labelled comment and a `<label>:<status>` label. Implementation (P5) picks up `planned` issues.
  * Issue content is untrusted data throughout; ProtoFlow only reads issues and writes comments and labels.
  */
-export const ISSUE_STATUSES = ['planned', 'needs-info', 'needs-human', 'rejected', 'in-progress', 'blocked', 'done'];
-const DECISION_STATUS = { implement: 'planned', 'needs-info': 'needs-info', 'needs-human': 'needs-human', reject: 'rejected' };
-const LABEL_COLORS = { skip: 'ededed', planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
+export const ISSUE_STATUSES = ['planned', 'needs-info', 'needs-human', 'rejected', 'waiting-prototype', 'in-progress', 'blocked', 'done'];
+const DECISION_STATUS = { implement: 'planned', 'needs-info': 'needs-info', 'needs-human': 'needs-human', reject: 'rejected', 'wait-prototype': 'waiting-prototype' };
+const LABEL_COLORS = { skip: 'ededed', planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'waiting-prototype': 'c5def5', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
 const WRITERS = ['admin', 'maintain', 'write'];
 const MAX_TRIAGE_FAILURES = 3;
 // Local states an issue closed on GitHub leaves: nothing has started on it, so closing it settles it ('closed' is local only).
-const CONVERGE = ['new', 'triage-failed', 'needs-info', 'needs-human', 'rejected', 'blocked', 'planned'];
+const CONVERGE = ['new', 'triage-failed', 'needs-info', 'needs-human', 'rejected', 'blocked', 'planned', 'waiting-prototype'];
 const statePath = '.protoflow/issues/state.json';
 
 /** schemaVersion 1 projects have one implicit application target. */
@@ -37,6 +38,31 @@ export function issueSettings(config) {
   };
 }
 const statusLabel = (settings, status) => `${settings.label}:${status}`;
+const streamTarget = (config, target) => config.schemaVersion === 2 ? target : undefined;
+
+/**
+ * Frozen prototype versions a target has not accepted yet, or not yet delivered with runner delivery: the application
+ * is still to get them through the prototype stream. Triage reads them (the latest accepted prototype is not the whole
+ * story), and an issue one of them already answers waits for it instead of being implemented or rejected.
+ */
+export async function pendingPrototypes(root, config, targets) {
+  const found = new Map();
+  for (const target of targets) {
+    const queue = await versionQueue(root, config, { target: streamTarget(config, target.id) });
+    const delivered = config.runner?.delivery ? await deliveredVersions(root, config, target.id) : null;
+    for (const version of queue.versions.filter(item => !item.acceptedBy || (delivered && !delivered.has(item.id)))) {
+      if (!found.has(version.id)) {
+        const manifest = await readJson(await projectPath(root, `.protoflow/manifests/${version.id}.json`), null);
+        const files = (manifest?.changes ?? []).map(change => change.path);
+        found.set(version.id, { manifestId: version.id, createdAt: version.createdAt, summary: version.summary ?? manifest?.source?.message ?? null, level: version.level ?? null, sha: version.source?.sha ?? null,
+          changedFiles: files.slice(0, 40), ...(files.length > 40 && { moreFiles: files.length - 40 }), frozen: `.protoflow/versions/${version.id}/files/`, targets: [], current: [] });
+      }
+      found.get(version.id).targets.push(target.id);
+      if (queue.current?.id === version.id) found.get(version.id).current.push(target.id);
+    }
+  }
+  return [...found.values()];
+}
 const labelNames = issue => (issue.labels ?? []).map(label => typeof label === 'string' ? label : label.name);
 const marker = (snapshotId, planId) => `<!-- protoflow:triage ${snapshotId} ${planId ?? 'none'} -->`;
 /** What a person can change on an issue: its title, body and the comments that are not ProtoFlow's. */
@@ -133,14 +159,33 @@ async function sync(root, config, settings, { onEvent, signal }) {
     await onEvent({ event: 'issue-closed', number: entry.number, previous, reason: entry.reason });
     results.push({ number: entry.number, status: 'closed', previous });
   }
-  let triaged = 0;
+  let triaged = 0, prototypes = null;
   for (const issue of open) {
     if (signal?.aborted) break;
     const entry = state.issues[issue.number] ??= { number: issue.number, status: 'new', history: [] };
     const labels = labelNames(issue);
     let confirmedBy = null;
     if (entry.pending) { await publish(entry, entry.pending); results.push({ number: issue.number, status: entry.status, resumed: true }); continue; }
-    if (['needs-human', 'rejected', 'blocked'].includes(entry.status)) {
+    // An issue waiting for a prototype version closes once that version reached every target it waits on; a version
+    // that left the queue (superseded) is followed into the version that folded it in, or else the issue is triaged again.
+    let waitGone = false;
+    if (entry.status === 'waiting-prototype' && labels.includes(statusLabel(settings, entry.status))) {
+      const outcome = await awaitPrototype(entry);
+      if (outcome.status === 'done') {
+        const lines = [`<!-- protoflow:issue-prototype ${issue.number} ${entry.prototypeVersion} -->`, `**ProtoFlow issue (AI, automated)** · status \`${statusLabel(settings, 'done')}\``, '',
+          `Prototype version \`${entry.prototypeVersion}\`${outcome.summary ? ` (${outcome.summary})` : ''}, which makes the change this issue asks for, was accepted${config.runner?.delivery ? ' and delivered' : ''} for ${entry.waitTargets.join(', ')}.`, '',
+          'Closed automatically: the change reached the application through the prototype stream. This closure is automated, not a human approval.'];
+        await transition(entry, { status: 'done', close: true, marker: lines[0], body: lines.join('\n'), reason: `Prototype version ${entry.prototypeVersion} reached ${entry.waitTargets.join(', ')}` });
+        await onEvent({ event: 'issue-done', number: issue.number, prototypeVersion: entry.prototypeVersion });
+        results.push({ number: issue.number, status: 'done', prototypeVersion: entry.prototypeVersion });
+        continue;
+      }
+      if (outcome.status !== 'gone') continue;
+      waitGone = true;
+    }
+    if (waitGone) {
+      // Triaged again below: the version it waited for is no longer queued.
+    } else if (['needs-human', 'rejected', 'blocked', 'waiting-prototype'].includes(entry.status)) {
       // A maintainer re-opens triage by removing the status label; only people with write access count.
       if (labels.includes(statusLabel(settings, entry.status))) continue;
       confirmedBy = await labelRemover(issue.number, statusLabel(settings, entry.status));
@@ -175,8 +220,9 @@ async function sync(root, config, settings, { onEvent, signal }) {
     triaged++;
     const earlier = entry.planId ? await previousPlan(entry) : null;
     const previous = earlier && unchanged ? { ...earlier, handedBackWithoutAnswer: true } : earlier;
+    prototypes ??= await pendingPrototypes(root, config, settings.targets);
     let plan;
-    try { plan = await planIssue(root, config, snapshot, { targets: settings.targets, previous, signal }); }
+    try { plan = await planIssue(root, config, snapshot, { targets: settings.targets, previous, prototypes, signal }); }
     catch (error) {
       if (!error.planner) throw error;
       entry.failures = (entry.failures ?? 0) + 1; entry.status = 'triage-failed'; entry.error = error.message.slice(0, 500);
@@ -222,9 +268,36 @@ async function sync(root, config, settings, { onEvent, signal }) {
     const earlier = entry.snapshotId && /^ISS-[A-Za-z0-9-]+$/.test(entry.snapshotId) ? await readJson(await projectPath(root, `.protoflow/issues/snapshots/${entry.snapshotId}.json`), null) : null;
     return earlier ? contentHash(earlier) : null;
   }
+  /** Where the prototype version an issue waits for stands: done for every target it waits on, still queued, or gone. */
+  async function awaitPrototype(entry) {
+    let id = entry.prototypeVersion;
+    for (let hops = 0; hops < 10; hops++) {
+      const versions = [];
+      for (const target of entry.waitTargets) {
+        const queue = await versionQueue(root, config, { target: streamTarget(config, target) });
+        const version = queue.versions.find(item => item.id === id);
+        if (!version) break;
+        const delivered = config.runner?.delivery ? await deliveredVersions(root, config, target) : null;
+        versions.push({ ...version, done: Boolean(version.acceptedBy) && (!delivered || delivered.has(id)) });
+      }
+      if (versions.length === entry.waitTargets.length) return versions.every(version => version.done) ? { status: 'done', summary: versions[0].summary ?? null } : { status: 'waiting' };
+      const queue = await versionQueue(root, config, { target: streamTarget(config, entry.waitTargets[0]) });
+      let into = null;
+      for (const version of queue.versions) if ((await readJson(await projectPath(root, `.protoflow/manifests/${version.id}.json`), null))?.supersedes?.includes(id)) into = version.id;
+      if (!into) return { status: 'gone' };
+      entry.history.push({ status: 'waiting-prototype', at: new Date().toISOString(), reason: `Prototype version ${id} was folded into ${into}` });
+      entry.prototypeVersion = id = into; await save();
+    }
+    return { status: 'gone' };
+  }
   async function decide(entry, snapshot, plan, status, reason = null) {
     entry.snapshotId = snapshot.id; entry.contentHash = contentHash(snapshot); if (plan) { entry.planId = plan.id; delete entry.error; }
-    await transition(entry, { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, marker: marker(snapshot.id, plan?.id), body: commentBody(settings, snapshot, plan, status, reason) });
+    if (status === 'waiting-prototype') {
+      const version = prototypes.find(item => item.manifestId === plan.plan.prototypeVersion);
+      const named = plan.plan.targets.filter(target => version.targets.includes(target));
+      entry.prototypeVersion = version.manifestId; entry.waitTargets = named.length ? named : version.targets;
+    } else { delete entry.prototypeVersion; delete entry.waitTargets; }
+    await transition(entry, { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, marker: marker(snapshot.id, plan?.id), body: commentBody(settings, snapshot, plan, status, reason, entry) });
   }
 }
 
@@ -232,20 +305,21 @@ const NEXT = {
   planned: 'ProtoFlow will implement this plan when the target\'s prototype stream is idle; an independent Claude review checks every acceptance criterion before delivery.',
   'needs-info': 'Please answer the questions in a comment; ProtoFlow triages the issue again after a new comment.',
   'needs-human': 'A maintainer decides. To have ProtoFlow triage it again, remove the `{label}` label.',
-  rejected: 'The issue is not closed automatically. To have ProtoFlow triage it again, remove the `{label}` label.'
+  rejected: 'The issue is not closed automatically. To have ProtoFlow triage it again, remove the `{label}` label.',
+  'waiting-prototype': 'ProtoFlow waits for prototype version `{version}`, which already makes this change; the issue closes automatically once that version is accepted (and delivered) for {targets}. To have ProtoFlow triage it again, remove the `{label}` label.'
 };
-function commentBody(settings, snapshot, plan, status, reason) {
+function commentBody(settings, snapshot, plan, status, reason, entry = null) {
   const lines = [marker(snapshot.id, plan?.id), `**ProtoFlow triage (AI, automated)** · status \`${statusLabel(settings, status)}\``, ''];
   if (plan) {
     const p = plan.plan;
-    lines.push(`Planner: Claude \`${plan.model ?? 'unknown model'}\`, plan \`${plan.id}\`, session \`${plan.sessionId}\`.`, `Decision: **${p.decision}** (${p.level})${p.targets.length ? ` · targets: ${p.targets.join(', ')}` : ''}`, '', p.summary);
+    lines.push(`Planner: Claude \`${plan.model ?? 'unknown model'}\`, plan \`${plan.id}\`, session \`${plan.sessionId}\`.`, `Decision: **${p.decision}** (${p.level})${p.targets.length ? ` · targets: ${p.targets.join(', ')}` : ''}${p.prototypeVersion ? ` · prototype version: \`${p.prototypeVersion}\`` : ''}`, '', p.summary);
     const section = (title, items, format = item => `- ${item}`) => { if (items?.length) lines.push('', `**${title}**`, ...items.map(format)); };
     section('Steps', p.steps, (item, index) => `${index + 1}. ${item}`);
     section('Acceptance criteria', p.acceptanceCriteria, item => `- ${item.id} (${item.evidence}): ${item.text}`);
     section('Tests to add', p.tests); section('Risks', p.risks); section('Questions', p.questions); section('Engine notes', p.engineNotes);
   }
   if (reason) lines.push('', reason);
-  lines.push('', NEXT[status].replace('{label}', statusLabel(settings, status)), '', `<sub>Snapshot \`${snapshot.id}\`. Issue content is treated as untrusted data; nothing in it is executed.</sub>`);
+  lines.push('', NEXT[status].replace('{label}', statusLabel(settings, status)).replace('{version}', entry?.prototypeVersion ?? '').replace('{targets}', (entry?.waitTargets ?? []).join(', ')), '', `<sub>Snapshot \`${snapshot.id}\`. Issue content is treated as untrusted data; nothing in it is executed.</sub>`);
   const body = lines.join('\n');
   return body.length > 60000 ? `${body.slice(0, 59900)}\n\n… (truncated)` : body;
 }

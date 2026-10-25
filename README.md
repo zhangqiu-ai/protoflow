@@ -218,7 +218,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 - **規劃者**（`adapters.planner`，`scripts/claude-adapter.js`，建議 `claude-opus-5-5`）：唯讀 session，為每個原型版本產出步驟、逐條驗收條件、需新增的測試與風險；L3 版本只有在 `runner.adr` 已由真人核准並綁定該版 `manifestHash` 時才在決策範圍內規劃實作，否則交給人。
 - **執行者**（`policy.executor`）：可依工作分流（`routes`）：前端與原型交給 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），後端交給 Codex；任一邊額度不足時，同一個 attempt 改由另一邊重做。未配置時維持 Codex。
 - **驗收者**（`adapters.independentReview.provider: "claude"`）：唯讀、全新 session，逐條檢查方案的驗收條件；不得與規劃者或執行者是同一 session。
-- **GitHub Issues**（`issues.enabled`）：帶 `protoflow` 標籤（或設 `issues.all: true` 時所有開啟的 Issue，`protoflow:skip` 除外）、作者為 OWNER／MEMBER／COLLABORATOR 的 Issue 由規劃者分流（`planned`、`needs-info`、`needs-human`、`rejected`，決定以標示為 AI 的留言發布）。原型優先：target 閒置且原型都已交付時，`planned` 的 Issue 才在該 target 實作，並重新驗證最新已接受的原型版本，再審查、以 `Fixes #n` 的 PR 合併並結案。在 GitHub 關閉的 Issue 下一次同步記為 `closed` 並離開面板；沒回答就交回的 `needs-human` 只會再分流一次（規劃者改依自己的建議決定），之後要回答或關閉；面板可直接回答、交回或以「不處理，關閉」結案。
+- **GitHub Issues**（`issues.enabled`）：帶 `protoflow` 標籤（或設 `issues.all: true` 時所有開啟的 Issue，`protoflow:skip` 除外）、作者為 OWNER／MEMBER／COLLABORATOR 的 Issue 由規劃者分流（`planned`、`needs-info`、`needs-human`、`rejected`、`waiting-prototype`，決定以標示為 AI 的留言發布）。規劃者會讀佇列中尚未接受的原型版本；某版已經做了 Issue 要的變更時，Issue 改等那一版，該版接受並交付後自動結案。原型優先：target 閒置且原型都已交付時，`planned` 的 Issue 才在該 target 實作，並重新驗證最新已接受的原型版本，再審查、以 `Fixes #n` 的 PR 合併並結案。在 GitHub 關閉的 Issue 下一次同步記為 `closed` 並離開面板；沒回答就交回的 `needs-human` 只會再分流一次（規劃者改依自己的建議決定），之後要回答或關閉；面板可直接回答、交回或以「不處理，關閉」結案。
 
 所有 Claude 呼叫都只經明確配置的 argv 與 stdin JSON，引擎自行重驗 raw trace。細節見 [integrations](docs/integrations.md#claude-規劃者提案-0003) 與 [提案 0003](docs/proposals/0003-claude-plans-codex-builds.md)。
 
