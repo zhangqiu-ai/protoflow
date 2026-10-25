@@ -987,7 +987,9 @@ const ENGINE_VERSION = JSON.parse(await fs.readFile(new URL('../package.json', i
  * keeps alive: it never returns because every target is blocked or the source cannot be read; it keeps polling
  * until a person resolves the block, and returns only when stopped.
  */
-export async function startRunner(root, config, { once = false, service = false, signal, onEvent: report = () => {}, beatIntervalMs = BEAT_INTERVAL_MS } = {}) {
+/** How often a runner busy with long versions still syncs GitHub issues, so a handed-back issue is not left waiting. */
+export const ISSUE_SYNC_INTERVAL_MS = 5 * 60000;
+export async function startRunner(root, config, { once = false, service = false, signal, onEvent: report = () => {}, beatIntervalMs = BEAT_INTERVAL_MS, issueSyncIntervalMs = ISSUE_SYNC_INTERVAL_MS } = {}) {
   const streams = streamTargets(config);
   const waiting = new Map();
   const startedAt = new Date().toISOString();
@@ -1006,7 +1008,24 @@ export async function startRunner(root, config, { once = false, service = false,
   };
   // A pass can run for an hour (execution, native visual capture); the heartbeat keeps beating while the process is
   // responsive, so a supervisor tells a long step from a hung runner.
-  const pulse = setInterval(() => { beat(); }, beatIntervalMs);
+  // Issues are synced after every pass, and also while a pass runs long (an hour of repair on one version), at most
+  // every issueSyncIntervalMs. Issue work takes the issues lock, so this process runs it one piece at a time.
+  let lastIssueSync = Date.now(), issueQueue = Promise.resolve(), issueBusy = 0;
+  const issueWork = task => {
+    issueBusy++;
+    const run = issueQueue.then(task).finally(() => { issueBusy--; });
+    issueQueue = run.catch(() => {});
+    return run;
+  };
+  const syncIssuesNow = () => issueWork(async () => {
+    lastIssueSync = Date.now();
+    try { await syncIssues(root, config, { onEvent, signal }); }
+    catch (error) { passIssueError = error.message.slice(0, 300); await onEvent({ event: 'issues-failed', error: passIssueError, transient: Boolean(error.transient) }); }
+  });
+  const pulse = setInterval(() => {
+    beat();
+    if (config.issues?.enabled && !issueBusy && !signal?.aborted && Date.now() - lastIssueSync >= issueSyncIntervalMs) syncIssuesNow();
+  }, Math.min(beatIntervalMs, issueSyncIntervalMs));
   pulse.unref?.();
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
@@ -1028,7 +1047,7 @@ export async function startRunner(root, config, { once = false, service = false,
         // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
         if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
           try {
-            const issue = await runIssues(root, config, stream, { signal, onEvent: events });
+            const issue = await issueWork(() => runIssues(root, config, stream, { signal, onEvent: events }));
             if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue });
             // Report why a planned issue waits once per change, so a waiting issue is never silent.
             if (waiting.get(stream) !== (issue.reason ?? null)) { waiting.set(stream, issue.reason ?? null); if (issue.status === 'IDLE' && issue.reason) await events({ event: 'issue-waiting', reason: issue.reason }); }
@@ -1039,10 +1058,7 @@ export async function startRunner(root, config, { once = false, service = false,
       }
       last = streams[0] === null ? results[''] : aggregate(results);
       // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
-      if (config.issues?.enabled && !signal?.aborted) {
-        try { await syncIssues(root, config, { onEvent, signal }); }
-        catch (error) { passIssueError = error.message.slice(0, 300); await onEvent({ event: 'issues-failed', error: passIssueError, transient: Boolean(error.transient) }); }
-      }
+      if (config.issues?.enabled && !signal?.aborted) await syncIssuesNow();
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
       const failure = scanError ?? passIssueError;
       if (failure) { failingPasses++; lastFailure = { at: new Date().toISOString(), error: failure.slice(0, 300) }; } else failingPasses = 0;
@@ -1053,7 +1069,7 @@ export async function startRunner(root, config, { once = false, service = false,
       try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
     }
     return { status: 'STOPPED' };
-  }, 'runner').finally(() => clearInterval(pulse));
+  }, 'runner').finally(async () => { clearInterval(pulse); await issueQueue; });
 }
 
 export async function doctor(root, config) {

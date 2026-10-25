@@ -6,6 +6,7 @@ const STAGES = [['plan', '規劃'], ['execute', '實作'], ['verify', '驗收'],
 const STAGE_LABEL = { idle: '閒置', blocked: '阻塞', plan: '規劃', execute: '實作', verify: '驗收', review: '審查', deliver: '交付' };
 const STATUS = { PASS: ['通過', 'ok'], FAIL: ['未過', 'bad'], NOT_RUN: ['未執行', ''], BLOCKED: ['阻塞', 'bad'], RUNNING: ['進行中', 'ok'], PENDING: ['等待', ''], STOPPED: ['已停止', 'warn'], MERGED: ['已合併', 'ok'], PR_OPEN_MANUAL: ['待你合併', 'warn'], REVOKED: ['已撤回', ''], COMMITTED: ['已提交', 'ok'], HEALTHY: ['常駐', 'ok'], DEGRADED: ['連線異常', 'bad'], STALLED: ['無回應', 'bad'], DOWN: ['已停止', 'bad'], STARTING: ['啟動中', 'ok'], NOT_INSTALLED: ['未常駐', ''], HEARTBEAT: ['前景執行', 'ok'], UNKNOWN: ['未知', ''] };
 const ISSUE = { planned: ['已規劃', 'ok'], 'needs-info': ['需要資訊', 'warn'], 'needs-human': ['需要你決定', 'warn'], rejected: ['不處理', ''], 'in-progress': ['實作中', 'ok'], blocked: ['阻塞', 'bad'], done: ['完成', 'ok'], new: ['新', ''], 'triage-failed': ['分流失敗', 'bad'], closed: ['已關閉', ''] };
+const ISSUE_ACTION = { handback: '已交回 AI', 'answer-issue': '已回答', 'close-issue': '已關閉' };
 const PHASE = { execute: '執行者', build: '建置', functional: '功能測試', visual: '比對', 'visual-driver': '畫面擷取' };
 const TIERS = [['structure', '結構'], ['tokens', '配色'], ['layout', '版面'], ['visual', '視覺']];
 const ICON = {
@@ -40,7 +41,7 @@ const elapsed = iso => { if (!iso) return ''; const sec = Math.max(0, Math.round
 const waited = iso => { if (!iso || Number.isNaN(Date.parse(iso))) return null; const min = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000)); return min < 1 ? '剛剛開始等' : min < 60 ? `等了 ${min} 分鐘` : min < 1440 ? `等了 ${Math.floor(min / 60)} 小時${min % 60 ? ` ${min % 60} 分` : ''}` : `等了 ${Math.floor(min / 1440)} 天`; };
 const targetName = target => target ?? '應用';
 const initial = name => [...String(name ?? '?')][0].toUpperCase();
-const active = stream => !['idle', 'blocked'].includes(stream.stage);
+const active = stream => !['idle', 'blocked'].includes(stream.stage) && !stream.stopped;
 
 /** One avatar per distinct agent: the planner leads, then the executors by area. */
 function agents(roles) {
@@ -180,6 +181,14 @@ function renderOverview(data) {
 
 // ---- project ----
 const selected = {}, done = new Map();
+// Answers being typed into issue cards, so a live update that redraws the page keeps the text, the focus and the caret.
+const drafts = new Map();
+function replaceApp(...nodes) {
+  const field = document.activeElement?.dataset?.draft ? { key: document.activeElement.dataset.draft, start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd } : null;
+  app.replaceChildren(...nodes);
+  const again = field && [...app.querySelectorAll('[data-draft]')].find(node => node.dataset.draft === field.key);
+  if (again) { again.focus({ preventScroll: true }); again.setSelectionRange(field.start, field.end); }
+}
 /** Every target in one panel: a row per target, the stage names once as column heads so the nodes line up. */
 function pipelines(streams) {
   const lane = stream => {
@@ -187,7 +196,7 @@ function pipelines(streams) {
     const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
     const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
     const sub = [stream.current?.summary, stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null, stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
-    const state = stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+    const state = stream.stopped ? `已停止（${STAGE_LABEL[stream.stage] ?? stream.stage}）` : stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
     return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
       h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),
       h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }) : null,
@@ -235,25 +244,28 @@ function diagnosisBlock(diagnosis) {
 }
 /** One card per item waiting for a person, with the action it allows; the same cards on a project page and in the inbox. */
 function askCards(projectId, items, many) {
-  const run = async (box, body, label, question, result) => {
-    if (!confirm(question)) return;
+  const run = async (box, made, label, question, result, key) => {
+    // A body can be read from the card when the button is pressed (an answer typed into it).
+    const body = typeof made === 'function' ? made() : made;
+    if (!body || !confirm(question)) return;
     box.querySelectorAll('button').forEach(button => { button.disabled = true; });
     try {
       const response = await act(projectId, body, label);
-      done.set(keyOf(body), `${result}${response.next ? ` · ${response.next}` : ''}`);
+      done.set(key ?? keyOf(body), `${result}${response.next ? ` · ${response.next}` : ''}`);
+      if (key) drafts.delete(key);
       rerender();
     } catch (error) { toast(`${label}失敗：${error.message}`, true); box.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
   };
   const keyOf = body => JSON.stringify(body);
-  const card = (item, glyph, title, sub, extra, buttons) => {
+  const card = (item, glyph, title, sub, extra, buttons, key = null) => {
     const body = buttons?.[0]?.body;
-    const signed = body ? done.get(keyOf(body)) : null;
+    const signed = key ? done.get(key) : body && typeof body !== 'function' ? done.get(keyOf(body)) : null;
     const box = h(`div.ask.rise${signed ? '.done' : buttons ? '' : '.calm'}`, {},
       h('div.ask-h', {}, h('span.glyph', {}, icon(signed ? ICON.check : glyph)), h('div', {}, h('b', {}, title), sub ? h('p', { title: sub }, sub) : null),
         !signed && waited(item.since) ? h('span.waited', { title: `從 ${new Date(item.since).toLocaleString()} 開始等` }, waited(item.since)) : null), extra);
     if (signed) box.append(h('div.signed', {}, icon(ICON.check, 16), h('span', {}, signed)));
     else if (buttons) box.append(h('div.btns', {}, buttons.map((button, i) => button.href ? h('a.btn', { href: button.href, target: '_blank', rel: 'noopener' }, button.label)
-      : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result) }, button.label))));
+      : h(`button.btn${i === 0 ? '.primary' : ''}`, { type: 'button', onclick: () => run(box, button.body, button.label, button.question, button.result, key) }, button.label))));
     return box;
   };
   return byUrgency(items).map(item => {
@@ -261,9 +273,20 @@ function askCards(projectId, items, many) {
     const diagnosis = diagnosisBlock(item.diagnosis);
     if (item.kind === 'manual-merge') return card(item, ICON.merge, `${where}${item.title} 可合併`, `已驗收並通過獨立審查 · ${item.commit?.slice(0, 7) ?? ''}`, null,
       [{ label: '核准並合併', body: { action: 'merge', target: item.target, deliveryId: item.deliveryId }, question: `確定以你的 GitHub 身分合併 ${item.title}？只會合併審查過的 commit。`, result: '已核准 · 合併中' }, item.pr ? { label: 'GitHub', href: item.pr } : null].filter(Boolean));
-    if (item.kind === 'issue') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
-      [item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null, diagnosis],
-      [{ label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定把 #${item.number} 交回 AI 重新分流？這會以你的 GitHub 身分移除狀態標籤。`, result: '已交回 AI' }, item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean));
+    if (item.kind === 'issue' && item.waiting === 'runner') return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, `${ISSUE_ACTION[item.handedBack?.action] ?? '已交回'}，等 runner 處理`, diagnosis,
+      item.url ? [{ label: 'GitHub', href: item.url }] : null);
+    if (item.kind === 'issue') {
+      const key = `${projectId}:issue:${item.number}`;
+      const answer = done.get(key) ? null : h('textarea.answer', { rows: 3, maxlength: 20000, placeholder: '回答上面的問題（以你的 GitHub 身分留言，AI 會帶著你的回答重新分流）', 'aria-label': `回答 #${item.number}`, 'data-draft': key, oninput: event => drafts.set(key, event.target.value) });
+      if (answer) answer.value = drafts.get(key) ?? '';
+      const text = () => { const value = answer?.value.trim(); if (!value) { toast('請先寫下回答', true); answer.focus(); return null; } return { action: 'answer-issue', number: item.number, text: value }; };
+      return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
+        [item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null, diagnosis, answer],
+        [{ label: '回答並交回', body: text, question: `確定以你的 GitHub 身分在 #${item.number} 留言回答，並交回 AI 重新分流？`, result: '已回答 · 等重新分流' },
+          { label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定不回答、直接把 #${item.number} 交回 AI？沒有新資訊時 AI 會照自己的建議決定；再交回一次就不會重跑分流。`, result: '已交回 AI' },
+          { label: '不處理，關閉', body: { action: 'close-issue', number: item.number }, question: `確定以你的 GitHub 身分關閉 #${item.number}（不處理）？`, result: '已關閉' },
+          item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean), key);
+    }
     if (item.kind === 'review') return card(item, ICON.tag, `${where}${item.title} 待核准`, item.waivers ? `驗收 ${item.verificationId} 附豁免通過 ${item.waivers} 項，需要你核准` : `驗收 ${item.verificationId} 已通過`, null,
       [{ label: '核准版本', body: { action: 'approve', target: item.target, manifestId: item.manifestId, verificationId: item.verificationId }, question: `確定以你的名字核准這個版本？核准綁定驗收 ${item.verificationId}${item.waivers ? `，其中 ${item.waivers} 項是附豁免通過` : ''}。`, result: '已核准' }]);
     if (item.kind === 'waiver') return card(item, ICON.alert, `${where}豁免待核准：${item.title}`, `${item.reason}${item.engineIssue ? ` · ${item.engineIssue}` : ''}`,
@@ -308,7 +331,7 @@ function renderInbox(data) {
     .map(project => ({ project, items: project.inbox, top: Math.min(...project.inbox.map(item => URGENCY[item.kind] ?? 5)) }))
     .sort((a, b) => a.top - b.top || b.items.length - a.items.length);
   const total = groups.reduce((sum, group) => sum + group.items.length, 0);
-  app.replaceChildren(
+  replaceApp(
     h('section.hero.rise', {}, h('div', {}, h('span.label', {}, '等你'), h('h1', {}, total ? [h('b', {}, `${total} 件`), '等你決定'] : ['一切', h('b', {}, '順暢')])), notifyToggle()),
     groups.length ? h('div.inbox', {}, groups.map(({ project, items }, index) => h('section.inbox-group.rise', { 'aria-label': project.name, style: `animation-delay:${index * 60}ms` },
       h('a.inbox-h', { href: `#/p/${project.id}` }, h('span.tile', {}, initial(project.name)), h('div', {}, h('b', {}, project.name), h('small', {}, headline(project).label)),
@@ -441,7 +464,7 @@ function renderProject(snapshot) {
   crumb.textContent = project.name;
   if (snapshot.engineVersion) ver.textContent = `v${snapshot.engineVersion}`;
   const team = agents(snapshot.roles);
-  app.replaceChildren(
+  replaceApp(
     h('header.head.rise', {}, h('div.ident', {}, h('a.back', { href: '#/', 'aria-label': '返回總覽' }, icon(ICON.back, 16)), h('span.tile', {}, initial(project.name)),
       h('div', {}, h('h1', { style: 'font-size:22px;font-weight:600;letter-spacing:-.015em' }, project.name), h('small', { title: project.root }, project.root))),
       h('div.roles', {}, team.map(agent => h('span.role', { title: agent.name }, avatar(agent), agent.labels.join('／'))),

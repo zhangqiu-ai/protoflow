@@ -83,6 +83,36 @@ test('approving from the dashboard asks for confirmation and sends the bound act
   expect(calls.length).toBe(before);
 });
 
+test('an issue waiting for a person is answered from its card; the answer survives live updates, and it can be closed instead', async ({ page }) => {
+  await page.goto(`${url}#/p/${id}`);
+  const answer = page.getByRole('textbox', { name: '回答 #5' });
+  await expect(answer).toBeVisible();
+  // An empty answer sends nothing.
+  const before = calls.length;
+  await page.getByRole('button', { name: '回答並交回' }).click();
+  await expect(page.locator('#toast')).toContainText('請先寫下回答');
+  expect(calls.length).toBe(before);
+  // A live update redraws the page while the person types: the text, the focus and the caret stay.
+  await answer.fill('Dark by default.');
+  await answer.evaluate(node => { node.dataset.old = '1'; node.setSelectionRange(4, 4); });
+  await fs.appendFile(path.join(fixture.root, '.protoflow/runner/events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event: 'scanned', head: 'FAKE FIXTURE redraw' })}\n`);
+  await expect.poll(() => page.locator('textarea.answer').evaluate(node => node.dataset.old ?? null), { timeout: 5000 }).toBe(null);
+  await expect(answer).toHaveValue('Dark by default.');
+  expect(await answer.evaluate(node => [document.activeElement === node, node.selectionStart])).toEqual([true, 4]);
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '回答並交回' }).click();
+  await expect(page.locator('#toast')).toContainText('回答並交回：完成');
+  expect(calls.at(-1)).toEqual({ action: 'answer-issue', number: 5, text: 'Dark by default.' });
+  await expect(page.locator('.ask.done .signed')).toContainText('已回答');
+  await expect(answer).toHaveCount(0);
+  // Not worth doing: close it as not planned.
+  await page.reload();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '不處理，關閉' }).click();
+  await expect(page.locator('#toast')).toContainText('不處理，關閉：完成');
+  expect(calls.at(-1)).toEqual({ action: 'close-issue', number: 5 });
+});
+
 test('a page left open across a service restart picks up the new token instead of failing the action', async ({ page }) => {
   await page.goto(`${url}#/p/${id}`);
   await expect(page.getByRole('button', { name: '核准並合併' })).toBeVisible();

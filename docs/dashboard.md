@@ -60,7 +60,7 @@ protoflow dashboard serve [--port 7420]
 | 項目 | 何時出現 | 面板操作 | 綁定 |
 |---|---|---|---|
 | 交付 PR 待你合併 | `runner.delivery.merge: "manual"` 的交付已通過驗證與獨立審查 | 核准並合併 | PR 仍開啟、head 等於審查過的交付 commit 才以 `--match-head-commit` 合併；以你的 GitHub 身分執行，交付紀錄寫入 `manualMerge`；直接在 GitHub 合併的 PR 在下一次 `delivery sync` 記為 `manualMerge`（`via: "github"`）後，這張卡片就不再出現 |
-| Issue 需要你決定 | Issue 為 `needs-human`、`blocked` 或 `rejected` | 交回 AI | 以你的 GitHub 身分移除狀態標籤；Runner 下一輪確認你有寫入權限後重新分流 |
+| Issue 需要你決定 | Issue 為 `needs-human`、`blocked` 或 `rejected` | 回答並交回／交回 AI／不處理，關閉 | 都以你的 GitHub 身分進行，且只在本機狀態仍在等人時可用。「回答並交回」把你在卡片輸入的文字發成 Issue 留言（附「Answered from the ProtoFlow dashboard」），再移除狀態標籤；「交回 AI」只移除標籤，沒有新資訊時規劃者會依自己的建議決定，第二次沒回答就交回不再重新分流（見 [integrations](integrations.md#github-issues-收件與分流提案-0003-p4)）；「不處理，關閉」留言後以 `not_planned` 關閉 Issue。Runner 確認你有寫入權限後重新分流或記為 `closed`。操作後卡片離開「需要你」；若 Runner 沒在跑（服務未啟動、或心跳超過 5 分鐘），卡片改為「Issue 處理停住了：runner 沒在跑」並附啟動命令，串流的階段也標成「已停止」 |
 | 版本待人工核准 | 沒有 `policy.autoApprove` 的專案，已 PASS 的版本；有開 autoApprove 的專案只限驗收用到維護者豁免的版本（交付停在 `WAIVER_APPROVAL_REQUIRED`，卡片註明附豁免通過幾項） | 核准版本 | 在該 target 的 Runner worktree 建立並核准審查，綁定驗收 hash，複製回專案；審查者為 `dashboard.reviewer` |
 | 豁免待核准 | 有 `requested` 的維護者豁免（CLI 申請，或 runner 依修復代理標示的引擎限制自動申請） | 核准豁免／拒絕 | 卡片附那次驗收的原型與 App 截圖（申請時複製到 `.protoflow/artifacts/<WVR-id>/`）、原因、引擎問題與發現全文；`dashboard.reviewer` 必須列在 `policy.waivers.reviewers`。核准寫入 `waiverHash`，綁定 target、場景、變體、層級、版本的 `manifestHash` 與發現；下一次驗收發現仍是子集時才套用 |
 | 撤回豁免 | 「維護者豁免」區塊裡已核准的豁免 | 撤回 | 豁免改為 `revoked`，下一次驗收不再套用；已經用它通過的驗收保留原紀錄 |

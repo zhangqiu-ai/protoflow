@@ -100,7 +100,7 @@
 
 ### GitHub Issues 收件與分流（提案 0003 P4）
 
-配置 `issues.enabled` 與 `adapters.planner` 後（schemaVersion 1 專案視為單一 target `application`），runner 每輪在原型串流之後處理帶標籤的 Issue；也可手動執行 `protoflow issues sync`，以 `issues status` 查看狀態：
+配置 `issues.enabled` 與 `adapters.planner` 後（schemaVersion 1 專案視為單一 target `application`），runner 每輪在原型串流之後處理帶標籤的 Issue，原型串流跑很久（例如修復中）時也每 5 分鐘在背景同步一次（同一時間只有一個 Issue 工作，不會撞鎖）；也可手動執行 `protoflow issues sync`，以 `issues status` 查看狀態：
 
 ```json
 { "issues": { "enabled": true, "label": "protoflow", "authors": ["OWNER", "MEMBER", "COLLABORATOR"], "targets": ["ios", "android", "flutter"], "maxTriagePerSync": 3 } }
@@ -112,6 +112,8 @@
 - **分流**：唯讀 Claude 規劃者（與原型流程同一套 trace 驗證）回答 `implement`、`needs-info`、`needs-human` 或 `reject`，並給出 targets、步驟、驗收條件、需新增的測試、風險與問題。引擎規則：L3、缺 targets／步驟／驗收條件／測試的 `implement`、沒有問題的 `needs-info`，一律改為 `needs-human`。每輪最多規劃 `maxTriagePerSync` 個 Issue；規劃失敗下一輪重試，連續 3 次失敗轉 `needs-human`。
 - **發布**：決定以標示為 AI 的留言發布（含規劃者模型、方案 id、session、快照 id），並把 Issue 的狀態標籤換成 `<label>:planned`、`needs-info`、`needs-human` 或 `rejected`（首次執行時自動建立 7 個狀態標籤）。決定先寫入 `.protoflow/issues/state.json` 再發布；中途中斷時下一輪依留言開頭的標記續做，不會重複留言。`rejected` 不會自動關閉 Issue。
 - **再分流**：`needs-info` 的 Issue 有新的非 ProtoFlow 留言時重新規劃，資料帶上一份方案；`needs-human`、`rejected` 在維護者移除狀態標籤後重新分流。
+- **沒回答就交回**：`needs-human` 的 Issue 被交回時，若標題、內文與非 ProtoFlow 留言都和上次分流時相同（`state.json` 的 `contentHash`），規劃者的資料帶 `previous.handedBackWithoutAnswer: true`，並被要求不再問同樣的問題：依自己的建議答案決定 `implement`（把假設寫進摘要與驗收條件）或 `reject`；只有上次沒提過的理由或 L3 才回 `needs-human`。這次仍是 `needs-human` 時，之後再沒回答就交回不會再呼叫規劃者，只留言說明「沒有新資訊，請回答或關閉」並列出未答的問題，發出 `issue-unchanged`；Issue 有新留言或內容改變後恢復正常分流。
+- **在 GitHub 關閉**：尚未開始實作的 Issue（`new`、`triage-failed`、`needs-info`、`needs-human`、`rejected`、`blocked`、`planned`）在 GitHub 被關閉或刪除後，下一次同步在本機記為 `closed`（只存在 `state.json`，不加標籤），原因寫明關閉者與 `state_reason`，發出 `issue-closed`，面板不再列出。重新開啟的 Issue 視為新請求重新分流。
 - **實作（P5）**：需要 `policy.autoApprove` 與 `runner.delivery.merge: "auto"`。原型優先：某個 target 的 runner 閒置、所有已接受版本都已交付且合併（被拒收而退役的交付 `REVOKED` 也算已結案）、worktree 沒有未提交修改（與目前 base 內容逐位元相同的修改除外，例如 `runner configure` 同步進來的配置，會先還原再隨快轉帶回）時，runner 每輪替該 target 處理一個 `planned` Issue（已開始的優先，其次編號最小者）。Issue 等待的原因每次改變時發出一筆 `issue-waiting` 事件。
   1. 把該 target 的 runner worktree 快轉到目前的 base，Issue 轉為 `in-progress`（AI 留言）。
   2. 執行者依方案修改（context 帶 `issue` 與 `plan`；Issue 內容標為不受信任資料），再以 `reverify` 對該 target **最新已接受的原型版本**跑完整驗證（build、functional、分層），確保修 Issue 不破壞原型一致性。方案列出測試時，修改必須新增或修改測試檔，否則視為失敗並進入修復；修復上限沿用 `policy.maxRepairAttempts`，執行者額度與暫時性錯誤的處理與原型流程相同。

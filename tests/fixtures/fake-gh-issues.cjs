@@ -21,7 +21,7 @@ const [, owner, name, kind, number, sub, extra] = parts;
 if (`${owner}/${name}` !== state.repository.full_name) fail(404, 'Not Found');
 const now = () => new Date(Date.UTC(2026, 9, 14, 0, 0, state.clock = (state.clock ?? 0) + 1)).toISOString();
 const issue = () => state.issues.find(item => item.number === Number(number)) ?? fail(404, 'Not Found');
-const view = item => ({ number: item.number, title: item.title, body: item.body, user: { login: item.author }, author_association: item.association, state: item.state ?? 'open', labels: item.labels.map(label => ({ name: label })), comments: item.comments.length, updated_at: item.updatedAt ?? '2026-10-14T00:00:00Z', ...(item.pull ? { pull_request: {} } : {}) });
+const view = item => ({ number: item.number, title: item.title, body: item.body, user: { login: item.author }, author_association: item.association, state: item.state ?? 'open', ...(item.state === 'closed' ? { state_reason: item.stateReason ?? 'completed', closed_by: { login: item.closedBy ?? state.viewer } } : {}), labels: item.labels.map(label => ({ name: label })), comments: item.comments.length, updated_at: item.updatedAt ?? '2026-10-14T00:00:00Z', ...(item.pull ? { pull_request: {} } : {}) });
 if (parts.length === 3 && method === 'GET') out(state.repository);
 if (kind === 'labels' && !number) {
   if (method === 'GET') out(state.labels.map(label => ({ name: label })));
