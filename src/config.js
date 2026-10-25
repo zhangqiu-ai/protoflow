@@ -3,7 +3,8 @@ import { validateSource } from './source.js';
 import Ajv from 'ajv';
 import { readJson, projectPath } from './util.js';
 
-const command = { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['argv'], properties: { argv: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }, timeoutMs: { type: 'integer', minimum: 1, maximum: 3600000 } } }] };
+// `devices`: simulators or emulators the command drives that its argv does not name (src/devices.js holds them).
+const command = { anyOf: [{ type: 'null' }, { type: 'object', additionalProperties: false, required: ['argv'], properties: { argv: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }, timeoutMs: { type: 'integer', minimum: 1, maximum: 3600000 }, devices: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1 } } } }] };
 // A build command may name what it must produce (`outputs`, relative to the worktree root the build runs in): a build that
 // exits 0 without them failed (Expo prebuild exits 0 when pod install fails).
 const buildCommand = { anyOf: [command.anyOf[0], { ...command.anyOf[1], properties: { ...command.anyOf[1].properties, outputs: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1, not: { pattern: '^/|(^|/)\\.\\.(/|$)' } } } } }] };

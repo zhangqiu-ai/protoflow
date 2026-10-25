@@ -7,7 +7,8 @@ import { verifyVisual } from './visual.js';
 import { runAcceptanceAdapter } from './acceptance.js';
 import { loadVersion } from './versions.js';
 import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
-import { buildEnvironment, swallowedFailure } from './environment.js';
+import { buildEnvironment, deviceEnvironment, swallowedFailure } from './environment.js';
+import { acquireDevices, commandDevices } from './devices.js';
 import { selectTarget, targetSettings, targetVariants, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 import { fitContext } from './context-budget.js';
 
@@ -67,15 +68,15 @@ async function checkBuild(root, command, result) {
   return { ...result, status: 'FAIL', error: reason, stderr: [result.stderr, reason, tail].filter(Boolean).join('\n') };
 }
 /**
- * One build command. A failure whose output names the machine (an unreachable network, a fallback this machine cannot
- * take) runs once more after policy.transientRetryDelayMs; failing the same way again, the build is NOT_RUN with
- * reasonCode `environment`, because another repair cannot fix it.
+ * One command that may fail for the machine: a failure that `cause` attributes to the machine (an unreachable network,
+ * a fallback this machine cannot take, a simulator that did not serve the tests) runs once more after
+ * policy.transientRetryDelayMs; failing the same way again, the phase is NOT_RUN with reasonCode `environment`,
+ * because another repair cannot fix it.
  */
-async function runBuild(root, runPhase, phase, command, { retryDelayMs, signal }) {
-  const run = async () => checkBuild(root, command, await runPhase(phase, command));
+async function retryForMachine(phase, run, cause, { retryDelayMs, signal }) {
   const first = await run();
-  const cause = first.status === 'FAIL' && buildEnvironment(first);
-  if (!cause) return first;
+  const reason = first.status === 'FAIL' && cause(first);
+  if (!reason) return first;
   try { await delay(retryDelayMs, undefined, { signal }); }
   catch {
     const error = new Error(`STOPPED: verification ${phase} was interrupted`);
@@ -83,11 +84,14 @@ async function runBuild(root, runPhase, phase, command, { retryDelayMs, signal }
     throw error;
   }
   const second = await run();
-  const again = second.status === 'FAIL' && buildEnvironment(second);
-  const retry = { at: date(), delayMs: retryDelayMs, firstLine: cause.line, status: second.status, ...(again && { line: again.line }) };
+  const again = second.status === 'FAIL' && cause(second);
+  const retry = { at: date(), delayMs: retryDelayMs, firstLine: reason.line, status: second.status, ...(again && { line: again.line }) };
   if (!again) return { ...second, environmentRetry: retry };
   return { ...second, status: 'NOT_RUN', reasonCode: 'environment', environment: { phase, line: again.line, ...(again.hint && { hint: again.hint }), retry }, environmentRetry: retry };
 }
+const runBuild = (root, runPhase, phase, command, options) => retryForMachine(phase, async () => checkBuild(root, command, await runPhase(phase, command)), buildEnvironment, options);
+/** The project name a device holder shows: the dashboard name, or the folder of the project a runner worktree belongs to. */
+const projectName = (root, config) => config.dashboard?.name ?? path.basename(root.split(`${path.sep}.protoflow${path.sep}runner${path.sep}`)[0]);
 /**
  * The build phase: the target's own build, then each variant's build (one codebase, several runtimes). A failed
  * optional variant build is recorded but does not fail the target; its captures will not pass either.
@@ -302,7 +306,7 @@ export async function executeContext(root, config, contextId, { execute = false,
   const omitted = (request.manifest?.changes ?? []).filter(change => change.diffOmitted).map(change => change.path);
   return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request: full, ...((omitted.length || request.manifest?.git?.diffOmitted) && { sent: { hash: hash(request), size: JSON.stringify(request).length, omittedDiffs: omitted, gitDiffOmitted: Boolean(request.manifest?.git?.diffOmitted) } }), result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
 }
-export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, reverify = false } = {}) {
+export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, onDeviceWait, reverify = false } = {}) {
   // `reverify` re-checks an accepted version after its target merged a moved base; the latest PASS then accepts it.
   await assertCurrentVersion(root, config, manifestId, { target, allowAccepted: reverify });
   const { manifest, version } = await manifestVersion(root, config, manifestId);
@@ -332,44 +336,70 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
   // Build may produce project assets. Bind evidence after build, before acceptance.
   const commands = checkCommands(config, target);
   const retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
-  const build = await buildAll((phase, command) => runBuild(root, runPhase, phase, command, { retryDelayMs, signal }), isV2(config) ? targetVariants(selectTarget(config, target)) : [], commands.build);
-  // A build this machine cannot run leaves nothing to check: the version waits for the machine, not for a repair.
-  const environment = build.status === 'NOT_RUN' ? [build, ...Object.values(build.variants ?? {})].find(result => result.reasonCode === 'environment')?.environment : null;
-  const skipped = environment && { status: 'NOT_RUN', reason: `Build could not run in this environment (${environment.phase}): ${environment.line}` };
-  const before = await applicationFingerprint(root, config, target);
-  const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
-  const functional = skipped ? { ...skipped } : !isV2(config) && commands.functional?.adapter === 'acceptance'
-    ? await runAcceptanceAdapter(root, config, 'functional', acceptanceEvidence, { signal, onBeforeSpawn, onStart, onFinish })
-    : await runPhase('functional', commands.functional);
-  const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
-  if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
-  const visual = skipped ? { ...skipped, scenes: [], artifacts: [] } : isV2(config)
-    // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
-    ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
-    : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
-  const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
-  const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
-  const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
-  if (visual.status === 'PASS' && (missing.length || unmapped.length)) {
-    visual.status = 'FAIL'; visual.reason = `Changed prototype mappings lack visual coverage: ${[...missing, ...unmapped].join(', ')}`;
-  }
-  const artifactHashes = {};
-  for (const artifact of visual.artifacts ?? []) {
-    const relative = path.relative(await realpath(root), await realpath(artifact));
-    artifactHashes[relative] = hash(await readFile(await projectPath(root, relative)));
-  }
-  const after = await applicationFingerprint(root, config, target);
-  let versionIntact = true;
-  try { await loadVersion(root, config, manifest); } catch { versionIntact = false; }
-  const liveChanged = visual.prototypeSource === 'live' && (await snapshot(root, config)).hash !== manifest.afterHash;
-  const changedDuringVerification = before.hash !== after.hash || !versionIntact || liveChanged;
-  const hygiene = await applicationHygiene(root, after.files);
-  const checks = [build.status, functional.status, visual.status, hygiene.status];
-  const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-  const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(visual.waivers?.length && { waivers: visual.waivers }), ...(environment && status === 'NOT_RUN' && { reasonCode: 'environment', environment }) };
-  // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
-  if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
-  return persist(root, 'verifications', record);
+  // Simulators and emulators are machine-wide (src/devices.js): the verification holds every device its commands name,
+  // all at once, from the first command that needs one until it ends.
+  const variants = isV2(config) ? targetVariants(selectTarget(config, target)) : [];
+  const buildDevices = [commands.build, ...variants.map(variant => variant.variant && variant.build)].flatMap(commandDevices);
+  const devices = [...new Set([...buildDevices, ...commandDevices(commands.functional), ...variants.flatMap(variant => commandDevices(variant.driver?.command))])].sort();
+  let releaseDevices = null;
+  const deviceRecord = devices.length ? { names: devices, waits: [] } : null;
+  const holdDevices = async phase => {
+    if (releaseDevices || !devices.length) return;
+    const asked = Date.now();
+    releaseDevices = await acquireDevices(devices, { project: projectName(root, config), target: isV2(config) ? selectTarget(config, target).id : null, manifestId, verificationId, phase }, {
+      signal, onWait: async ({ device, holder }) => {
+        const wait = { device, holder: { project: holder.project ?? null, target: holder.target ?? null, manifestId: holder.manifestId ?? null, phase: holder.phase ?? null, since: holder.acquiredAt ?? holder.since ?? null }, at: date() };
+        deviceRecord.waits.push(wait);
+        await onDeviceWait?.({ phase, ...wait });
+      }
+    });
+    deviceRecord.waitedMs = Date.now() - asked;
+    if (deviceRecord.waits.length) await onDeviceWait?.({ phase, acquired: true, devices, waitedMs: deviceRecord.waitedMs, at: date() });
+  };
+  try {
+    if (buildDevices.length) await holdDevices('build');
+    const build = await buildAll((phase, command) => runBuild(root, runPhase, phase, command, { retryDelayMs, signal }), variants, commands.build);
+    // A build this machine cannot run leaves nothing to check: the version waits for the machine, not for a repair.
+    const environment = build.status === 'NOT_RUN' ? [build, ...Object.values(build.variants ?? {})].find(result => result.reasonCode === 'environment')?.environment : null;
+    const skipped = environment && { status: 'NOT_RUN', reason: `Build could not run in this environment (${environment.phase}): ${environment.line}` };
+    if (!skipped) await holdDevices(commandDevices(commands.functional).length ? 'functional' : 'visual');
+    const before = await applicationFingerprint(root, config, target);
+    const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
+    const functional = skipped ? { ...skipped } : !isV2(config) && commands.functional?.adapter === 'acceptance'
+      ? await runAcceptanceAdapter(root, config, 'functional', acceptanceEvidence, { signal, onBeforeSpawn, onStart, onFinish })
+      : await retryForMachine('functional', () => runPhase('functional', commands.functional), deviceEnvironment, { retryDelayMs, signal });
+    // A simulator that did not serve the tests leaves the captures nothing to run on either: the version waits for the machine.
+    const deviceSkipped = functional.reasonCode === 'environment' && { status: 'NOT_RUN', reason: `Functional tests could not run in this environment: ${functional.environment.line}` };
+    const liveMatches = (await snapshot(root, config)).hash === manifest.afterHash;
+    if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
+    const visual = skipped || deviceSkipped ? { ...(skipped || deviceSkipped), scenes: [], artifacts: [] } : isV2(config)
+      // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
+      ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
+      : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
+    const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
+    const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
+    const unmapped = isV2(config) ? [] : manifest.changes.filter(change => !change.mappings.length).map(change => change.path);
+    if (visual.status === 'PASS' && (missing.length || unmapped.length)) {
+      visual.status = 'FAIL'; visual.reason = `Changed prototype mappings lack visual coverage: ${[...missing, ...unmapped].join(', ')}`;
+    }
+    const artifactHashes = {};
+    for (const artifact of visual.artifacts ?? []) {
+      const relative = path.relative(await realpath(root), await realpath(artifact));
+      artifactHashes[relative] = hash(await readFile(await projectPath(root, relative)));
+    }
+    const after = await applicationFingerprint(root, config, target);
+    let versionIntact = true;
+    try { await loadVersion(root, config, manifest); } catch { versionIntact = false; }
+    const liveChanged = visual.prototypeSource === 'live' && (await snapshot(root, config)).hash !== manifest.afterHash;
+    const changedDuringVerification = before.hash !== after.hash || !versionIntact || liveChanged;
+    const hygiene = await applicationHygiene(root, after.files);
+    const checks = [build.status, functional.status, visual.status, hygiene.status];
+    const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
+    const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(visual.waivers?.length && { waivers: visual.waivers }), ...(deviceRecord && { devices: deviceRecord }), ...((environment || deviceSkipped) && status === 'NOT_RUN' && { reasonCode: 'environment', environment: environment ?? functional.environment }) };
+    // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
+    if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
+    return persist(root, 'verifications', record);
+  } finally { await releaseDevices?.(); }
 }
 export async function createReview(root, config, manifestId, verificationId) {
   // Pending review can preserve a failed/stale attempt; approval still checks freshness.

@@ -261,10 +261,12 @@ async function implement(root, config, stream, worktree, { snapshot, plan, manif
     Object.assign(record, { executionId: execution.id, executionStatus: execution.status, executor: provider });
     if (execution.status !== 'PASS') { failure = { executionId: execution.id, exitCode: execution.result.exitCode, reason: executionDiagnostic(execution).slice(-1000) }; record.status = 'FAIL'; await save(); continue; }
     executionIds.push(execution.id); failure = null;
-    report = await verifyVersion(worktree, config, manifestId, { target: stream ?? undefined, reverify: true, signal });
+    report = await verifyVersion(worktree, config, manifestId, { target: stream ?? undefined, reverify: true, signal, onDeviceWait: wait => onEvent(wait.acquired ? { event: 'issue-device-acquired', attempt, devices: wait.devices, waitedMs: wait.waitedMs } : { event: 'issue-device-wait', attempt, device: wait.device, holder: wait.holder }) });
     await reapLeftovers(root, worktree, record, 'verify', onEvent);
     Object.assign(record, { verificationId: report.id, verificationStatus: report.status });
     await onEvent({ event: 'issue-verified', attempt, verificationId: report.id, status: report.status });
+    // The machine, not the fix: another attempt cannot help (src/environment.js).
+    if (report.status === 'NOT_RUN' && report.reasonCode === 'environment') { record.status = 'NOT_RUN'; await save(); return { status: 'BLOCKED', reason: `Verification ${report.id} cannot run in this environment (${report.environment.phase}): ${report.environment.line}; fix the machine, then hand the issue back` }; }
     if (report.status !== 'PASS') { record.status = 'FAIL'; await save(); continue; }
     // The plan's tests are part of the fix: a change that adds or edits no test file is repaired, not delivered.
     const changed = [...(await git(worktree, ['diff', '--name-only', 'HEAD'])).split('\n'), ...(await git(worktree, ['ls-files', '--others', '--exclude-standard'])).split('\n')].filter(Boolean);

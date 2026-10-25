@@ -204,6 +204,20 @@ test('a version the planner handed to a person takes an answer with the retry', 
   } finally { await server.close(); await blocked.cleanup(); }
 });
 
+test('a verification waiting for a simulator another project drives says so on the project and in the overview', async ({ page }) => {
+  const waiting = await dashboardFixture({ deviceWait: { device: 'ProtoFlow iPhone 17', holder: { project: 'siyue', target: 'ios', manifestId: 'git-siyue', phase: 'visual' }, phase: 'functional', since: new Date(Date.now() - 90000).toISOString() } });
+  await addProject(waiting.root, { home: waiting.home });
+  const server = createDashboardServer({ home: waiting.home, port: 0, service: false, pollMs: 200 });
+  const base = await server.listen();
+  try {
+    await page.goto(base);
+    await expect(page.locator('.strip small')).toContainText('等待模擬器（被 siyue/ios 使用）');
+    await page.goto(`${base}#/p/${await projectId(waiting.root)}`);
+    await expect(page.locator('.track li.now')).toHaveText('驗收');
+    await expect(page.locator('.lane-name span')).toContainText('等待模擬器（被 siyue/ios 使用）');
+  } finally { await server.close(); await waiting.cleanup(); }
+});
+
 test('the inbox gathers what waits across projects, most urgent first, with the fix for a known failure', async ({ page, context }) => {
   const blocked = await dashboardFixture({ blockedError: 'Claude execution FAIL (EXEC-fixture, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed', blockedAt: new Date(Date.now() - 2 * 3600000 - 300000).toISOString() });
   await addProject(blocked.root, { home: blocked.home });
