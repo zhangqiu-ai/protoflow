@@ -1631,6 +1631,76 @@ test('single target: runner rebase retires a delivery built on a moved base and 
   assert.equal(source.entries[0].deliveryId, fresh.id);
 });
 
+test('single target: the work of a version reopened after its delivery was rejected moves onto a base people moved outside it, keeping every file', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-083\n');
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
+  const state = await deliveryStatus(f.root), rejected = state.deliveries[0];
+  // An unsettled delivery still binds the worktree: nothing moves.
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config, f.root), error => error.code === 'BASE_MOVED' && /1 commit\(s\) not in the base/.test(error.message));
+  // The reviewer rejected it and the version reopened for repair (synthetic revocation of an unpublished delivery).
+  rejected.revocation = { at: new Date().toISOString(), previousStatus: rejected.status, versions: [], rejections: [{ reviewId: 'REV-fixture' }] };
+  rejected.status = 'REVOKED';
+  await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state);
+  const delivered = await fs.readFile(path.join(f.worktree, 'app/index.html'), 'utf8');
+  await fs.writeFile(path.join(f.worktree, 'app/repair.txt'), 'repair in progress\n');
+  // Without the project root (older callers) the rule is unchanged.
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config), error => error.code === 'BASE_MOVED');
+  // The base changed a file the worktree also changed, to other content: it stays blocked and names the file.
+  await fs.mkdir(path.join(f.worktree, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(f.worktree, 'docs/human.md'), 'local\n');
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config, f.root), error => error.code === 'BASE_MOVED' && /files the base also changed \(docs\/human\.md\)/.test(error.message));
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), rejected.commit);
+  // The same content as the base (e.g. a config edit runner configure wrote) is not in the way.
+  await fs.writeFile(path.join(f.worktree, 'docs/human.md'), 'TASK-083\n');
+
+  const aligned = await alignWorktreeToBase(f.worktree, f.config, f.root);
+  assert.deepEqual([aligned.from, aligned.to, aligned.carried.commits, aligned.carried.deliveries, aligned.carried.files], [rejected.commit, human, 1, [rejected.id], 1]);
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
+  // Every file the worktree carried stays; the rejected commit is no longer in the history a delivery would publish.
+  assert.equal(await fs.readFile(path.join(f.worktree, 'app/index.html'), 'utf8'), delivered);
+  assert.equal(await fs.readFile(path.join(f.worktree, 'app/repair.txt'), 'utf8'), 'repair in progress\n');
+  assert.equal(await fs.readFile(path.join(f.worktree, 'docs/human.md'), 'utf8'), 'TASK-083\n');
+  await assert.rejects(git(f.worktree, 'merge-base', '--is-ancestor', rejected.commit, 'HEAD'));
+  const status = (await git(f.worktree, 'status', '--porcelain', '--untracked-files=all')).split('\n').filter(line => !/\.protoflow\//.test(line));
+  assert.ok(status.some(line => line.endsWith('app/index.html')) && status.some(line => line.endsWith('app/repair.txt')), status.join('\n'));
+  assert.ok(!status.some(line => line.endsWith('docs/human.md')), status.join('\n'));
+  // Nothing is lost: the archive holds the rejected commit and the uncommitted repair.
+  assert.equal(await git(f.worktree, 'rev-parse', `${aligned.carried.archive}^`), rejected.commit);
+  assert.equal(await git(f.worktree, 'show', `${aligned.carried.archive}:app/repair.txt`), 'repair in progress');
+  // The base is in the worktree now: the next check passes without moving anything.
+  assert.equal(await alignWorktreeToBase(f.worktree, f.config, f.root), null);
+});
+
+test('single target: the runner carries a rejected delivery\'s work onto a moved base and runs the version instead of blocking', async t => {
+  const f = await fixture(t, { versions: 2 }); f.config.policy.autoApprove = true;
+  const worktree = path.join(await fs.realpath(f.root), '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
+  await git(f.root, 'worktree', 'move', f.worktree, worktree);
+  f.config.adapters.codex = { command: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutMs: 10000 } };
+  await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
+  const source = await sourceStatus(f.root), { sha, manifestId, ordinal } = source.entries[1];
+  source.entries[1] = { sha, manifestId, ordinal, status: 'PENDING', attempts: [] }; await saveSourceState(f.root, source);
+  for (const dir of [f.root, worktree]) await fs.rm(path.join(dir, '.protoflow/verifications/VER-2.json'));
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  await git(worktree, 'push', '-q', f.remote, 'HEAD:main');
+  // Version 2's delivery was committed, rejected and revoked before it was published (synthetic record).
+  await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>v2 rejected</main>\n');
+  await git(worktree, 'add', 'app/index.html'); await git(worktree, 'commit', '-q', '-m', 'FAKE rejected delivery');
+  const commit = await git(worktree, 'rev-parse', 'HEAD');
+  const state = await deliveryStatus(f.root);
+  state.deliveries.push({ id: 'DLV-rejected', status: 'REVOKED', commit, versions: [manifestId], revocation: { at: new Date().toISOString(), previousStatus: 'BLOCKED', versions: [], rejections: [{ reviewId: 'REV-fixture' }] } });
+  await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), state);
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-084\n');
+  const events = [];
+  const result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
+  assert.notEqual(result.reasonCode, 'base-moved', JSON.stringify(result));
+  const aligned = events.find(event => event.event === 'base-aligned');
+  assert.deepEqual([aligned.from, aligned.to, aligned.carried.deliveries], [commit, human, ['DLV-rejected']], JSON.stringify(events));
+  assert.ok(!events.some(event => event.event === 'base-moved'));
+  assert.equal(await git(worktree, 'rev-parse', 'HEAD'), human);
+  assert.equal(await fs.readFile(path.join(worktree, 'app/index.html'), 'utf8'), '<main>v2 rejected</main>\n');
+});
+
 test('single target: after runner rebase the restarted version executes again on the new base instead of recovering its pre-rebase PASS', async t => {
   const f = await fixture(t); f.config.policy.autoApprove = true;
   const { versionQueue } = await import('../src/queue.js');
