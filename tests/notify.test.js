@@ -7,6 +7,7 @@ test('a blocked version, a blocked issue fix and an issue for a maintainer reach
   assert.deepEqual(blocked, { title: 'ProtoFlow · siyue · mobile', subtitle: '版本阻塞：環境問題（登入、網路或建置環境），修好後重試', message: 'Claude execution cannot run in this environment: OAuth token has expired' });
   assert.equal(notificationFor({ event: 'blocked', reasonCode: 'stalled', reason: 'x' }, 'app').subtitle, '版本阻塞：修復沒有進展');
   assert.equal(notificationFor({ event: 'blocked', reasonCode: 'base-moved', reason: 'x' }, 'app').subtitle, '版本阻塞：基底分支已移動');
+  assert.equal(notificationFor({ event: 'blocked', reasonCode: 'operator-action', reason: 'x' }, 'app').subtitle, '版本阻塞：需要操作員修改執行代理不能改的檔案');
   assert.equal(notificationFor({ event: 'blocked', reasonCode: null, reason: 'x' }, 'app').subtitle, '版本阻塞：需要處理');
   assert.equal(notificationFor({ event: 'issue-blocked', reason: 'tests fail' }, 'app').subtitle, 'Issue 修復阻塞');
   assert.equal(notificationFor({ event: 'issue-triaged', number: 7, status: 'needs-human' }, 'app').subtitle, 'Issue #7 需要人決定');

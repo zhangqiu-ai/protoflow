@@ -1587,7 +1587,90 @@ test('repair rounds that do not reduce the failures block as stalled before the 
   await configureRunner(root, config);
   await retryRunner(root, config);
   const exhausted = await runOnce(root, config);
-  assert.equal(exhausted.reasonCode, 'repair-limit'); assert.match(exhausted.reason, /Repair limit exhausted \(3\)/);
+  assert.equal(exhausted.reasonCode, 'repair-limit'); assert.match(exhausted.reason, /Repair limit exhausted \(3\): VER-\S+ still fails build/);
+});
+
+test('an executor that names files only the operator may change blocks the version as operator-action instead of spending the repair attempts', async t => {
+  const { root, config } = await fixture(t);
+  // The executor cannot fix the build script it may not change; it says so in the file the Context Package names.
+  const claim = JSON.stringify({ actions: [{ path: 'scripts/build-chat.mjs', change: 'also copy ai.html and ai.css into .protoflow/site', reason: 'tests/ai-briefing.spec.js:121 reads .protoflow/site/ai.html' }] });
+  config.adapters.codex.command.argv = [process.execPath, '-e', `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);const fs=require('node:fs');fs.mkdirSync('.protoflow/operator-actions',{recursive:true});fs.writeFileSync(r.operatorActions,process.argv[1])})`, claim];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', `console.log("  1) [chromium] › tests/ai-briefing.spec.js:121:3 › AI briefing");console.log("    Error: ENOENT: no such file or directory, open '.protoflow/site/ai.html'");process.exit(1)`] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'operator-action'], JSON.stringify(result));
+  assert.match(result.reason, /^Operator action required after attempt 0: the executor may not change scripts\/build-chat\.mjs\. scripts\/build-chat\.mjs: also copy ai\.html/);
+  assert.match(result.reason, /VER-\S+ still fails functional[^(]*\(functional: 1\) \[chromium\] › tests\/ai-briefing\.spec\.js:121:3 › AI briefing — Error: ENOENT: no such file or directory, open '\.protoflow\/site\/ai\.html'\)/);
+  assert.match(result.reason, /runner retry$/);
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'repair', 'verified', 'operator-action', 'blocked'].includes(event)), ['execute', 'verified', 'operator-action', 'blocked']);
+  assert.equal(events.find(event => event.event === 'operator-action').actions[0].path, 'scripts/build-chat.mjs');
+  assert.equal(events.at(-1).reasonCode, 'operator-action');
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1, 'no repair attempt was spent'); assert.equal(entry.reasonCode, 'operator-action');
+  assert.equal(entry.attempts[0].operatorActions[0].change, 'also copy ai.html and ai.css into .protoflow/site');
+});
+
+test('an executor that edits protoflow.config.json has the edit reverted and the version blocked as operator-action before verification', async t => {
+  const { root, config } = await fixture(t);
+  // The executor adds a spec to the functional argv; verification would run the bound argv and deliver the edit unverified.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const fs=require('node:fs');const c=JSON.parse(fs.readFileSync('protoflow.config.json','utf8'));c.verification.functional.argv.push('e2e/board.spec.ts');fs.writeFileSync('protoflow.config.json',JSON.stringify(c,null,2))`];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'operator-action'], JSON.stringify(result));
+  assert.match(result.reason, /^Operator action required after attempt 0: the executor edited protoflow\.config\.json \(verification\.functional\.argv: \[.*\] → \[.*"e2e\/board\.spec\.ts"\]\); verification uses the configuration bound by runner configure/);
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'verified', 'operator-config-reverted', 'operator-action', 'blocked'].includes(event)), ['execute', 'operator-config-reverted', 'operator-action', 'blocked']);
+  const worktree = events.find(event => event.event === 'execute').worktree;
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(worktree, 'protoflow.config.json'), 'utf8')).verification.functional.argv, config.verification.functional.argv, 'the edit is not left for delivery');
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1); assert.equal(entry.attempts[0].operatorActions[0].path, 'protoflow.config.json');
+  assert.equal(entry.attempts[0].configReverted.changes[0].path, 'verification.functional.argv');
+});
+
+test('an executor that only reformats protoflow.config.json has the bytes restored and the version goes on', async t => {
+  const { root, config } = await fixture(t);
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const fs=require('node:fs');fs.writeFileSync('protoflow.config.json',JSON.stringify(JSON.parse(fs.readFileSync('protoflow.config.json','utf8')),null,4))`];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.notEqual(result.reasonCode, 'operator-action', JSON.stringify(result));
+  assert.deepEqual(events.find(event => event.event === 'operator-config-reverted').changes, []);
+  assert.ok(events.some(event => event.event === 'verified'));
+  const worktree = events.find(event => event.event === 'execute').worktree;
+  assert.equal(await fs.readFile(path.join(worktree, 'protoflow.config.json'), 'utf8'), JSON.stringify(config));
+});
+
+test('configChanges lists changed leaves and compares arrays whole', async () => {
+  const { configChanges } = await import('../src/runner.js');
+  assert.deepEqual(configChanges({ a: 1, v: { f: { argv: ['x'] } } }, { a: 1, v: { f: { argv: ['x', 'y'] } }, b: true }), [{ path: 'v.f.argv', from: ['x'], to: ['x', 'y'] }, { path: 'b', from: undefined, to: true }]);
+  assert.deepEqual(configChanges({ a: 1 }, { a: 1 }), []);
+  assert.deepEqual(configChanges({ a: 1 }, undefined), [{ path: '(file)', from: { a: 1 }, to: undefined }]);
+});
+
+test('an operator-action claim is read from its context file, trimmed, and ignored when it names only files the executor may deliver', async t => {
+  const { operatorActionClaim } = await import('../src/runner.js');
+  const worktree = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-operator-'));
+  t.after(() => fs.rm(worktree, { recursive: true, force: true }));
+  const write = async value => { await fs.mkdir(path.join(worktree, '.protoflow/operator-actions'), { recursive: true }); await fs.writeFile(path.join(worktree, '.protoflow/operator-actions/CTX-1.json'), JSON.stringify(value)); };
+  assert.equal(await operatorActionClaim({}, worktree, 'CTX-1'), null, 'no file, no claim');
+  assert.equal(await operatorActionClaim({}, worktree, '../CTX-1'), null);
+  await write({ actions: [{ path: '  ', change: 'x' }, { path: 'scripts/build.mjs' }, 'nonsense'] });
+  assert.equal(await operatorActionClaim({}, worktree, 'CTX-1'), null, 'an action needs a path and what or why');
+  await write({ actions: [{ path: 'scripts/build.mjs', change: 'copy\n  ai.html', reason: null }] });
+  assert.deepEqual(await operatorActionClaim({}, worktree, 'CTX-1'), { actions: [{ path: 'scripts/build.mjs', change: 'copy ai.html', reason: null }] });
+  const scoped = { runner: { delivery: { paths: ['app', 'tests'] } } };
+  assert.deepEqual(await operatorActionClaim(scoped, worktree, 'CTX-1'), { actions: [{ path: 'scripts/build.mjs', change: 'copy ai.html', reason: null }] });
+  await write({ actions: [{ path: 'app/index.html', change: 'x' }, { path: 'tests', reason: 'y' }] });
+  assert.equal((await operatorActionClaim(scoped, worktree, 'CTX-1')).ignored.length, 2, 'the executor may change these itself');
 });
 
 test('progress is a lower failure count than the round before; equal, superset and swapped failures are not', async () => {

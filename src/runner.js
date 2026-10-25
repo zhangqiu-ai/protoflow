@@ -296,6 +296,42 @@ export async function requestEngineLimitWaivers(root, config, worktree, { entry,
   }
   return requested;
 }
+/**
+ * The executor's claim that a failing check can only be fixed in files it may not change (.protoflow/operator-actions/
+ * <context>.json). The claim only ever stops the runner for a person, so it is taken as is; with runner.delivery.paths,
+ * a claim naming only files the executor may deliver is not one and is ignored.
+ */
+export async function operatorActionClaim(config, worktree, contextId) {
+  if (!/^CTX-[A-Za-z0-9-]+$/.test(contextId ?? '')) return null;
+  const claim = await readJson(await projectPath(worktree, `.protoflow/operator-actions/${contextId}.json`), null).catch(() => null);
+  const text = (value, limit) => typeof value === 'string' && value.trim() ? value.trim().replace(/\s+/g, ' ').slice(0, limit) : null;
+  const actions = (Array.isArray(claim?.actions) ? claim.actions : []).map(item => ({ path: text(item?.path, 300), change: text(item?.change, 500), reason: text(item?.reason, 1000) }))
+    .filter(item => item.path && (item.change || item.reason)).slice(0, 10);
+  if (!actions.length) return null;
+  const paths = config.runner?.delivery?.paths;
+  const deliverable = file => paths?.some(prefix => file === prefix || file.startsWith(`${prefix}/`));
+  if (paths && actions.every(item => deliverable(item.path))) return { ignored: actions };
+  return { actions };
+}
+/** Where a failed verification failed, for a reason a person reads: its checks, the first failing test and its error. */
+/** What an edit changed in the operator's configuration, leaf by leaf; arrays (argv) compare whole. */
+export function configChanges(before, after, prefix = '') {
+  const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!plain(before) || !plain(after)) return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ path: prefix || '(file)', from: before, to: after }];
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap(key => configChanges(before[key], after[key], prefix ? `${prefix}.${key}` : key));
+}
+const describeChange = ({ path: key, from, to }) => {
+  const show = value => value === undefined ? '(none)' : JSON.stringify(value).slice(0, 200);
+  return `${key}: ${show(from)} → ${show(to)}`;
+};
+function failureSummary(report, failed) {
+  const keys = `${report.id} still fails ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ` and ${failed.length - 8} more` : ''}`;
+  const output = report.functional?.status && report.functional.status !== 'PASS' ? `${report.functional.stdout ?? ''}\n${report.functional.stderr ?? ''}` : '';
+  const lines = output.split('\n').map(item => item.trim());
+  // A test runner names the failing test (Playwright `1) [project] › file:line`) and then its error.
+  const line = [lines.find(item => /^\d+\) /.test(item)), lines.find(item => /^\w*Error\b.*:|\bENOENT\b/.test(item))].filter(Boolean).join(' — ');
+  return line ? `${keys} (functional: ${line.slice(0, 400)})` : keys;
+}
 const MAX_REVIEW_ATTEMPTS = 6;
 /**
  * Under policy.autoApprove the runner settles a blocked delivery the way an operator would, without weakening a gate:
@@ -559,6 +595,9 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
 
       // What this attempt's executor changes, so a build that fails for the machine can be told from one it broke.
       const projectBefore = await applicationFingerprint(runner.worktree, config, target);
+      // Verification runs the configuration runner configure bound; an executor's edit to it would be delivered unverified.
+      const configFile = await projectPath(runner.worktree, 'protoflow.config.json');
+      const configBefore = await fs.readFile(configFile, 'utf8').catch(() => null);
       // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
       const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
       let execution, diagnostic = '', executionContext = context;
@@ -607,6 +646,23 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
       }
+      const configAfter = await fs.readFile(configFile, 'utf8').catch(() => null);
+      if (configBefore !== null && configAfter !== configBefore) {
+        await fs.writeFile(configFile, configBefore);
+        const parse = text => { if (text === null) return undefined; try { return JSON.parse(text); } catch { return '<invalid JSON>'; } };
+        const changes = configChanges(parse(configBefore), parse(configAfter));
+        record.configReverted = { changes: changes.slice(0, 20), at: new Date().toISOString() };
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'operator-config-reverted', sha: entry.sha, manifestId: entry.manifestId, attempt, changes: changes.slice(0, 20) });
+        if (changes.length) {
+          const edits = changes.slice(0, 5).map(describeChange).join('; ') + (changes.length > 5 ? `; and ${changes.length - 5} more` : '');
+          const claim = await operatorActionClaim(config, runner.worktree, record.contextId);
+          record.operatorActions = [{ path: 'protoflow.config.json', change: edits.slice(0, 500), reason: 'the executor edited the operator configuration; verification uses the configuration bound by runner configure, so the edit was reverted and is not delivered' }, ...(claim?.actions ?? [])].slice(0, 10);
+          await saveProgress(root, config, stream, state);
+          await onEvent({ event: 'operator-action', sha: entry.sha, manifestId: entry.manifestId, attempt, actions: record.operatorActions });
+          throw failure(`Operator action required after attempt ${attempt}: the executor edited protoflow.config.json (${edits}); verification uses the configuration bound by runner configure, so the edit was reverted and will not be delivered. Make the change yourself and run runner configure (or drop the requirement), then runner retry`, 'operator-action');
+        }
+      }
       if (execution.status !== 'PASS') {
         const reason = `${provider === 'claude' ? 'Claude' : 'Codex'} execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;
         if (attempt >= maximum) throw failure(reason, 'execution', diagnostic);
@@ -629,6 +685,16 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
       await waiverEvents(entry, report, onEvent);
       if (report.status === 'FAIL') await requestEngineLimitWaivers(root, config, runner.worktree, { entry, record, report, previous, onEvent });
+      if (report.status === 'FAIL') {
+        const claim = await operatorActionClaim(config, runner.worktree, record.contextId);
+        if (claim?.ignored) await onEvent({ event: 'operator-action-ignored', sha: entry.sha, manifestId: entry.manifestId, attempt, actions: claim.ignored, reason: 'every named file is inside runner.delivery.paths, which the executor may change' });
+        if (claim?.actions) {
+          record.operatorActions = claim.actions; await saveProgress(root, config, stream, state);
+          await onEvent({ event: 'operator-action', sha: entry.sha, manifestId: entry.manifestId, attempt, verificationId: report.id, actions: claim.actions });
+          const asked = claim.actions.map(item => `${item.path}: ${item.change ?? item.reason}${item.change && item.reason ? ` (${item.reason})` : ''}`).join('; ');
+          throw failure(`Operator action required after attempt ${attempt}: the executor may not change ${claim.actions.map(item => item.path).join(', ')}. ${asked}. ${failureSummary(report, failureKeys(report))}; change these files (or the requirement), then runner retry`, 'operator-action');
+        }
+      }
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (report.status === 'PASS') break;
       if (report.status === 'NOT_RUN' && report.reasonCode === 'environment') {
@@ -646,10 +712,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       failureCounts.push(failed.length);
       const rounds = stalledRounds(failureCounts);
       if (stallRounds > 0 && rounds >= stallRounds && attempt < maximum) {
-        throw failure(`Repair made no progress: ${rounds} rounds in a row did not reduce the failures (${failureCounts.slice(-rounds - 1).join(' → ')}); ${report.id} still fails ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ` and ${failed.length - 8} more` : ''}`, 'stalled');
+        throw failure(`Repair made no progress: ${rounds} rounds in a row did not reduce the failures (${failureCounts.slice(-rounds - 1).join(' → ')}); ${failureSummary(report, failed)}`, 'stalled');
       }
     }
-    if (report?.status !== 'PASS') throw failure(`Repair limit exhausted (${config.policy?.maxRepairAttempts ?? 3})`, 'repair-limit');
+    if (report?.status !== 'PASS') throw failure(`Repair limit exhausted (${config.policy?.maxRepairAttempts ?? 3})${report ? `: ${failureSummary(report, failureKeys(report))}` : ''}`, 'repair-limit');
     await exportEvidence(root, runner.worktree, report);
     entry.status = 'PASS'; entry.verificationId = report.id; entry.completedAt = new Date().toISOString(); entry.error = null; delete entry.reasonCode; delete entry.blockedAt;
     state.completedSha = entry.sha; runner.status = 'IDLE'; runner.current = null;

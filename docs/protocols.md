@@ -29,6 +29,7 @@ repair → READY_FOR_REVIEW | NEEDS_REVIEW
 ├── artifacts/<WVR-id>/      # 豁免申請時複製的場景截圖
 ├── waivers/<WVR-id>.json    # 維護者豁免（正本在專案根目錄；runner 驗收前複製到 worktree）
 ├── engine-limits/<CTX-id>.json # 修復代理標示的引擎限制（在 runner worktree）
+├── operator-actions/<CTX-id>.json # 執行代理宣告需要操作員修改的檔案（在 runner worktree）
 ├── reviews/<id>.json        # 人工決定、finding、證據綁定
 ├── repairs/<id>.json        # bounded attempts, blockingReason
 └── baselines/
