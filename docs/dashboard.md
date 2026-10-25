@@ -65,7 +65,7 @@ protoflow dashboard serve [--port 7420]
 | 豁免待核准 | 有 `requested` 的維護者豁免（CLI 申請，或 runner 依修復代理標示的引擎限制自動申請） | 核准豁免／拒絕 | 卡片附那次驗收的原型與 App 截圖（申請時複製到 `.protoflow/artifacts/<WVR-id>/`）、原因、引擎問題與發現全文；`dashboard.reviewer` 必須列在 `policy.waivers.reviewers`。核准寫入 `waiverHash`，綁定 target、場景、變體、層級、版本的 `manifestHash` 與發現；下一次驗收發現仍是子集時才套用 |
 | 撤回豁免 | 「維護者豁免」區塊裡已核准的豁免 | 撤回 | 豁免改為 `revoked`，下一次驗收不再套用；已經用它通過的驗收保留原紀錄 |
 | 審查未過 | 交付被獨立審查判為 FAIL 並附發現（沒有 `policy.autoApprove` 的專案；有開的專案由 runner 自動退回，退回超過 3 次才交給人） | 退回重修 | 以 `dashboard.reviewer` 的名字對該版驗收記錄人工「要求修改」（`changes_requested`），帶上審查的發現；Runner 下一輪重開版本、撤回被否決的交付，執行代理帶著發現修復。被否決的版本不再出現在「版本待人工核准」 |
-| 版本阻塞 | 目前版本 BLOCKED | 重試 | `runner retry`（先處理阻塞原因） |
+| 版本阻塞 | 目前版本 BLOCKED | 重試；規劃者要人決定（`needs-human`）時另有回答欄與「回答並重試」 | `runner retry`（先處理阻塞原因）；回答以 `runner retry --answer` 的方式記錄，`by` 為 `dashboard.reviewer`，規劃者重新規劃時讀到 |
 
 重試、退回重修與 Issue 的三個操作都要等 Runner 執行。操作當下沒有 Runner 在跑（服務未啟動，也沒有 5 分鐘內的心跳）時，結果會註明 `runner: "stopped"`，提示訊息改為「Runner 沒在跑，要等它啟動才會處理」並附啟動命令。這時串流的階段標「已停止（階段）」，不會顯示成仍在執行；「需要你」也會多一張「Runner 沒在跑」卡片，列出哪些 target 有版本在等，並附啟動步驟。
 

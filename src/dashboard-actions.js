@@ -166,8 +166,10 @@ async function waiverDecision(root, config, status, { waiverId, notes = '' }) {
   return { status: 'PASS', waiverId: decided.id, waiver: decided.status, reviewer, ...(decided.decision?.waiverHash && status === 'approved' && { waiverHash: decided.decision.waiverHash }), next: status === 'approved' ? 'The next verification of this version applies the waiver while its findings stay the same' : status === 'revoked' ? 'The next verification no longer applies the waiver; verifications that already used it keep their record' : 'The version keeps failing on these findings' };
 }
 
-async function retry(root, config, { target = null }) {
-  return withLock(root, () => retryRunner(root, config, { target }));
+async function retry(root, config, { target = null, answer = null }) {
+  // An answer to the planner's questions is recorded as the dashboard reviewer's; a plain retry needs no name.
+  const by = typeof answer === 'string' && answer.trim() ? await reviewerName(root, config) : null;
+  return withLock(root, () => retryRunner(root, config, { target, answer, via: 'dashboard', by }));
 }
 
 /** Run one dashboard action and record it, success or not. */

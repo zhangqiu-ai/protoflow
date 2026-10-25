@@ -1679,6 +1679,40 @@ test('an operator-action claim is read from its context file, trimmed, and ignor
   assert.deepEqual(await operatorActionClaim(scoped, worktree, 'CTX-1'), { actions: [{ path: 'scripts/build.mjs', change: 'copy ai.html', reason: null }] });
   await write({ actions: [{ path: 'app/index.html', change: 'x' }, { path: 'tests', reason: 'y' }] });
   assert.equal((await operatorActionClaim(scoped, worktree, 'CTX-1')).ignored.length, 2, 'the executor may change these itself');
+  // Like qiuge: verification runs outside the executor's sandbox, so asking to loosen the adapter's sandbox fixes nothing.
+  const sandbox = { path: 'protoflow.config.json', change: '由 operator 調整 adapters.codex.command 的執行環境，讓隔離測試可綁定 loopback', reason: 'listen EPERM 127.0.0.1' };
+  await write({ actions: [sandbox] });
+  assert.deepEqual(await operatorActionClaim({}, worktree, 'CTX-1'), { ignored: [{ ...sandbox, because: 'adapters' }] });
+  await write({ actions: [sandbox, { path: 'protoflow.config.json', change: 'add e2e/board.spec.ts to verification.functional.argv' }] });
+  assert.deepEqual(await operatorActionClaim({}, worktree, 'CTX-1'), { actions: [{ path: 'protoflow.config.json', change: 'add e2e/board.spec.ts to verification.functional.argv', reason: null }], ignored: [{ ...sandbox, because: 'adapters' }] });
+});
+
+test('an executor that asks to loosen its own sandbox is ignored: the version goes on to repair with the verification', async t => {
+  const { root, config } = await fixture(t);
+  const received = path.join(root, '..', 'repair-input.json');
+  // Attempt 0 cannot run the tests in its sandbox and asks the operator to change the adapter; attempt 1 fixes the app.
+  const claim = JSON.stringify({ actions: [{ path: 'protoflow.config.json', change: 'operator adds --network to adapters.codex.command.argv so Playwright can bind 127.0.0.1', reason: 'listen EPERM 127.0.0.1 in the executor sandbox' }] });
+  config.adapters.codex.command.argv = [process.execPath, '-e', `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);const fs=require('node:fs');if(r.kind==='repair'){fs.writeFileSync(process.argv[2],s);fs.writeFileSync('fixed.txt','yes');return}fs.mkdirSync('.protoflow/operator-actions',{recursive:true});fs.writeFileSync(r.operatorActions,process.argv[1])})`, claim, received];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', `if(require('node:fs').existsSync('fixed.txt'))process.exit(0);console.log("  1) [chromium] › e2e/board.spec.ts:12:3 › board");console.log("    Error: expect(locator).toBeVisible() failed");process.exit(1)`] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 1, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  // The fixture configures no visual check, so the repaired attempt ends NOT_RUN rather than PASS.
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'not-run'], JSON.stringify(result));
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'repair', 'verified', 'operator-action', 'operator-action-ignored', 'blocked'].includes(event)), ['execute', 'verified', 'operator-action-ignored', 'repair', 'verified', 'blocked']);
+  const ignored = events.find(event => event.event === 'operator-action-ignored');
+  assert.match(ignored.reason, /ProtoFlow verifies outside the executor's sandbox/); assert.equal(ignored.actions[0].because, 'adapters');
+  const input = JSON.parse(await fs.readFile(received, 'utf8'));
+  assert.equal(input.repair.verification.id, ignored.verificationId);
+  assert.match(input.repair.operatorActionsIgnored[0].change, /--network/);
+  const { executorPrompt } = await import('../src/executor-prompt.js');
+  assert.match(executorPrompt({ instructions: '' }, input), /Your previous attempt asked for such a change \(repair\.operatorActionsIgnored\); ProtoFlow ignored it/);
+  assert.match(executorPrompt({ instructions: '' }, { ...input, repair: null }), /a check you cannot run in your own sandbox \(it cannot bind a local port, start a browser or Electron, or reach the network\) is not an operator action/);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts[0].operatorActionsIgnored[0].because, 'adapters'); assert.equal(entry.attempts[0].operatorActions, undefined);
+  assert.ok(entry.attempts[0].failures.keys.includes('functional')); assert.ok(!entry.attempts[1].failures.keys.includes('functional'), 'the repair fixed functional');
 });
 
 test('progress is a lower failure count than the round before; equal, superset and swapped failures are not', async () => {
@@ -1815,12 +1849,72 @@ test('FAKE CLI only: a configured planner plans the version first; its plan reac
     } else if (name === 'needs-human') {
       assert.match(result.reason, /^Planner PLN-\S+ needs a person: FAKE FIXTURE PLAN Questions: Which backend\?/);
       await assert.rejects(fs.access(received), { code: 'ENOENT' }); assert.equal(entry.attempts.length, 0);
+      // A maintainer answers the planner's questions with the retry; the next plan reads the answer.
+      await assert.rejects(retryRunner(root, config, { answer: '  ' }), /--answer needs 1 to 4000 characters/);
+      await assert.rejects(retryRunner(root, { ...config, adapters: { codex: config.adapters.codex } }, { answer: 'Use the local backend' }), /adapters\.planner is not configured/);
+      assert.equal((await retryRunner(root, config, { answer: ' Use the local backend. ' })).answered, true);
+      assert.deepEqual((await sourceStatus(root)).entries[0].retries.at(-1).answer, { text: 'Use the local backend.', via: 'cli' });
+      const again = [];
+      await runOnce(root, config, { onEvent: event => again.push(event) });
+      const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${again.find(event => event.event === 'planned').planId}/request.json`), 'utf8'));
+      assert.deepEqual(request.data.previous.answers.map(answer => [answer.text, answer.via]), [['Use the local backend.', 'cli']]);
+      assert.match(request.instructions, /data\.previous\.answers are a maintainer's answers to your earlier questions/);
     } else {
       assert.match(events.find(event => event.event === 'plan-failed').reason, /did not return a plan run \(FAIL, exit 3\)/);
       assert.match(entry.planError.reason, /exit 3/); assert.equal(entry.planId, undefined);
       assert.doesNotMatch(await fs.readFile(received, 'utf8'), /"plan":|A planner \(proposal 0003\)/);
     }
   }
+});
+
+test('FAKE CLI only: the planner reads the last verification and a maintainer answer given from the dashboard', async t => {
+  const bridge = new URL('../scripts/claude-adapter.js', import.meta.url).pathname;
+  const plan = decision => JSON.stringify({ decision, level: 'L1', summary: 'FAKE FIXTURE PLAN', steps: ['Change the button label'], acceptanceCriteria: [{ id: 'AC1', text: 'The button reads Save', anchors: [], evidence: 'tier' }], tests: [], risks: [], questions: decision === 'implement' ? [] : ['Was the environment fixed?'] });
+  const saved = { mode: process.env.FAKE_CLAUDE_MODE, output: process.env.FAKE_CLAUDE_OUTPUT };
+  t.after(() => { for (const [key, value] of [['FAKE_CLAUDE_MODE', saved.mode], ['FAKE_CLAUDE_OUTPUT', saved.output]]) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  process.env.FAKE_CLAUDE_MODE = 'pass'; process.env.FAKE_CLAUDE_OUTPUT = plan('implement');
+  const { root, config } = await fixture(t);
+  const fakeClaude = path.join(root, '..', 'claude');
+  await fs.copyFile(new URL('./fixtures/fake-claude.cjs', import.meta.url), fakeClaude); await fs.chmod(fakeClaude, 0o755);
+  config.adapters.codex.command.argv = [process.execPath, '-e', 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0))'];
+  config.adapters.planner = { command: { argv: [process.execPath, bridge, '--claude', fakeClaude], timeoutMs: 30000 } };
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', 'console.log("  1) [chromium] › e2e/settings.spec.ts:40:3 › settings");console.log("    Error: expect(locator).toHaveText() failed");process.exit(1)'] } };
+  config.policy = { ...config.policy, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const first = await runOnce(root, config);
+  assert.equal(first.reasonCode, 'repair-limit', JSON.stringify(first));
+  const verificationId = (await sourceStatus(root)).entries[0].attempts[0].verificationId;
+
+  // The planner then asks a person; the dashboard card takes an answer, recorded as the dashboard reviewer's.
+  process.env.FAKE_CLAUDE_OUTPUT = plan('needs-human');
+  await retryRunner(root, config);
+  assert.equal((await runOnce(root, config)).reasonCode, 'needs-human');
+  const { dashboardSnapshot } = await import('../src/dashboard-data.js');
+  assert.equal((await dashboardSnapshot(root, { service: false })).attention.find(item => item.kind === 'blocked-version').canAnswer, true);
+  const { runAction } = await import('../src/dashboard-actions.js');
+  assert.equal((await runAction(root, { action: 'retry', answer: 'The operator will not change the codex sandbox; repair the failures of the last verification.' }, { service: false })).answered, true);
+  assert.deepEqual((await sourceStatus(root)).entries[0].retries.at(-1).answer, { text: 'The operator will not change the codex sandbox; repair the failures of the last verification.', via: 'dashboard', by: 'Fixture' });
+
+  const events = [];
+  await runOnce(root, config, { onEvent: event => events.push(event) });
+  const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${events.find(event => event.event === 'planned').planId}/request.json`), 'utf8'));
+  const last = request.data.previous.lastVerification;
+  assert.equal(last.id, verificationId); assert.equal(last.status, 'FAIL'); assert.ok(last.failures.includes('functional'));
+  assert.equal(last.functional.status, 'FAIL'); assert.match(last.functional.firstFailure, /^1\) \[chromium\] › e2e\/settings\.spec\.ts:40:3 › settings — Error: expect\(locator\)\.toHaveText\(\) failed$/);
+  assert.deepEqual(request.data.previous.answers.map(answer => [answer.via, answer.by]), [['dashboard', 'Fixture']]);
+  assert.match(request.instructions, /ProtoFlow runs verification itself, outside the executor's sandbox, with the operator's configuration: it is the authoritative result/);
+  assert.match(request.instructions, /data\.previous\.answers are a maintainer's answers/);
+});
+
+test('verificationBrief keeps the failing scenes, their failing tiers and reasons, within bounds', async () => {
+  const { verificationBrief } = await import('../src/runner.js');
+  assert.equal(verificationBrief(null), null);
+  const reasons = Array.from({ length: 10 }, (_, index) => `shell.account: x ${index}% vs 0%`);
+  const scene = (id, status) => ({ id, status, tiers: { structure: { status: 'PASS', reasons: [] }, layout: { status, reasons: status === 'PASS' ? [] : reasons } } });
+  const brief = verificationBrief({ id: 'VER-1', status: 'FAIL', build: { status: 'PASS' }, functional: { status: 'PASS' }, visual: { status: 'FAIL', scenes: [scene('settings.license', 'FAIL'), scene('shell.home', 'PASS'), ...Array.from({ length: 21 }, (_, index) => scene(`s${index}`, 'FAIL'))] } });
+  assert.deepEqual(brief.scenes[0], { id: 'settings.license', status: 'FAIL', tiers: { layout: { status: 'FAIL', reasons: reasons.slice(0, 8), more: 2 } } });
+  assert.equal(brief.scenes.length, 20); assert.equal(brief.moreScenes, 2); assert.deepEqual(brief.functional, { status: 'PASS' });
 });
 
 test('issue triage runs after the prototype streams and its failure never stops the runner', async t => {

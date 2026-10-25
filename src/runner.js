@@ -299,7 +299,9 @@ export async function requestEngineLimitWaivers(root, config, worktree, { entry,
 /**
  * The executor's claim that a failing check can only be fixed in files it may not change (.protoflow/operator-actions/
  * <context>.json). The claim only ever stops the runner for a person, so it is taken as is; with runner.delivery.paths,
- * a claim naming only files the executor may deliver is not one and is ignored.
+ * a claim naming only files the executor may deliver is not one and is ignored. Verification never runs through the
+ * agents' adapters, so an action asking to change them (to loosen the executor's own sandbox) cannot fix a check
+ * ProtoFlow verifies outside that sandbox: it is ignored and the version goes on to repair.
  */
 export async function operatorActionClaim(config, worktree, contextId) {
   if (!/^CTX-[A-Za-z0-9-]+$/.test(contextId ?? '')) return null;
@@ -310,9 +312,16 @@ export async function operatorActionClaim(config, worktree, contextId) {
   if (!actions.length) return null;
   const paths = config.runner?.delivery?.paths;
   const deliverable = file => paths?.some(prefix => file === prefix || file.startsWith(`${prefix}/`));
-  if (paths && actions.every(item => deliverable(item.path))) return { ignored: actions };
-  return { actions };
+  if (paths && actions.every(item => deliverable(item.path))) return { ignored: actions.map(item => ({ ...item, because: 'deliverable' })) };
+  const adapters = item => item.path === 'protoflow.config.json' && /\badapters\.[A-Za-z]/.test(item.change ?? item.reason);
+  const ignored = actions.filter(adapters).map(item => ({ ...item, because: 'adapters' })), kept = actions.filter(item => !adapters(item));
+  return { ...(kept.length && { actions: kept }), ...(ignored.length && { ignored }) };
 }
+const IGNORED_BECAUSE = {
+  deliverable: 'every named file is inside runner.delivery.paths, which the executor may change',
+  adapters: "it asks to change the agents' adapters; ProtoFlow verifies outside the executor's sandbox, so they cannot fix a check"
+};
+const ignoredReason = ignored => [...new Set(ignored.map(item => IGNORED_BECAUSE[item.because]))].join('; ');
 /** Where a failed verification failed, for a reason a person reads: its checks, the first failing test and its error. */
 /** What an edit changed in the operator's configuration, leaf by leaf; arrays (argv) compare whole. */
 export function configChanges(before, after, prefix = '') {
@@ -326,11 +335,35 @@ const describeChange = ({ path: key, from, to }) => {
 };
 function failureSummary(report, failed) {
   const keys = `${report.id} still fails ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ` and ${failed.length - 8} more` : ''}`;
+  const line = functionalFailure(report);
+  return line ? `${keys} (functional: ${line})` : keys;
+}
+function functionalFailure(report) {
   const output = report.functional?.status && report.functional.status !== 'PASS' ? `${report.functional.stdout ?? ''}\n${report.functional.stderr ?? ''}` : '';
   const lines = output.split('\n').map(item => item.trim());
   // A test runner names the failing test (Playwright `1) [project] › file:line`) and then its error.
-  const line = [lines.find(item => /^\d+\) /.test(item)), lines.find(item => /^\w*Error\b.*:|\bENOENT\b/.test(item))].filter(Boolean).join(' — ');
-  return line ? `${keys} (functional: ${line.slice(0, 400)})` : keys;
+  return [lines.find(item => /^\d+\) /.test(item)), lines.find(item => /^\w*Error\b.*:|\bENOENT\b/.test(item))].filter(Boolean).join(' — ').slice(0, 400) || null;
+}
+/**
+ * A version's last verification, briefly, for its planner: the checks that failed, the first failing test and each
+ * failing scene's failing tiers with their reasons. The runner verifies outside the executor's sandbox, so this, not
+ * what the executor could run itself, is the version's result.
+ */
+export function verificationBrief(report) {
+  if (!report?.id) return null;
+  const scenes = (report.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS');
+  const section = name => report[name]?.status ? { status: report[name].status } : null;
+  return {
+    id: report.id, status: report.status, failures: failureKeys(report).slice(0, 40),
+    build: section('build'), hygiene: section('hygiene'),
+    functional: report.functional?.status ? { status: report.functional.status, ...(report.functional.timedOut && { timedOut: true }), ...(report.functional.status !== 'PASS' && { firstFailure: functionalFailure(report), error: report.functional.error?.slice(0, 300) ?? null }) } : null,
+    scenes: scenes.slice(0, 20).map(scene => ({
+      id: scene.id, ...(scene.variant && { variant: scene.variant }), status: scene.status,
+      tiers: Object.fromEntries(Object.entries(scene.tiers ?? {}).filter(([, tier]) => tier?.status && tier.status !== 'PASS')
+        .map(([name, tier]) => [name, { status: tier.status, reasons: (tier.reasons ?? []).slice(0, 8).map(reason => String(reason).slice(0, 300)), ...(tier.reasons?.length > 8 && { more: tier.reasons.length - 8 }) }]))
+    })),
+    ...(scenes.length > 20 && { moreScenes: scenes.length - 20 })
+  };
 }
 const MAX_REVIEW_ATTEMPTS = 6;
 /**
@@ -568,7 +601,15 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       const planning = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
       // A version that runs again (blocked, reopened by a rejection) is replanned with its earlier plan as evidence.
       const earlier = entry.planId && /^PLN-[A-Za-z0-9-]+$/.test(entry.planId) ? await readJson(await projectPath(runner.worktree, `.protoflow/plans/${entry.planId}.json`), null) : null;
-      const previous = earlier ? { id: earlier.id, summary: earlier.plan.summary, steps: earlier.plan.steps, acceptanceCriteria: earlier.plan.acceptanceCriteria, attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null } : null;
+      // So is its last verification, and what a maintainer answered with runner retry --answer.
+      const verified = entry.attempts.findLast(attempt => /^VER-[A-Za-z0-9-]+$/.test(attempt.verificationId ?? ''));
+      const lastVerification = verified ? verificationBrief(await readJson(await projectPath(runner.worktree, `.protoflow/verifications/${verified.verificationId}.json`), null)) : null;
+      const answers = (entry.retries ?? []).filter(retry => retry.answer?.text).slice(-5).map(retry => ({ text: retry.answer.text, at: retry.at, via: retry.answer.via, ...(retry.answer.by && { by: retry.answer.by }) }));
+      const previous = earlier || lastVerification || answers.length ? {
+        ...(earlier && { id: earlier.id, summary: earlier.plan.summary, steps: earlier.plan.steps, acceptanceCriteria: earlier.plan.acceptanceCriteria }),
+        attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null,
+        ...(lastVerification && { lastVerification }), ...(answers.length && { answers })
+      } : null;
       try { plan = await planVersion(runner.worktree, config, planning, { previous, signal }); }
       catch (error) {
         if (!error.planner) throw error;
@@ -583,6 +624,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       }
     }
     const stallRounds = config.policy?.stallRounds ?? 2, failureCounts = [];
+    let ignoredClaim = null;
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
@@ -605,7 +647,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }) } : null, signal,
+          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -673,7 +715,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         await onEvent({ event: 'execute-failed', sha: entry.sha, manifestId: entry.manifestId, attempt, reason: reason.slice(0, 300) });
         continue;
       }
-      executionFailure = null;
+      executionFailure = null; ignoredClaim = null;
       const previous = report;
       await shareWaivers(root, runner.worktree);
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
@@ -687,7 +729,11 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       if (report.status === 'FAIL') await requestEngineLimitWaivers(root, config, runner.worktree, { entry, record, report, previous, onEvent });
       if (report.status === 'FAIL') {
         const claim = await operatorActionClaim(config, runner.worktree, record.contextId);
-        if (claim?.ignored) await onEvent({ event: 'operator-action-ignored', sha: entry.sha, manifestId: entry.manifestId, attempt, actions: claim.ignored, reason: 'every named file is inside runner.delivery.paths, which the executor may change' });
+        if (claim?.ignored) {
+          record.operatorActionsIgnored = claim.ignored; await saveProgress(root, config, stream, state);
+          if (!claim.actions) ignoredClaim = claim.ignored.map(item => ({ path: item.path, change: item.change, reason: IGNORED_BECAUSE[item.because] }));
+          await onEvent({ event: 'operator-action-ignored', sha: entry.sha, manifestId: entry.manifestId, attempt, verificationId: report.id, actions: claim.ignored, reason: ignoredReason(claim.ignored) });
+        }
         if (claim?.actions) {
           record.operatorActions = claim.actions; await saveProgress(root, config, stream, state);
           await onEvent({ event: 'operator-action', sha: entry.sha, manifestId: entry.manifestId, attempt, verificationId: report.id, actions: claim.actions });
@@ -897,7 +943,14 @@ export async function rebaseRunner(root, config = {}, { target = null } = {}) {
   await recordEvent(root, { at: result.at, event: 'rebased', target, from: result.from, to: result.to, archive: result.archive, deliveries: result.deliveries, versions: result.versions });
   return { status: 'PASS', ...result, next: 'runner start' };
 }
-export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false } = {}) {
+/**
+ * Put the blocked or interrupted current version back in the queue. `answer` is a maintainer's answer to the planner's
+ * questions (a needs-human block): it is kept in `retries` and reaches the planner with the version's next plan.
+ */
+export async function retryRunner(root, config = {}, { target = null, recoverUnknownStart = false, answer = null, via = 'cli', by = null } = {}) {
+  const text = typeof answer === 'string' ? answer.trim() : answer;
+  if (text !== null && (typeof text !== 'string' || !text || text.length > 4000)) throw new Error('--answer needs 1 to 4000 characters');
+  if (text && !config.adapters?.planner?.command) throw new Error('--answer reaches the planner, and adapters.planner is not configured');
   const state = await loadProgress(root, config, target);
   const current = state.entries.find(entry => entry.status !== 'PASS');
   if (!current || !['BLOCKED', 'STOPPED', 'RUNNING'].includes(current.status)) throw new Error('No blocked/interrupted current version to retry');
@@ -920,10 +973,10 @@ export async function retryRunner(root, config = {}, { target = null, recoverUnk
       attempt.error = current.error ?? 'Interrupted execution recovered by runner retry';
     }
   }
-  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', ...(current.reasonCode && { reasonCode: current.reasonCode }), at: new Date().toISOString(), ...(recovered && { recoveredUnknownStart: recovered }) }];
+  current.retries = [...(current.retries ?? []), { previousStatus: current.status, reason: current.error ?? 'Interrupted', ...(current.reasonCode && { reasonCode: current.reasonCode }), at: new Date().toISOString(), ...(recovered && { recoveredUnknownStart: recovered }), ...(text && { answer: { text, via, ...(by && { by }) } }) }];
   current.status = 'PENDING'; current.error = null; delete current.reasonCode; delete current.blockedAt;
   await saveProgress(root, config, target, state);
-  return { status: 'PASS', ...(target && { target }), current: current.manifestId, next: 'runner start --once' };
+  return { status: 'PASS', ...(target && { target }), current: current.manifestId, ...(text && { answered: true }), next: 'runner start --once' };
 }
 async function configureStream(root, config, stream) {
   const statePath = runnerStatePath(config, stream);

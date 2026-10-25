@@ -43,6 +43,7 @@ Usage: protoflow <command> [action] --project <path> [options]
   source scan|status                     Fetch Git source, freeze new commits, show progress
   runner start [--once] | status | retry | configure  Foreground FIFO Codex + verification in isolated worktree
   runner retry --recover-unknown-start  Also close launch intents without a PID once no live process uses the worktree
+  runner retry --answer text             Answer the planner's questions (needs-human); the next plan reads the answer
   runner supersede                       Fold the blocked current version into the newest prototype version (a person
                                          decided the later prototype fixes it); the worktree's changes are kept
   runner reclassify                      Classify the blocked current version again with this engine (its level was
@@ -97,7 +98,7 @@ External commands are argv arrays, run without a shell. Nothing commits or pushe
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, port: { type: 'string' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
+    project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, port: { type: 'string' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, answer: { type: 'string' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
     ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery', 'scene', 'variant', 'tier', 'reason', 'engine-issue', 'requested-by', 'waiver'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
@@ -137,7 +138,7 @@ try {
         case 'doctor': return doctor(root, config);
         case 'runner':
           if (action === 'status') return runnerStatus(root, config);
-          if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null, recoverUnknownStart: values['recover-unknown-start'] === true });
+          if (action === 'retry') return retryRunner(root, config, { target: values.target ?? null, recoverUnknownStart: values['recover-unknown-start'] === true, answer: values.answer ?? null });
           if (action === 'supersede') return supersedeRunner(root, config, { target: values.target ?? null });
           if (action === 'reclassify') return reclassifyRunner(root, config, { target: values.target ?? null });
           if (action === 'rebase') return rebaseRunner(root, config, { target: values.target ?? null });
