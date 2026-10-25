@@ -158,10 +158,8 @@ export function watchEngineVersion(loaded, { intervalMs = 5000, read = engineVer
       const current = await read().catch(() => loaded);
       if (current !== loaded) return resolve(current);
       timer = setTimeout(check, intervalMs);
-      timer.unref?.();
     };
     timer = setTimeout(check, intervalMs);
-    timer.unref?.();
   });
   return { changed, stop: () => clearTimeout(timer) };
 }
