@@ -273,24 +273,49 @@ export function cropScreenshot(buffer, frame, screenWidthPoints) {
   return { png: PNG.sync.write(out), scale: Math.round(scale * 100) / 100 };
 }
 
+/** Steps after which a software keyboard may stay up: the state is "while typing", as in the prototype. */
+const EDITING_STEPS = new Set(['fill', 'clear']);
+
+/** The tree without the software keyboard's own nodes: its keys are not part of the app's screen. */
+function withoutKeyboard(node) {
+  if (!node.children?.length) return node;
+  return { ...node, children: node.children.filter(child => child.type !== 'keyboard').map(withoutKeyboard) };
+}
+
+/** The part of `box` inside `content`, in content coordinates; null when they do not overlap. */
+function clipTo(box, content) {
+  const x = Math.max(box.x, content.x), y = Math.max(box.y, content.y);
+  const right = Math.min(box.x + box.width, content.x + content.width), bottom = Math.min(box.y + box.height, content.y + content.height);
+  return right > x && bottom > y ? { x: x - content.x, y: y - content.y, width: right - x, height: bottom - y } : null;
+}
+
 /**
- * Turn a normalised capture ({ status, tree, safeArea?, keyboardVisible?, reason? }) into a driver response.
- * `frame` is 'safe-area' (default: the device content area without system bars) or 'device'.
+ * Turn a normalised capture ({ status, tree, safeArea?, keyboardVisible?, keyboardFrame?, reason? }) into a driver
+ * response. `frame` is 'safe-area' (default: the device content area without system bars) or 'device'.
+ * A software keyboard still up after the steps is FAIL, unless the last step is `fill` or `clear`: then the state is
+ * the field being edited (focus kept, as the prototype keeps it), and the keyboard's frame is reported as `occluded`
+ * so the tiers leave those pixels out. Elements behind it stay in the tree as rendered, like content scrolled away.
  * Returns { response, png } where png is the cropped screenshot to write next to the response.
  */
-export function nativeResponse(raw, deviceScreenshot, { anchors, screen, frame = 'safe-area', safeArea = null }) {
+export function nativeResponse(raw, deviceScreenshot, { anchors, screen, frame = 'safe-area', safeArea = null, steps = [] }) {
   if (!raw || raw.status !== 'PASS') return { response: { schemaVersion: 1, status: raw?.status === 'FAIL' ? 'FAIL' : 'NOT_RUN', reason: raw?.reason ?? 'capture produced no result' } };
-  if (raw.keyboardVisible) return { response: { schemaVersion: 1, status: 'FAIL', reason: 'the software keyboard is still visible after the steps; the app must dismiss it (end editing) before the state is captured' } };
   const device = frameOf(raw.tree);
+  // XCUITest reports a keyboard element whenever a field has focus, even one parked below the screen (a Simulator
+  // with a connected hardware keyboard): only a keyboard frame that reaches the screen covers anything.
+  const keyboardUp = raw.keyboardVisible === true && (!raw.keyboardFrame || clipTo(raw.keyboardFrame, device) !== null);
+  const editing = EDITING_STEPS.has(steps?.at(-1)?.action);
+  if (keyboardUp && !editing) return { response: { schemaVersion: 1, status: 'FAIL', reason: 'the software keyboard is still visible after the steps; the app must dismiss it (end editing) before the state is captured (only a state whose last step is fill or clear may keep it up)' } };
+  if (keyboardUp && !raw.keyboardFrame) return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: 'the software keyboard is up after the last fill/clear step but its frame could not be measured' } };
   const area = raw.safeArea ?? safeArea;
   if (frame === 'safe-area' && !area) return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: 'the device safe area could not be measured' } };
   const measured = frame === 'device' ? { x: 0, y: 0, width: device.width, height: device.height } : area;
   // Whole points, so the viewport and the cropped screenshot always agree (a 136 px status bar is 45.33 dp at 3×).
   const content = { ...measured, width: Math.floor(measured.width + 1e-6), height: Math.floor(measured.height + 1e-6) };
   const { png, scale } = cropScreenshot(deviceScreenshot, content, device.width);
-  const { elements, missing } = anchorFacts(raw.tree, { anchors, screen, content });
+  const { elements, missing } = anchorFacts(withoutKeyboard(raw.tree), { anchors, screen, content });
+  const keyboard = keyboardUp ? clipTo(raw.keyboardFrame, content) : null;
   return {
     png,
-    response: { schemaVersion: 1, status: 'PASS', screenshot: 'screen.png', viewport: { width: content.width, height: content.height, scale }, elements, missing }
+    response: { schemaVersion: 1, status: 'PASS', screenshot: 'screen.png', viewport: { width: content.width, height: content.height, scale }, elements, missing, ...(keyboard && { occluded: [keyboard] }) }
   };
 }

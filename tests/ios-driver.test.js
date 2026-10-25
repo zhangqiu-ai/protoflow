@@ -208,6 +208,32 @@ test('iosResponse crops to the safe area and refuses keyboards, failures and unm
   assert.equal(iosResponse(null, null, { anchors: [], screen: 'home' }).response.status, 'NOT_RUN');
 });
 
+test('iosResponse keeps a keyboard after a final fill or clear: its frame is occluded and its keys leave the tree', () => {
+  const screenshot = PNG.sync.write(new PNG({ width: 30, height: 60 }));
+  const keys = { type: 'keyboard', frame: { x: 0, y: 12, width: 10, height: 8 }, children: [{ type: 'button', identifier: 'home.go', label: 'Go', frame: { x: 1, y: 13, width: 2, height: 2 } }] };
+  const tree = { type: 'application', frame: { x: 0, y: 0, width: 10, height: 20 }, children: [{ type: 'other', identifier: 'home', frame: { x: 0, y: 2, width: 10, height: 16 } }, keys] };
+  const typing = { status: 'PASS', tree, keyboardVisible: true, keyboardFrame: keys.frame, safeArea: { x: 0, y: 2, width: 10, height: 16 } };
+  const fill = [{ action: 'tap', anchor: 'home' }, { action: 'fill', anchor: 'home.name', value: 'W' }];
+  const { response } = iosResponse(typing, screenshot, { anchors: ['home', 'home.go'], screen: 'home', steps: fill });
+  assert.equal(response.status, 'PASS');
+  // Clipped to the safe area, in content coordinates; the keyboard's own "Go" key is not the app's anchor.
+  assert.deepEqual(response.occluded, [{ x: 0, y: 10, width: 10, height: 6 }]);
+  assert.deepEqual(response.missing, ['home.go']);
+  assert.equal(iosResponse(typing, screenshot, { anchors: [], screen: 'home', steps: [{ action: 'clear', anchor: 'home.name' }] }).response.status, 'PASS');
+  // Any other last step (or none) must leave the keyboard dismissed, and an unmeasured keyboard is not compared.
+  assert.equal(iosResponse(typing, screenshot, { anchors: [], screen: 'home', steps: [...fill, { action: 'tap', anchor: 'home' }] }).response.status, 'FAIL');
+  assert.equal(iosResponse(typing, screenshot, { anchors: [], screen: 'home' }).response.status, 'FAIL');
+  assert.equal(iosResponse({ ...typing, keyboardFrame: undefined }, screenshot, { anchors: [], screen: 'home', steps: fill }).response.status, 'NOT_RUN');
+  // A focused field on a Simulator with a hardware keyboard: XCUITest still lists a keyboard, parked below the screen
+  // (y 918 on an 874 pt iPhone 17). Nothing is covered, whatever the last step was.
+  const parked = { ...typing, keyboardFrame: { x: 0, y: 22, width: 10, height: 8 } };
+  for (const steps of [fill, [{ action: 'tap', anchor: 'home' }]]) {
+    const { response: below } = iosResponse(parked, screenshot, { anchors: [], screen: 'home', steps });
+    assert.equal(below.status, 'PASS');
+    assert.equal(below.occluded, undefined);
+  }
+});
+
 async function driver(args, { env = {}, request = {} } = {}) {
   const child = spawn(process.execPath, [path.join(engine, 'scripts/ios-driver.js'), ...args], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';

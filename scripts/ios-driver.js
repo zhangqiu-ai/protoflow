@@ -156,7 +156,7 @@ async function main() {
   if (!raw) return notRun(`the XCUITest capture produced no result (xcodebuild exit ${test.code}): ${tail(test.stdout + test.stderr)}`);
   if (raw.safeArea) await writeFile(safeAreaFile, `${JSON.stringify(raw.safeArea)}\n`);
   const screenshot = raw.status === 'PASS' ? await readFile(path.join(outputDir, raw.screenshot)) : null;
-  const { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, safeArea });
+  const { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, safeArea, steps: request.steps });
   if (png) await writeFile(path.join(outputDir, 'screen.png'), png);
   respond({ ...response, log: `device ${device.name} (${device.udid}), runtime ${device.runtime.split('.').pop()}` });
 }

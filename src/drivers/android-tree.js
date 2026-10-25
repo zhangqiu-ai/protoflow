@@ -111,13 +111,14 @@ export function normalizeNode(node, density) {
   };
 }
 
-/** Normalised capture for nativeResponse: a screen-sized root, the content area in dp and the keyboard flag. */
+/** Normalised capture for nativeResponse: a screen-sized root, the content area in dp, the keyboard flag and its frame. */
 export function normalizeCapture(raw) {
   if (!raw || raw.status !== 'PASS') return raw;
   const { density, screen, insets = { left: 0, top: 0, right: 0, bottom: 0 } } = raw;
   return {
     status: 'PASS',
     keyboardVisible: raw.keyboardVisible === true,
+    ...(raw.keyboardFrame && { keyboardFrame: toFrame(raw.keyboardFrame, density) }),
     safeArea: {
       x: insets.left / density, y: insets.top / density,
       width: (screen.width - insets.left - insets.right) / density, height: (screen.height - insets.top - insets.bottom) / density
