@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
 import { traceActivity, roles, listProjects, addProject, removeProject, dashboardSnapshot, projectId } from '../src/dashboard-data.js';
-import { createDashboardServer, overviewStream } from '../src/dashboard-server.js';
+import { createDashboardServer, overviewStream, serveDashboard, watchEngineVersion } from '../src/dashboard-server.js';
 import { runAction } from '../src/dashboard-actions.js';
 import { diagnose } from '../src/dashboard-diagnosis.js';
 import { dashboardFixture, PNG } from './helpers/dashboard-fixture.js';
@@ -240,4 +240,30 @@ test('pages watching the same view share one poll, and a view nobody watches sto
   const idle = reads;
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.equal(reads, idle, 'no polling once every page has gone');
+});
+
+test('engine watcher resolves with the new version once the checkout on disk changes, riding out unreadable reads', async () => {
+  const reads = [async () => '0.3.1', async () => { throw new Error('mid-checkout'); }, async () => '0.3.2'];
+  const watcher = watchEngineVersion('0.3.1', { intervalMs: 5, read: () => reads.shift()() });
+  assert.equal(await watcher.changed, '0.3.2');
+  assert.equal(reads.length, 0);
+});
+
+test('dashboard service exits on an engine upgrade so launchd restarts it; the foreground server only reports it', async () => {
+  const home = await fs.mkdtemp(path.join((await import('node:os')).tmpdir(), 'protoflow-reload-'));
+  const upgrade = () => ({ changed: Promise.resolve('9.9.9'), stop: () => {} });
+  const events = [];
+  let url;
+  const service = await serveDashboard({ port: 0, home, reloadOnUpgrade: true, watch: upgrade, log: event => events.push(event), onListen: value => { url = value; } });
+  assert.equal(service.status, 'RELOAD');
+  assert.equal(service.current, '9.9.9');
+  await assert.rejects(fetch(url), 'the port is released for the restarted process');
+  assert.equal(events.at(-1).event, 'engine-upgraded');
+
+  events.length = 0;
+  const foreground = serveDashboard({ port: 0, home, watch: upgrade, log: event => events.push(event) });
+  while (!events.length) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.match(events[0].hint, /restart/);
+  process.emit('SIGTERM');
+  assert.equal((await foreground).status, 'STOPPED');
 });

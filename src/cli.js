@@ -15,7 +15,7 @@ import { scanSource } from './source.js';
 import { sourceView } from './streams.js';
 import { startRunner, retryRunner, supersedeRunner, reclassifyRunner, rebaseRunner, configureRunner, runnerStatus, doctor } from './runner.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
-import { installService, uninstallService, serviceStatus, installDashboardService, uninstallDashboardService, dashboardServiceStatus } from './runner-service.js';
+import { installService, uninstallService, serviceStatus, installDashboardService, uninstallDashboardService, dashboardServiceStatus, DASHBOARD_LABEL } from './runner-service.js';
 import { dashboardSnapshot, addProject, removeProject, listProjects } from './dashboard-data.js';
 import { serveDashboard } from './dashboard-server.js';
 import { versionQueue } from './queue.js';
@@ -55,7 +55,9 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          macOS launchd LaunchAgent: start at login, restart on exit, heartbeat health
   dashboard snapshot | add [--label name] | remove | list
                                          Project state as JSON / register this project on the dashboard
-  dashboard serve [--port 7420]          Local dashboard on 127.0.0.1: every registered project, live, with approvals
+  dashboard serve [--port 7420] [--service]
+                                         Local dashboard on 127.0.0.1: every registered project, live, with approvals;
+                                         --service exits when the engine on disk changes version, for launchd to restart
   dashboard service install [--port N] [--env K=V] | uninstall | status
                                          The dashboard as a macOS launchd LaunchAgent (start at login, restart on exit)
   delivery sync | status                 Commit accepted versions, push, open PR, merge (runner.delivery)
@@ -112,7 +114,7 @@ try {
         if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('--port must be 1024-65535');
         const extraEnv = Object.fromEntries((values.env ?? []).map(pair => { const at = pair.indexOf('='); if (at < 1) throw new Error('--env takes KEY=VALUE'); return [pair.slice(0, at), pair.slice(at + 1)]; }));
         if (action === 'list') return { projects: await listProjects() };
-        if (action === 'serve') return serveDashboard({ port, onListen: url => console.log(JSON.stringify({ event: 'listening', url })) });
+        if (action === 'serve') return serveDashboard({ port, reloadOnUpgrade: values.service === true || process.env.XPC_SERVICE_NAME === DASHBOARD_LABEL, onListen: url => console.log(JSON.stringify({ event: 'listening', url })) });
         if (action === 'service') {
           const [, , operation] = positionals;
           if (operation === 'install') return installDashboardService({ port, extraEnv });

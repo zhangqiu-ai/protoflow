@@ -189,7 +189,7 @@ export async function installDashboardService({ port = 7420, ...options } = {}) 
   if (ctx.platform !== 'darwin') return { status: 'NOT_RUN', reason: 'dashboard service supports macOS launchd only; run `protoflow dashboard serve` under the system supervisor' };
   const logs = path.join(ctx.home, '.protoflow');
   // gh and git: approvals from the dashboard merge PRs and edit issue labels as the person.
-  const agent = await loadAgent(ctx, { label: DASHBOARD_LABEL, toolNames: ['git', 'gh'], args: ['dashboard', 'serve', '--port', String(port)], workingDirectory: logs, logs, logName: 'dashboard', extraEnv: options.extraEnv });
+  const agent = await loadAgent(ctx, { label: DASHBOARD_LABEL, toolNames: ['git', 'gh'], args: ['dashboard', 'serve', '--service', '--port', String(port)], workingDirectory: logs, logs, logName: 'dashboard', extraEnv: options.extraEnv });
   if (agent.status !== 'PASS') return agent;
   return { status: 'PASS', label: DASHBOARD_LABEL, plist: agent.plist, url: `http://127.0.0.1:${port}/`, tools: agent.tools, logs: { stdout: path.join(logs, 'dashboard.out.log'), stderr: path.join(logs, 'dashboard.err.log') } };
 }

@@ -18,6 +18,8 @@ protoflow dashboard serve [--port 7420]
 
 打開 `http://127.0.0.1:7420/`。專案登記在 `~/.protoflow/projects.json`；`dashboard remove --project PATH` 取消登記。服務日誌在 `~/.protoflow/dashboard.out.log` 與 `dashboard.err.log`。服務安裝時解析 `git`、`gh` 的絕對路徑並帶入網路代理變數，與 [常駐 Runner](git-runner.md#常駐服務macos-launchd) 相同。
 
+引擎升級後服務自動換新：常駐服務（`dashboard serve --service`，launchd 啟動時亦同）每 5 秒檢查引擎的 `package.json`，版本與啟動時不同（`git pull` 或發版）就關閉並結束，由 launchd 以新程式碼重新啟動，開著的頁面會自動重新連線。專案設定用上新版引擎才認得的欄位時，因此不會停在「讀取失敗」等人重啟。前景執行的 `dashboard serve` 只在終端機輸出 `engine-upgraded` 事件提醒重啟。
+
 選用設定：
 
 ```json
