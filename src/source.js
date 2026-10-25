@@ -401,6 +401,9 @@ export async function reclassifyVersion(root, config, { from, engineVersion }) {
   return { manifest, ...record };
 }
 
+/** After every ordinal the stream has used: `runner supersede` removes entries, so the entry count can repeat one. */
+const nextOrdinal = state => Math.max(state.entries.length, ...state.entries.map(entry => entry.ordinal ?? 0), ...(state.superseded ?? []).flatMap(record => record.entries.map(entry => entry.ordinal ?? 0))) + 1;
+
 /** Scan the first-parent branch stream. Advance the durable cursor only after each frozen checkpoint exists. */
 export async function scanSource(root, config) {
   const source = config.source;
@@ -428,7 +431,7 @@ export async function scanSource(root, config) {
       let accepted = true;
       if (before.hash !== after.hash) {
         try {
-          const manifest = await publishCheckpoint(root, config, repository, sha, before, after, state.entries.length + 1);
+          const manifest = await publishCheckpoint(root, config, repository, sha, before, after, nextOrdinal(state));
           if (!state.entries.some(entry => entry.sha === sha)) state.entries.push({ sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: manifest.source.ordinal, status: 'PENDING', attempts: [] });
           added.push(manifest.id);
           for (const rejection of state.rejected ?? []) rejection.foldedInto ??= sha;
