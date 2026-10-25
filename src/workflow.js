@@ -273,6 +273,7 @@ export async function executeContext(root, config, contextId, { execute = false,
   const request = {
     ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
     repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }), engineLimits: `.protoflow/engine-limits/${contextId}.json` },
+    operatorActions: `.protoflow/operator-actions/${contextId}.json`,
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
   if (!execute) return { status: 'NOT_RUN', contextId, request, reason: `Use --execute after configuring the ${provider} executor adapter` };
