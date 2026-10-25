@@ -1827,6 +1827,25 @@ test('issue triage runs after the prototype streams and its failure never stops 
   assert.match(events.find(event => event.event === 'issues-failed').error, /No such remote 'origin'/);
 });
 
+test('issues sync in the background while a long step runs', async t => {
+  const { root, config } = await fixture(t);
+  await scanSource(root, config);
+  const events = [];
+  let step = false;
+  // The step after the scan takes 400 ms; issues are due every 50 ms, and each sync fails fast without a GitHub remote.
+  const result = await startRunner(root, { ...config, issues: { enabled: true } }, { once: true, issueSyncIntervalMs: 50, onEvent: async event => {
+    events.push({ ...event, step });
+    if (event.event !== 'scanned') return;
+    step = true;
+    await new Promise(resolve => setTimeout(resolve, 400));
+    step = false;
+  } });
+  assert.ok(result.status);
+  const syncs = events.filter(event => event.event === 'issues-failed');
+  assert.ok(syncs.some(event => event.step), 'an issue sync ran during the step, before the pass ended');
+  assert.ok(syncs.every(event => /No such remote 'origin'/.test(event.error)), syncs.map(event => event.error).join(' | '));
+});
+
 test('JavaScript audit rejects module syntax but not prose that mentions export and from', async () => {
   const { auditJavaScript } = await import('../src/source.js');
   for (const code of ['import("https://example.test/a.js")', 'import x from "./a.js"', 'export * from "./a.js"', 'export * as ns from "./a.js"', 'export { a, b } from "./a.js"', 'export {a}from"./a.js"', 'export * /* note */ from "./a.js"', 'export /* a */ { a } // b\n from "./a.js"']) {

@@ -268,3 +268,28 @@ test('dashboard service exits on an engine upgrade so launchd restarts it; the f
   process.emit('SIGTERM');
   assert.equal((await foreground).status, 'STOPPED');
 });
+
+test('issues: a waiting issue offers answer, hand back and close; once handed back it leaves the list unless no runner is there to sync it', async t => {
+  const { root } = await fixture(t);
+  let view = await dashboardSnapshot(root, { service: false });
+  const waiting = view.attention.find(item => item.kind === 'issue');
+  assert.deepEqual(waiting.actions, ['answer-issue', 'handback', 'close-issue']); assert.equal(waiting.waiting, undefined);
+  await fs.mkdir(path.join(root, '.protoflow/dashboard'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), action: 'answer-issue', args: { number: 5, text: 'FAKE FIXTURE answer' }, via: 'dashboard', status: 'PASS', result: { actor: 'human:fixture' } })}\n`);
+  // A live runner picks it up on its next sync: nothing waits for the person.
+  view = await dashboardSnapshot(root, { service: false });
+  assert.equal(view.attention.some(item => item.kind === 'issue'), false);
+  assert.deepEqual(view.issues.find(issue => issue.number === 5).handedBack, { action: 'answer-issue', at: view.issues.find(issue => issue.number === 5).handedBack.at, actor: 'human:fixture' });
+  assert.equal(view.streams[0].stopped, undefined);
+  // No runner (the heartbeat is an hour old): the card says issue work stopped and how to start it, and lanes show stopped.
+  const heartbeat = path.join(root, '.protoflow/runner/heartbeat.json');
+  await fs.writeFile(heartbeat, JSON.stringify({ ...JSON.parse(await fs.readFile(heartbeat, 'utf8')), at: new Date(Date.now() - 3600000).toISOString() }));
+  view = await dashboardSnapshot(root, { service: false });
+  const stopped = view.attention.find(item => item.kind === 'issue');
+  assert.equal(stopped.waiting, 'runner'); assert.deepEqual(stopped.actions, []); assert.equal(stopped.handedBack.action, 'answer-issue');
+  assert.equal(stopped.diagnosis.kind, 'runner-stopped'); assert.match(stopped.diagnosis.command, /^protoflow runner /);
+  assert.equal(view.streams[0].stopped, true);
+  // The lane that looks mid-stage says no runner will continue it.
+  const runner = view.attention.find(item => item.kind === 'service');
+  assert.deepEqual([runner.title, runner.reason, runner.diagnosis.kind, runner.diagnosis.title], ['Runner 沒在跑', 'application 有版本等 runner 執行', 'runner-stopped', '版本處理停住了：runner 沒在跑']);
+});

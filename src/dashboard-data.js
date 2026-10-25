@@ -7,8 +7,8 @@ import { streamTargets, loadProgress, runnerStatePath } from './streams.js';
 import { deliveryStatus } from './delivery.js';
 import { recordedVerdict } from './delivery-review.js';
 import { HEARTBEAT, EVENTS } from './runner.js';
-import { serviceStatus } from './runner-service.js';
-import { diagnose } from './dashboard-diagnosis.js';
+import { serviceStatus, STALLED_AFTER_SECONDS } from './runner-service.js';
+import { diagnose, runnerStopped } from './dashboard-diagnosis.js';
 import { listWaivers, waiverReviewers } from './waivers.js';
 
 /**
@@ -183,9 +183,18 @@ async function streamSnapshot(root, config, stream, events) {
   };
 }
 
+/** The last dashboard action a person took on each issue (hand back, answer, close), from actions.jsonl. */
+async function issueActions(root) {
+  const last = {};
+  for (const record of parseLines(await tail(path.join(root, '.protoflow/dashboard/actions.jsonl')))) {
+    if (record.status === 'PASS' && ['handback', 'answer-issue', 'close-issue'].includes(record.action) && Number.isSafeInteger(Number(record.args?.number))) last[Number(record.args.number)] = { action: record.action, at: record.at, actor: record.result?.actor ?? null };
+  }
+  return last;
+}
 async function issueSummaries(root) {
   const state = await readJson(path.join(root, '.protoflow/issues/state.json'), null);
   if (!state) return [];
+  const actions = await issueActions(root);
   const out = [];
   for (const entry of Object.values(state.issues ?? {}).sort((a, b) => b.number - a.number).slice(0, 30)) {
     const snapshot = entry.snapshotId ? await readJson(path.join(root, `.protoflow/issues/snapshots/${entry.snapshotId}.json`), null) : null;
@@ -193,7 +202,9 @@ async function issueSummaries(root) {
     out.push({
       number: entry.number, title: snapshot?.title ?? null, url: state.repository?.nameWithOwner ? `https://github.com/${state.repository.nameWithOwner}/issues/${entry.number}` : null,
       status: entry.status, reason: entry.reason ? short(entry.reason, 300) : null, area: plan?.plan?.area ?? null, level: plan?.plan?.level ?? null, summary: plan?.plan?.summary ? short(plan.plan.summary, 300) : null,
-      questions: plan?.plan?.questions ?? [], snapshotId: entry.snapshotId ?? null,
+      questions: plan?.plan?.questions ?? [], snapshotId: entry.snapshotId ?? null, decidedAt: entry.decidedAt ?? null,
+      // A person acted on the issue after ProtoFlow's last decision; the runner has not synced it since.
+      handedBack: actions[entry.number] && (!entry.decidedAt || Date.parse(actions[entry.number].at) > Date.parse(entry.decidedAt)) ? actions[entry.number] : null,
       targets: Object.fromEntries(Object.entries(entry.targets ?? {}).map(([target, work]) => [target, { status: work.status, pr: work.pr?.url ?? null, attempts: work.attempts?.length ?? 0, executor: work.executorRoute?.primary ?? null, error: work.error ? short(work.error, 200) : null }]))
     });
   }
@@ -229,6 +240,13 @@ async function waiverSummaries(root, config) {
 }
 
 /** What needs a person: blocked versions, manual merges, issues handed to a person, reviews and service health. */
+/** A runner process works for the project: the supervised service, or a manual runner whose heartbeat is fresh. */
+export function runnerAlive(service) {
+  if (!service) return false;
+  if (['HEALTHY', 'STARTING', 'DEGRADED'].includes(service.status)) return true;
+  const at = Date.parse(service.heartbeat?.at ?? '');
+  return Number.isFinite(at) && (Date.now() - at) / 1000 <= STALLED_AFTER_SECONDS && service.status !== 'STALLED';
+}
 function attention({ streams, issues, reviews, service, config, waivers }) {
   const items = [];
   for (const stream of streams) {
@@ -243,13 +261,23 @@ function attention({ streams, issues, reviews, service, config, waivers }) {
     }
   }
   for (const issue of issues) {
-    if (['needs-human', 'blocked', 'rejected'].includes(issue.status)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, actions: ['handback'] });
+    if (!['needs-human', 'blocked', 'rejected'].includes(issue.status)) continue;
+    // Handed back, answered or closed: nothing waits for the person unless no runner is there to pick it up.
+    if (issue.handedBack) {
+      if (!runnerAlive(service)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, waiting: 'runner', handedBack: issue.handedBack, reason: issue.reason ?? issue.summary, questions: issue.questions, since: issue.handedBack.at, diagnosis: runnerStopped(service?.status), actions: [] });
+      continue;
+    }
+    items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, since: issue.decidedAt, actions: ['answer-issue', 'handback', 'close-issue'] });
   }
   for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, waivers: review.waivers ?? 0, since: review.completedAt, actions: ['approve'] });
   for (const waiver of waivers?.waivers ?? []) if (waiver.status === 'requested') items.push({ kind: 'waiver', target: waiver.target, waiverId: waiver.id, title: `${waiver.scene}${waiver.variant ? ` / ${waiver.variant}` : ''} · ${waiver.tier}`, reason: waiver.reason, engineIssue: waiver.engineIssue, findings: waiver.findings, findingCount: waiver.findingCount, requestedBy: waiver.requestedBy, manifestId: waiver.manifestId, verificationId: waiver.verificationId, prototype: waiver.prototype, application: waiver.application, since: waiver.requestedAt, actions: ['approve-waiver', 'reject-waiver'] });
   if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
+  // A version waits to run (retried, or stopped mid-pass) and no runner will run it: say so instead of a stage that looks live.
+  const waitingStreams = streams.filter(stream => stream.stopped);
+  if (waitingStreams.length && !items.some(item => item.kind === 'service')) items.push({ kind: 'service', status: service?.status ?? 'NOT_INSTALLED', title: 'Runner 沒在跑', reason: `${waitingStreams.map(stream => stream.target ?? 'application').join('、')} 有版本等 runner 執行`, since: service?.heartbeat?.at ?? null, actions: [] });
   // A blocked item says what to do about it: by its runner reasonCode first, else when its reason is a known failure.
-  for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked') item.diagnosis = diagnose(item.reason, item.reasonCode);
+  for (const item of items) if (['blocked-version', 'delivery-blocked', 'service'].includes(item.kind) || item.kind === 'issue' && item.status === 'blocked' && !item.waiting) item.diagnosis = diagnose(item.reason, item.reasonCode);
+  for (const item of items) if (item.kind === 'service' && !item.diagnosis && !runnerAlive(service)) item.diagnosis = runnerStopped(service?.status, 'version');
   // How long each item has waited for a person, when it is known.
   for (const item of items) item.since ??= null;
   return items;
@@ -264,6 +292,13 @@ async function adrStatus(root, config) {
 }
 
 /** The whole dashboard view of one project. `service: false` skips the launchd query (tests, other systems). */
+/** The runner's health for a project: the supervised service when asked for, else its heartbeat. */
+export async function runnerHealth(root, { service = process.platform === 'darwin', health: knownHealth } = {}) {
+  const heartbeat = await readJson(path.join(root, HEARTBEAT), null);
+  // A caller polling many projects passes the service health it already knows (launchctl is a subprocess).
+  const health = knownHealth !== undefined ? knownHealth : service ? await serviceStatus(root).catch(error => ({ status: 'UNKNOWN', reason: error.message })) : null;
+  return { heartbeat, summary: health ?? (heartbeat ? { status: 'HEARTBEAT', heartbeat, beatAgeSeconds: Math.round((Date.now() - Date.parse(heartbeat.at)) / 1000) } : { status: 'NOT_INSTALLED' }) };
+}
 export async function dashboardSnapshot(root, { service = process.platform === 'darwin', health: knownHealth, eventCount = 60 } = {}) {
   const real = await fs.realpath(root);
   const config = await loadConfig(real);
@@ -273,10 +308,9 @@ export async function dashboardSnapshot(root, { service = process.platform === '
   const issues = await issueSummaries(real);
   const reviews = await pendingReviews(real, config, streams);
   const waivers = await waiverSummaries(real, config);
-  const heartbeat = await readJson(path.join(real, HEARTBEAT), null);
-  // A caller polling many projects passes the service health it already knows (launchctl is a subprocess).
-  const health = knownHealth !== undefined ? knownHealth : service ? await serviceStatus(real).catch(error => ({ status: 'UNKNOWN', reason: error.message })) : null;
-  const summary = health ?? (heartbeat ? { status: 'HEARTBEAT', heartbeat, beatAgeSeconds: Math.round((Date.now() - Date.parse(heartbeat.at)) / 1000) } : { status: 'NOT_INSTALLED' });
+  const { heartbeat, summary } = await runnerHealth(real, { service, health: knownHealth });
+  // A stage read from the last event is not live when no runner is running: the lane says it stopped.
+  if (!runnerAlive({ heartbeat, ...summary })) for (const stream of streams) if (!['idle', 'blocked'].includes(stream.stage)) stream.stopped = true;
   return {
     protocol: 'protoflow.dashboard/1', engineVersion: ENGINE_VERSION, generatedAt: new Date().toISOString(),
     project: { id: await projectId(real), root: real, name: config.dashboard?.name ?? path.basename(real), targets: (config.targets ?? [{ id: 'application', platform: 'web' }]).map(target => ({ id: target.id, platform: target.platform })), delivery: config.runner?.delivery ? { baseBranch: config.runner.delivery.baseBranch, merge: config.runner.delivery.merge ?? 'auto' } : null, autoApprove: config.policy?.autoApprove === true, issues: config.issues?.enabled === true },

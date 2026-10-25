@@ -13,6 +13,8 @@ const DECISION_STATUS = { implement: 'planned', 'needs-info': 'needs-info', 'nee
 const LABEL_COLORS = { skip: 'ededed', planned: '0e8a16', 'needs-info': 'fbca04', 'needs-human': 'd93f0b', rejected: 'cccccc', 'in-progress': '1d76db', blocked: 'b60205', done: '5319e7' };
 const WRITERS = ['admin', 'maintain', 'write'];
 const MAX_TRIAGE_FAILURES = 3;
+// Local states an issue closed on GitHub leaves: nothing has started on it, so closing it settles it ('closed' is local only).
+const CONVERGE = ['new', 'triage-failed', 'needs-info', 'needs-human', 'rejected', 'blocked', 'planned'];
 const statePath = '.protoflow/issues/state.json';
 
 /** schemaVersion 1 projects have one implicit application target. */
@@ -37,6 +39,8 @@ export function issueSettings(config) {
 const statusLabel = (settings, status) => `${settings.label}:${status}`;
 const labelNames = issue => (issue.labels ?? []).map(label => typeof label === 'string' ? label : label.name);
 const marker = (snapshotId, planId) => `<!-- protoflow:triage ${snapshotId} ${planId ?? 'none'} -->`;
+/** What a person can change on an issue: its title, body and the comments that are not ProtoFlow's. */
+export const contentHash = snapshot => hash({ title: snapshot.title, body: snapshot.body, comments: snapshot.comments.filter(comment => !comment.ours).map(({ id, body }) => ({ id, body })) });
 
 export async function issuesStatus(root) {
   return readJson(await projectPath(root, statePath), { schemaVersion: 1, issues: {} });
@@ -114,6 +118,21 @@ async function sync(root, config, settings, { onEvent, signal }) {
   const skip = statusLabel(settings, 'skip');
   const open = listed.filter(issue => !issue.pull_request && !labelNames(issue).includes(skip)).sort((a, b) => a.number - b.number);
   const results = [];
+  // An issue closed on GitHub before ProtoFlow started on it is settled: it no longer waits for a person or the AI.
+  const listedNumbers = new Set(listed.map(issue => issue.number));
+  for (const entry of Object.values(state.issues).filter(item => CONVERGE.includes(item.status) && !item.pending && !listedNumbers.has(item.number))) {
+    if (signal?.aborted) break;
+    let issue;
+    try { issue = await api(`${base}/issues/${entry.number}`); }
+    catch (error) { if (!/HTTP (404|410)/.test(error.message)) throw error; issue = { state: 'closed', gone: true }; }
+    if (issue.state !== 'closed') continue;
+    const previous = entry.status, at = new Date().toISOString();
+    entry.status = 'closed'; entry.closedAt = issue.closed_at ?? at;
+    entry.reason = issue.gone ? 'The issue is no longer on GitHub' : `Closed on GitHub${issue.closed_by?.login ? ` by ${issue.closed_by.login}` : ''}${issue.state_reason ? ` (${issue.state_reason})` : ''}`;
+    entry.history.push({ status: 'closed', at, reason: entry.reason }); await save();
+    await onEvent({ event: 'issue-closed', number: entry.number, previous, reason: entry.reason });
+    results.push({ number: entry.number, status: 'closed', previous });
+  }
   let triaged = 0;
   for (const issue of open) {
     if (signal?.aborted) break;
@@ -128,7 +147,7 @@ async function sync(root, config, settings, { onEvent, signal }) {
       if (!confirmedBy) { if (!entry.unconfirmedRemoval) { entry.unconfirmedRemoval = new Date().toISOString(); await save(); await onEvent({ event: 'issue-unconfirmed', number: issue.number, status: entry.status }); } continue; }
     } else if (entry.status === 'needs-info') {
       if ((issue.comments ?? 0) <= (entry.commentCount ?? 0)) continue;
-    } else if (!['new', 'triage-failed'].includes(entry.status)) continue;
+    } else if (!['new', 'triage-failed', 'closed'].includes(entry.status)) continue;
 
     const snapshot = await takeSnapshot(issue.number);
     if (entry.status === 'needs-info' && !snapshot.comments.some(comment => !comment.ours && comment.createdAt > entry.decidedAt)) { entry.commentCount = issue.comments; await save(); continue; }
@@ -141,9 +160,21 @@ async function sync(root, config, settings, { onEvent, signal }) {
       results.push({ number: issue.number, status: entry.status, reason: 'unauthorized-author' });
       continue;
     }
+    // A person handed a needs-human issue back without answering it or changing it: the planner is told so once, and
+    // asked to decide on its own recommendation; a second bare handback does not run the planner again.
+    const unchanged = Boolean(confirmedBy) && entry.status === 'needs-human' && Boolean(entry.planId) && await previousContent(entry) === contentHash(snapshot);
+    if (!unchanged) delete entry.repeatedNeedsHuman;
+    if (unchanged && entry.repeatedNeedsHuman) {
+      const questions = (await previousPlan(entry))?.questions ?? [];
+      await decide(entry, snapshot, null, 'needs-human', `Handed back again without an answer or a change to the issue since plan ${entry.planId}; ProtoFlow does not triage it again until the issue changes. Answer in a comment (the dashboard's answer does this) or close the issue.${questions.length ? ` Open questions: ${questions.join(' / ')}` : ''}`);
+      await onEvent({ event: 'issue-unchanged', number: issue.number, planId: entry.planId });
+      results.push({ number: issue.number, status: entry.status, reason: 'unchanged' });
+      continue;
+    }
     if (triaged >= settings.maxTriagePerSync) { results.push({ number: issue.number, status: entry.status, deferred: true }); continue; }
     triaged++;
-    const previous = entry.planId ? await previousPlan(entry) : null;
+    const earlier = entry.planId ? await previousPlan(entry) : null;
+    const previous = earlier && unchanged ? { ...earlier, handedBackWithoutAnswer: true } : earlier;
     let plan;
     try { plan = await planIssue(root, config, snapshot, { targets: settings.targets, previous, signal }); }
     catch (error) {
@@ -156,6 +187,7 @@ async function sync(root, config, settings, { onEvent, signal }) {
       continue;
     }
     if (!plan) { results.push({ number: issue.number, status: 'NOT_RUN', reason: 'adapters.planner is not configured' }); continue; }
+    if (unchanged && DECISION_STATUS[plan.plan.decision] === 'needs-human') entry.repeatedNeedsHuman = new Date().toISOString();
     await decide(entry, snapshot, plan, DECISION_STATUS[plan.plan.decision]);
     await onEvent({ event: 'issue-triaged', number: issue.number, status: entry.status, planId: plan.id, targets: plan.plan.targets, costUsd: plan.costUsd });
     results.push({ number: issue.number, status: entry.status, planId: plan.id });
@@ -185,8 +217,13 @@ async function sync(root, config, settings, { onEvent, signal }) {
     const record = await readJson(await projectPath(root, `.protoflow/plans/${entry.planId}.json`), null);
     return record ? { id: record.id, decision: record.plan.decision, summary: record.plan.summary, questions: record.plan.questions } : null;
   }
+  async function previousContent(entry) {
+    if (entry.contentHash) return entry.contentHash;
+    const earlier = entry.snapshotId && /^ISS-[A-Za-z0-9-]+$/.test(entry.snapshotId) ? await readJson(await projectPath(root, `.protoflow/issues/snapshots/${entry.snapshotId}.json`), null) : null;
+    return earlier ? contentHash(earlier) : null;
+  }
   async function decide(entry, snapshot, plan, status, reason = null) {
-    entry.snapshotId = snapshot.id; if (plan) { entry.planId = plan.id; delete entry.error; }
+    entry.snapshotId = snapshot.id; entry.contentHash = contentHash(snapshot); if (plan) { entry.planId = plan.id; delete entry.error; }
     await transition(entry, { status, snapshotId: snapshot.id, planId: plan?.id ?? null, reason, marker: marker(snapshot.id, plan?.id), body: commentBody(settings, snapshot, plan, status, reason) });
   }
 }

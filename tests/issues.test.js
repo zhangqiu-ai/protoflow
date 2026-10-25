@@ -248,3 +248,105 @@ test('FAKE gh and CLI only: approving a hand-back in the dashboard removes the l
   const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(log.map(entry => [entry.action, entry.status, entry.result.actor]), [['handback', 'PASS', 'human:protoflow-bot']]);
 });
+
+test('FAKE gh and CLI only: an issue closed on GitHub is settled as closed, and triaged again only if it is reopened', async t => {
+  const { root, config, edit, plans } = await fixture(t, [issue(27), issue(30)]);
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ decision: 'needs-human', questions: ['Which colour?'] });
+  await syncIssues(root, config);
+  assert.equal((await plans()).length, 2);
+  await edit(db => { Object.assign(db.issues.find(item => item.number === 27), { state: 'closed', stateReason: 'not_planned', closedBy: 'owner' }); });
+  const events = [];
+  const second = await syncIssues(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual(second.results, [{ number: 27, status: 'closed', previous: 'needs-human' }]);
+  assert.deepEqual(events.filter(event => event.event === 'issue-closed'), [{ event: 'issue-closed', number: 27, previous: 'needs-human', reason: 'Closed on GitHub by owner (not_planned)' }]);
+  let state = await issuesStatus(root);
+  assert.equal(state.issues[27].status, 'closed'); assert.equal(state.issues[30].status, 'needs-human');
+  assert.deepEqual(state.issues[27].history.at(-1).status, 'closed');
+  // A settled issue is not looked up again.
+  assert.deepEqual((await syncIssues(root, config)).results, []);
+  // Reopened, it is a new request.
+  await edit(db => { db.issues.find(item => item.number === 27).state = 'open'; });
+  process.env.FAKE_CLAUDE_OUTPUT = plan();
+  assert.deepEqual((await syncIssues(root, config)).results.map(item => [item.number, item.status]), [[27, 'planned']]);
+  assert.equal((await plans()).length, 3);
+  // An issue deleted from GitHub settles the same way.
+  await edit(db => { db.issues = db.issues.filter(item => item.number !== 30); });
+  await syncIssues(root, config);
+  state = await issuesStatus(root);
+  assert.equal(state.issues[30].status, 'closed'); assert.equal(state.issues[30].reason, 'The issue is no longer on GitHub');
+});
+
+test('FAKE gh and CLI only: a handback without an answer is triaged once on the planner\'s own recommendation, then not again until the issue changes', async t => {
+  const { root, config, gh, edit, plans, base } = await fixture(t, [issue(28)]);
+  await edit(db => { db.permissions = { 'protoflow-bot': 'admin' }; });
+  const handBack = () => edit(db => { const item = db.issues[0]; item.labels = item.labels.filter(label => label !== 'protoflow:needs-human'); item.events = [...(item.events ?? []), { event: 'unlabeled', label: { name: 'protoflow:needs-human' }, actor: { login: 'protoflow-bot' } }]; });
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ decision: 'needs-human', questions: ['Light or dark default?'] });
+  await syncIssues(root, config);
+  assert.equal((await issuesStatus(root)).issues[28].status, 'needs-human');
+  const request = async () => JSON.parse(await fs.readFile(path.join(base, 'claude-input.json'), 'utf8')).input;
+  assert.doesNotMatch(await request(), /handed this issue back/);
+  // First bare handback: the planner sees that nobody answered and is told not to ask again.
+  await handBack();
+  await syncIssues(root, config);
+  let input = await request();
+  assert.match(input, /handed this issue back after your previous triage \(data\.previous\) without answering/);
+  assert.match(input, /"handedBackWithoutAnswer":\s*true/); assert.match(input, /"questions":\s*\[\s*"Light or dark default\?"/);
+  let state = await issuesStatus(root);
+  assert.equal((await plans()).length, 2); assert.equal(state.issues[28].status, 'needs-human'); assert.ok(state.issues[28].repeatedNeedsHuman);
+  // Second bare handback: no planner run, the issue says why and what to do.
+  await handBack();
+  const events = [];
+  const third = await syncIssues(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual(third.results, [{ number: 28, status: 'needs-human', reason: 'unchanged' }]);
+  assert.equal((await plans()).length, 2);
+  assert.deepEqual(events.filter(event => event.event === 'issue-unchanged').map(event => event.number), [28]);
+  let db = await gh();
+  assert.match(db.issues[0].comments.at(-1).body, /Handed back again without an answer[\s\S]*Open questions: Light or dark default\?/);
+  assert.ok(db.issues[0].labels.includes('protoflow:needs-human'));
+  // An answer changes the issue: it is triaged normally, without the handed-back hint.
+  await edit(item => { item.issues[0].comments.push({ id: 77, author: 'owner', body: 'Dark by default.', createdAt: '2026-10-15T00:00:00Z' }); });
+  await handBack();
+  process.env.FAKE_CLAUDE_OUTPUT = plan();
+  await syncIssues(root, config);
+  input = await request();
+  assert.doesNotMatch(input, /handed this issue back|handedBackWithoutAnswer/); assert.match(input, /Dark by default\./);
+  state = await issuesStatus(root);
+  assert.equal(state.issues[28].status, 'planned'); assert.equal(state.issues[28].repeatedNeedsHuman, undefined);
+});
+
+test('FAKE gh and CLI only: the dashboard answers a waiting issue as a comment, or closes it as not planned', async t => {
+  const { root, config, gh, edit } = await fixture(t, [issue(28, { labels: ['protoflow', 'protoflow:needs-human'] }), issue(27, { labels: ['protoflow', 'protoflow:needs-human'] }), issue(31, { labels: ['protoflow', 'protoflow:planned'] })]);
+  const { runAction } = await import('../src/dashboard-actions.js');
+  const project = { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], adapters: config.adapters, issues: { enabled: true } };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(project));
+  await fs.mkdir(path.join(root, '.protoflow/issues'), { recursive: true });
+  const waiting = number => ({ number, status: 'needs-human', planId: `PLN-old-${number}`, history: [], commentCount: 0 });
+  await fs.writeFile(path.join(root, '.protoflow/issues/state.json'), JSON.stringify({ schemaVersion: 1, repository: { id: 101, nameWithOwner: 'protoflow-fixture/application' }, issues: { 27: waiting(27), 28: waiting(28), 31: { number: 31, status: 'planned', history: [] } } }));
+  await edit(db => { db.permissions = { 'protoflow-bot': 'admin' }; });
+  await assert.rejects(runAction(root, { action: 'answer-issue', number: 28, text: '   ' }), /answer/i);
+  await assert.rejects(runAction(root, { action: 'answer-issue', number: 28, text: '<!-- protoflow:triage x -->' }), /ProtoFlow marker/);
+  await assert.rejects(runAction(root, { action: 'answer-issue', number: 31, text: 'Dark.' }), /waiting|needs-human|planned/);
+  const answered = await runAction(root, { action: 'answer-issue', number: 28, text: 'Dark by default.' }, { service: false });
+  assert.deepEqual([answered.status, answered.removedLabel, answered.actor], ['PASS', 'protoflow:needs-human', 'human:protoflow-bot']);
+  // No runner heartbeat: the answer is on GitHub, and the result says nothing will pick it up until a runner starts.
+  assert.equal(answered.runner, 'stopped'); assert.equal(answered.next, 'Runner 沒在跑，要等它啟動才會處理：執行 protoflow runner service install');
+  let db = await gh();
+  const issue28 = db.issues.find(item => item.number === 28);
+  assert.deepEqual(issue28.labels, ['protoflow']);
+  assert.equal(issue28.comments.at(-1).body, 'Dark by default.\n\n<sub>Answered from the ProtoFlow dashboard.</sub>');
+  await fs.mkdir(path.join(root, '.protoflow/runner'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/runner/heartbeat.json'), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+  const closed = await runAction(root, { action: 'close-issue', number: 27, note: 'Duplicate of #26.' }, { service: false });
+  assert.equal(closed.status, 'PASS'); assert.equal(closed.runner, undefined); assert.equal(closed.next, 'The runner records the issue as closed on its next sync');
+  db = await gh();
+  const issue27 = db.issues.find(item => item.number === 27);
+  assert.deepEqual([issue27.state, issue27.stateReason], ['closed', 'not_planned']);
+  assert.match(issue27.comments.at(-1).body, /^Closed from the ProtoFlow dashboard by @protoflow-bot: not planned\.[\s\S]*Duplicate of #26\./);
+  // The next sync settles the closed issue and triages the answered one.
+  process.env.FAKE_CLAUDE_OUTPUT = plan({ targets: ['application'] });
+  await syncIssues(root, project);
+  const state = await issuesStatus(root);
+  assert.equal(state.issues[27].status, 'closed'); assert.equal(state.issues[28].status, 'planned'); assert.equal(state.issues[28].confirmedBy, 'protoflow-bot');
+  const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(log.filter(entry => entry.status === 'PASS').map(entry => [entry.action, entry.result.number]), [['answer-issue', 28], ['close-issue', 27]]);
+});

@@ -10,6 +10,8 @@ import { deliveryStatePath, runnerStatePath, loadProgress } from './streams.js';
 import { resolveDeliveryDestination, deliveryGit as git, deliveryGh as gh } from './delivery-scope.js';
 import { openIssues, issuesStatus } from './issues.js';
 import { decideWaiver, findVerification } from './waivers.js';
+import { runnerHealth, runnerAlive } from './dashboard-data.js';
+import { runnerStopped } from './dashboard-diagnosis.js';
 
 /**
  * Proposal 0004 D3: what a person may do from the dashboard. Every action is an existing engine operation under its
@@ -17,7 +19,7 @@ import { decideWaiver, findVerification } from './waivers.js';
  * attempt is appended to .protoflow/dashboard/actions.jsonl. The dashboard user is the local person; an AI never
  * approves as a person here.
  */
-export const ACTIONS = ['merge', 'handback', 'approve', 'request-changes', 'retry', 'approve-waiver', 'reject-waiver', 'revoke-waiver'];
+export const ACTIONS = ['merge', 'handback', 'answer-issue', 'close-issue', 'approve', 'request-changes', 'retry', 'approve-waiver', 'reject-waiver', 'revoke-waiver'];
 const LOG = '.protoflow/dashboard/actions.jsonl';
 
 async function audit(root, record) {
@@ -66,20 +68,54 @@ async function mergeDelivery(root, config, { target = null, deliveryId }) {
   return { status: 'PASS', pr: delivery.pr.url, commit: delivery.commit, mergeCommit: delivery.manualMerge.mergeCommit, actor: delivery.manualMerge.mergedBy };
 }
 
-/** Hand an issue a person had to decide back to the AI: remove its status label as that person on GitHub. */
-async function handBack(root, config, { number }) {
-  // The local record decides first, so nothing reaches GitHub for an issue that is not waiting for a person.
+/** An issue waiting for a person, read locally first so nothing reaches GitHub for an issue that is not waiting. */
+async function waitingIssue(root, config, number) {
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error('An issue number is required');
   const local = (await issuesStatus(root)).issues?.[number];
   if (!local || !['needs-human', 'blocked', 'rejected'].includes(local.status)) throw new Error(`Issue #${number} is not waiting for a person (status ${local?.status ?? 'unknown'})`);
   if (!config.issues?.enabled) throw new Error('GitHub issues are not enabled for this project (issues.enabled)');
   const session = await openIssues(root, config);
   const entry = session.state.issues[number];
   if (!entry || entry.status !== local.status) throw new Error(`Issue #${number} changed while you were deciding; reload the dashboard`);
+  return { session, entry };
+}
+async function removeStatusLabel(session, entry, number) {
   const label = `${session.settings.label}:${entry.status}`;
-  const actor = await githubLogin(root);
   try { await session.api(`${session.base}/issues/${number}/labels/${encodeURIComponent(label)}`, { method: 'DELETE' }); }
   catch (error) { if (!/HTTP 404|Label does not exist/.test(error.message)) throw error; }
+  return label;
+}
+
+/** Hand an issue a person had to decide back to the AI: remove its status label as that person on GitHub. */
+async function handBack(root, config, { number }) {
+  const { session, entry } = await waitingIssue(root, config, number);
+  const actor = await githubLogin(root);
+  const label = await removeStatusLabel(session, entry, number);
   return { status: 'PASS', number, removedLabel: label, actor: `human:${actor}`, next: 'The runner triages the issue again on its next pass once it confirms your write access' };
+}
+
+/** A person answers the issue's questions as themself: their GitHub comment, then the issue goes back to triage with it. */
+async function answerIssue(root, config, { number, text }) {
+  const answer = typeof text === 'string' ? text.trim() : '';
+  if (!answer) throw new Error('Write your answer first');
+  if (answer.length > 20000) throw new Error('The answer is longer than 20000 characters');
+  // ProtoFlow ignores its own comments (they start with its marker); a person's answer must never look like one.
+  if (answer.startsWith('<!-- protoflow:')) throw new Error('The answer cannot start with a ProtoFlow marker');
+  const { session, entry } = await waitingIssue(root, config, number);
+  const actor = await githubLogin(root);
+  const comment = await session.api(`${session.base}/issues/${number}/comments`, { method: 'POST', body: { body: `${answer}\n\n<sub>Answered from the ProtoFlow dashboard.</sub>` } });
+  const label = await removeStatusLabel(session, entry, number);
+  return { status: 'PASS', number, commentId: comment.id ?? null, comment: comment.html_url ?? null, removedLabel: label, actor: `human:${actor}`, next: 'The runner triages the issue again with your answer on its next pass' };
+}
+
+/** A person decides not to do an issue: close it on GitHub as not planned, with a note saying who decided. */
+async function closeIssue(root, config, { number, note = '' }) {
+  const { session } = await waitingIssue(root, config, number);
+  const actor = await githubLogin(root);
+  const extra = typeof note === 'string' && note.trim() ? `\n\n${note.trim().slice(0, 5000)}` : '';
+  await session.api(`${session.base}/issues/${number}/comments`, { method: 'POST', body: { body: `Closed from the ProtoFlow dashboard by @${actor}: not planned.${extra}` } });
+  await session.api(`${session.base}/issues/${number}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'not_planned' } });
+  return { status: 'PASS', number, closed: true, actor: `human:${actor}`, next: 'The runner records the issue as closed on its next sync' };
 }
 
 /**
@@ -135,7 +171,9 @@ async function retry(root, config, { target = null }) {
 }
 
 /** Run one dashboard action and record it, success or not. */
-export async function runAction(root, request, { now = () => new Date().toISOString() } = {}) {
+// Actions whose effect the runner carries out on its next pass or sync.
+const RUNNER_ACTIONS = { retry: 'version', 'request-changes': 'version', handback: 'issue', 'answer-issue': 'issue', 'close-issue': 'issue' };
+export async function runAction(root, request, { now = () => new Date().toISOString(), service = process.platform === 'darwin' } = {}) {
   const config = await loadConfig(root);
   const { action, ...args } = request ?? {};
   if (!ACTIONS.includes(action)) throw Object.assign(new Error(`Unknown action ${action}`), { statusCode: 400 });
@@ -143,12 +181,19 @@ export async function runAction(root, request, { now = () => new Date().toISOStr
   try {
     const result = action === 'merge' ? await mergeDelivery(root, config, args)
       : action === 'handback' ? await handBack(root, config, { number: Number(args.number) })
+      : action === 'answer-issue' ? await answerIssue(root, config, { number: Number(args.number), text: args.text })
+      : action === 'close-issue' ? await closeIssue(root, config, { number: Number(args.number), note: args.note })
       : action === 'approve' ? await approveVersion(root, config, args)
       : action === 'request-changes' ? await requestChanges(root, config, args)
       : action === 'approve-waiver' ? await waiverDecision(root, config, 'approved', args)
       : action === 'reject-waiver' ? await waiverDecision(root, config, 'rejected', args)
       : action === 'revoke-waiver' ? await waiverDecision(root, config, 'revoked', args)
       : await retry(root, config, args);
+    // Done, but nothing runs it while no runner is running: say so, and how to start one, instead of a next step that never comes.
+    if (RUNNER_ACTIONS[action]) {
+      const { heartbeat, summary } = await runnerHealth(root, { service });
+      if (!runnerAlive({ heartbeat, ...summary })) { const stopped = runnerStopped(summary.status, RUNNER_ACTIONS[action]); Object.assign(result, { runner: 'stopped', next: `Runner 沒在跑，要等它啟動才會處理：執行 ${stopped.command}` }); }
+    }
     await audit(root, { ...record, status: result.status ?? 'PASS', result });
     return result;
   } catch (error) {
