@@ -121,6 +121,16 @@ test('legacy manifests without a version store are frozen only while the live pr
   await assert.rejects(loadVersion(root, config, manifest), /cannot be reconstructed/);
 });
 
+test('versions an older engine froze with the same ordinal queue in creation order, not file order', async t => {
+  const root = await fixture(t);
+  // Like siyue after runner supersede: the reopened older version sorts after the newer one by file name.
+  const manifest = (id, createdAt) => ({ id, createdAt, summary: id, source: { kind: 'git', identity: 'FAKE-identity', sha: id.slice(4), ordinal: 2 } });
+  await writeJson(await projectPath(root, '.protoflow/manifests/git-f75a.json'), manifest('git-f75a', '2026-10-24T21:28:29.260Z'));
+  await writeJson(await projectPath(root, '.protoflow/manifests/git-f1f9.json'), manifest('git-f1f9', '2026-10-25T08:25:31.454Z'));
+  const queue = await versionQueue(root, config);
+  assert.deepEqual([queue.current.id, queue.waiting], ['git-f75a', ['git-f1f9']]);
+});
+
 test('policy.sequentialVersions false allows explicit out-of-order work', async t => {
   const root = await fixture(t);
   const [, , v3] = await threeVersions(root);

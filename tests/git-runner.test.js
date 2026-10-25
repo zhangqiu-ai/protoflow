@@ -106,7 +106,7 @@ test('runner unit fixture (failing argv, no Codex provider): blocks FIFO, preser
   assert.equal(state.entries[0].attempts.length, 2); assert.equal(state.entries[1].attempts.length, 0);
 });
 test('runner supersede folds the blocked version into the newest one and keeps the worktree\'s changes', async t => {
-  const { root, config, shas } = await fixture(t);
+  const { root, source, config, shas } = await fixture(t);
   // Both prototype versions are queued; the first one runs and blocks.
   await scanSource(root, config);
   assert.equal((await runOnce(root, config)).status, 'BLOCKED');
@@ -142,6 +142,14 @@ test('runner supersede folds the blocked version into the newest one and keeps t
   state = await sourceStatus(root);
   assert.equal(state.entries[0].attempts.length, 1);
   await assert.rejects(supersedeRunner(root, config), /No later prototype version/);
+  // A version scanned after the fold gets the next ordinal, not the one the combined version kept, and waits behind it.
+  await fs.writeFile(path.join(source, 'prototype/index.html'), '<button id="button">Share</button>');
+  await git(source, ['add', 'prototype']); await git(source, ['commit', '-m', 'Share']);
+  const { added: [newer] } = await scanSource(root, config);
+  state = await sourceStatus(root);
+  assert.deepEqual(state.entries.map(entry => [entry.manifestId, entry.ordinal]), [[later.manifestId, 2], [newer, 3]]);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, `.protoflow/manifests/${newer}.json`), 'utf8')).source.ordinal, 3);
+  assert.deepEqual([(await versionQueue(root, config)).current.id, (await versionQueue(root, config)).waiting], [later.manifestId, [newer]]);
 });
 
 test('runner reclassify rebuilds a blocked version\'s manifest with the current engine and records both levels', async t => {

@@ -10,7 +10,9 @@ async function records(root, kind) {
   return Promise.all(names.filter(name => /^[a-zA-Z0-9_.-]+\.json$/.test(name)).map(name => readJson(path.join(directory, name))));
 }
 
-const chronological = (a, b) => a.source?.identity && a.source.identity === b.source?.identity && a.source.ordinal && b.source.ordinal ? a.source.ordinal - b.source.ordinal : a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+// Engines before 0.3.57 could give a version scanned after `runner supersede` the ordinal of the version it was folded
+// into; equal ordinals fall back to creation order, never to the file order of the manifests.
+const chronological = (a, b) => (a.source?.identity && a.source.identity === b.source?.identity && a.source.ordinal && b.source.ordinal ? a.source.ordinal - b.source.ordinal : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 
 /** Review decisions that withdraw an acceptance. Approval is separate: it never restores a rejected verification. */
 export const REJECTING = ['rejected', 'changes_requested'];
