@@ -250,7 +250,7 @@ export function runnerAlive(service) {
 function attention({ streams, issues, reviews, service, config, waivers }) {
   const items = [];
   for (const stream of streams) {
-    if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, reasonCode: stream.current.reasonCode, since: stream.current.blockedAt, actions: ['retry'] });
+    if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, reasonCode: stream.current.reasonCode, since: stream.current.blockedAt, actions: ['retry'], ...(stream.current.reasonCode === 'needs-human' && config.adapters?.planner?.command && { canAnswer: true }) });
     for (const delivery of stream.deliveries) {
       if (delivery.status === 'PR_OPEN_MANUAL' && !delivery.manualMerge) items.push({ kind: 'manual-merge', target: stream.target, deliveryId: delivery.id, pr: delivery.pr, prNumber: delivery.prNumber, commit: delivery.commit, title: `PR #${delivery.prNumber ?? '?'}`, since: delivery.updatedAt, actions: ['merge'] });
       if (['BLOCKED', 'FAIL'].includes(delivery.status)) {

@@ -298,6 +298,15 @@ function askCards(projectId, items, many) {
     if (item.kind === 'review-rejected') return card(item, ICON.review, `${where}${item.title} 審查未過`, item.reason,
       h('ul.findings', {}, item.findings.map(finding => h(`li.${finding.severity}`, { title: finding.description }, finding.file ? h('code', {}, finding.file.split('/').pop()) : null, finding.description))),
       [{ label: '退回重修', body: { action: 'request-changes', target: item.target, deliveryId: item.deliveryId }, question: `同意獨立審查的 ${item.findings.length} 項發現，把這個版本退回給執行代理重修？會以你的名字記錄「要求修改」，綁定這次驗收。`, result: '已退回 · 下一輪重修' }]);
+    if (item.kind === 'blocked-version' && item.reasonCode === 'needs-human' && item.canAnswer) {
+      const key = `${projectId}:version:${item.target ?? ''}:${item.manifestId}`;
+      const answer = done.get(key) ? null : h('textarea.answer', { rows: 3, maxlength: 4000, placeholder: '回答規劃者的問題（記錄為你的回答，規劃者重新規劃時會讀到）', 'aria-label': `回答 ${item.title}`, 'data-draft': key, oninput: event => drafts.set(key, event.target.value) });
+      if (answer) answer.value = drafts.get(key) ?? '';
+      const text = () => { const value = answer?.value.trim(); if (!value) { toast('請先寫下回答', true); answer.focus(); return null; } return { action: 'retry', target: item.target, answer: value }; };
+      return card(item, ICON.retry, `${where}${item.title} 需要你決定`, item.reason, [diagnosis, answer],
+        [{ label: '回答並重試', body: text, question: '確定送出回答並重試這個版本？規劃者會帶著你的回答重新規劃。', result: '已回答 · 重新排入' },
+          { label: '重試', body: { action: 'retry', target: item.target }, question: '確定不回答、直接重試這個版本？規劃者沒有新資訊時多半會給出同樣的答案。', result: '已重新排入' }], key);
+    }
     if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, diagnosis,
       [{ label: item.diagnosis ? '已處理，重試' : '重試', body: { action: 'retry', target: item.target }, question: item.diagnosis ? `確定已依「${item.diagnosis.title}」的步驟處理，並重試這個版本？` : '確定已處理阻塞原因並重試這個版本？', result: '已重新排入' }]);
     return card(item, ICON.alert, item.title ?? item.kind, item.reason, [diagnosis, item.pr ? h('a', { href: item.pr, target: '_blank', rel: 'noopener' }, 'GitHub') : null], null);

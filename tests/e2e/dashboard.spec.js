@@ -182,6 +182,28 @@ test('the sidebar lists every project on every page, switches between them and f
   } finally { await server.close(); await other.cleanup(); }
 });
 
+test('a version the planner handed to a person takes an answer with the retry', async ({ page }) => {
+  const blocked = await dashboardFixture({ blockedError: 'Planner PLN-fixture-2 needs a person: FAKE FIXTURE the code is done but the environment may not be fixed. Questions: Will the operator change the executor sandbox?', blockedReasonCode: 'needs-human' });
+  await addProject(blocked.root, { home: blocked.home });
+  const sent = [];
+  const server = createDashboardServer({ home: blocked.home, port: 0, service: false, pollMs: 200, actions: async (root, body) => { sent.push(body); return { status: 'PASS', next: 'FAKE FIXTURE action recorded' }; } });
+  const base = await server.listen();
+  try {
+    await page.goto(`${base}#/inbox`);
+    const card = page.getByRole('region', { name: 'Fixture App' }).locator('.ask', { hasText: '需要你決定' });
+    await expect(card).toContainText('Will the operator change the executor sandbox?');
+    // An empty answer is not sent.
+    await card.getByRole('button', { name: '回答並重試' }).click();
+    await expect(page.locator('#toast')).toHaveText('請先寫下回答');
+    expect(sent).toEqual([]);
+    await card.getByRole('textbox', { name: /^回答 / }).fill('不調整沙箱；以 Runner 驗收為準，依失敗項修一輪。');
+    page.once('dialog', dialog => { expect(dialog.message()).toContain('規劃者會帶著你的回答重新規劃'); dialog.accept(); });
+    await card.getByRole('button', { name: '回答並重試' }).click();
+    await expect(card.locator('.signed')).toContainText('已回答 · 重新排入');
+    expect(sent).toEqual([{ action: 'retry', target: null, answer: '不調整沙箱；以 Runner 驗收為準，依失敗項修一輪。' }]);
+  } finally { await server.close(); await blocked.cleanup(); }
+});
+
 test('the inbox gathers what waits across projects, most urgent first, with the fix for a known failure', async ({ page, context }) => {
   const blocked = await dashboardFixture({ blockedError: 'Claude execution FAIL (EXEC-fixture, exit 1): Failed to authenticate: OAuth session expired and could not be refreshed', blockedAt: new Date(Date.now() - 2 * 3600000 - 300000).toISOString() });
   await addProject(blocked.root, { home: blocked.home });
