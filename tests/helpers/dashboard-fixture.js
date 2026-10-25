@@ -8,7 +8,7 @@ const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recu
 // A 1×1 PNG.
 export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
-export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null, waivers = false } = {}) {
+export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null, waivers = false, deviceWait = null } = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-dashboard-')));
   const root = path.join(base, 'project'), worktree = path.join(root, '.protoflow/runner/worktree-fixture'), home = path.join(base, 'home');
   await write(path.join(root, 'protoflow.config.json'), { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], dashboard: { name: 'Fixture App', reviewer: 'Fixture Person' },
@@ -17,6 +17,8 @@ export async function dashboardFixture({ executing = true, autoApprove = true, r
     adapters: { claude: { command: { argv: ['node', 'claude-exec-adapter.js', '--model', 'claude-sonnet-5-5'] } }, codex: { command: { argv: ['node', 'codex-adapter.js', '--model', 'gpt-codex'] } }, planner: { command: { argv: ['node', 'claude-adapter.js', '--model', 'claude-opus-5-5'] } }, independentReview: { provider: 'claude', command: { argv: ['node', 'claude-review-adapter.js', '--model', 'claude-opus-5-5'] } } } });
   const sha1 = '1'.repeat(40), sha2 = '2'.repeat(40);
   const attempt = { attempt: 0, startedAt: new Date(Date.now() - 125000).toISOString(), status: 'RUNNING', processes: executing ? [{ phase: 'execute', status: 'RUNNING', startedAt: new Date(Date.now() - 60000).toISOString(), pid: 999999 }] : [] };
+  // deviceWait: the verification waits for a simulator another project's runner holds.
+  if (deviceWait) Object.assign(attempt, { processes: [], deviceWait });
   await write(path.join(root, '.protoflow/source/state.json'), { schemaVersion: 1, status: 'READY', entries: [
     { sha: sha1, manifestId: `git-${sha1}`, ordinal: 1, status: 'PASS', verificationId: 'VER-fixture-1', deliveryId: 'DLV-fixture-1', attempts: [{ status: 'PASS' }] },
     // blockedError: the version stopped on that failure instead of running.

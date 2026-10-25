@@ -9,6 +9,7 @@ import { loadConfig } from '../src/config.js';
 import { checkpoint, startSession } from '../src/sessions.js';
 import { createContext, executeContext, prepareIntegration, verify, createReview, decideReview, createBaseline, repair } from '../src/workflow.js';
 import { hash } from '../src/util.js';
+import { acquireDevices } from '../src/devices.js';
 
 async function target(t, content = '<main id="card">Hello</main>') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'protoflow-workflow-'));
@@ -167,6 +168,47 @@ test('a build that exits 0 still fails without its outputs or with a swallowed p
   assert.equal(swallowed.build.status, 'FAIL'); assert.match(swallowed.build.error, /reports a failure: ⚠️ +Something went wrong running `pod install`[\s\S]*RNFoo/);
   assert.equal(swallowed.build.environmentRetry, undefined, 'a failure that does not name the machine is not retried');
   assert.equal(swallowed.status, 'FAIL'); assert.equal(swallowed.reasonCode, undefined);
+});
+test('a verification waits for a simulator another project holds, runs its checks after, and records the wait', async t => {
+  const { root, config, manifest } = await target(t);
+  const locks = await mkdtemp(path.join(os.tmpdir(), 'protoflow-device-locks-'));
+  const previous = process.env.PROTOFLOW_DEVICE_LOCKS;
+  process.env.PROTOFLOW_DEVICE_LOCKS = locks;
+  t.after(async () => { if (previous === undefined) delete process.env.PROTOFLOW_DEVICE_LOCKS; else process.env.PROTOFLOW_DEVICE_LOCKS = previous; await rm(locks, { recursive: true, force: true }); });
+  const marker = path.join(locks, 'functional-ran');
+  const functional = { argv: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`, '--', '-destination', 'platform=iOS Simulator,name=ProtoFlow iPhone 17'] };
+  const release = await acquireDevices(['ProtoFlow iPhone 17'], { project: 'siyue', target: 'ios', manifestId: 'git-siyue', phase: 'visual' }, { dir: locks });
+  const waits = [];
+  const running = verify(root, { ...config, verification: { functional } }, manifest.id, { onDeviceWait: wait => waits.push(wait) });
+  const deadline = Date.now() + 10000;
+  while (!waits.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual([waits[0].device, waits[0].phase, waits[0].holder.project, waits[0].holder.target, waits[0].holder.manifestId], ['ProtoFlow iPhone 17', 'functional', 'siyue', 'ios', 'git-siyue']);
+  await assert.rejects(readFile(marker), /ENOENT/, 'the tests do not start while another project drives the simulator');
+  await release();
+  const report = await running;
+  assert.equal(report.functional.status, 'PASS'); assert.equal(await readFile(marker, 'utf8'), 'ran');
+  assert.deepEqual(report.devices.names, ['ProtoFlow iPhone 17']); assert.equal(report.devices.waits[0].holder.project, 'siyue'); assert.ok(report.devices.waitedMs >= 0);
+  assert.deepEqual([waits.at(-1).acquired, waits.at(-1).devices], [true, ['ProtoFlow iPhone 17']]);
+  // The verification let go of the simulator: the next one takes it at once.
+  await (await acquireDevices(['ProtoFlow iPhone 17'], { project: 'siyue' }, { dir: locks, onWait: () => assert.fail('still held') }))();
+});
+test('tests a busy simulator did not serve run once more and then are NOT_RUN environment; a failed test is the version\'s', async t => {
+  const { root, config, manifest } = await target(t);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'protoflow-functional-runs-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const runs = path.join(scratch, 'runs');
+  const policy = { ...config.policy, transientRetryDelayMs: 0 };
+  const xcodebuild = lines => ({ argv: [process.execPath, '-e', `require('fs').appendFileSync(${JSON.stringify(runs)}, 'x'); console.error(${JSON.stringify(lines)}); process.exit(65)`] });
+  const bootstrap = 'Testing failed:\n\tProtoFlowTasksUITests-Runner (96777) encountered an error (Early unexpected exit, operation never finished bootstrapping - no restart will be attempted. (Underlying Error: Test crashed with signal kill while preparing to run tests.))\n\n** TEST FAILED **';
+  const blocked = await verify(root, { ...config, policy, verification: { functional: xcodebuild(bootstrap) } }, manifest.id);
+  assert.equal(await readFile(runs, 'utf8'), 'xx', 'the tests ran once more');
+  assert.deepEqual([blocked.status, blocked.reasonCode, blocked.functional.status, blocked.environment.phase, blocked.environment.retry.status], ['NOT_RUN', 'environment', 'NOT_RUN', 'functional', 'FAIL']);
+  assert.match(blocked.environment.line, /operation never finished bootstrapping/);
+  assert.equal(blocked.visual.status, 'NOT_RUN'); assert.match(blocked.visual.reason, /Functional tests could not run in this environment/);
+  await rm(runs);
+  const failed = await verify(root, { ...config, policy, verification: { functional: xcodebuild(`/app/UITests.swift:88: error: -[ProtoFlowTasksUITests testDraft] : XCTAssertEqual failed: ("W") is not equal to ("WX")\n${bootstrap}`) } }, manifest.id);
+  assert.equal(await readFile(runs, 'utf8'), 'x', 'a test that failed is not retried');
+  assert.deepEqual([failed.status, failed.reasonCode, failed.functional.status, failed.functional.environmentRetry], ['FAIL', undefined, 'FAIL', undefined]);
 });
 test('a build that fails for the machine runs once more: failing again it is NOT_RUN environment and nothing else runs', async t => {
   const { root, config, manifest } = await target(t);

@@ -143,6 +143,8 @@ async function streamSnapshot(root, config, stream, events) {
   const current = entries.find(entry => entry.status !== 'PASS') ?? null;
   const attempt = current?.attempts?.at(-1) ?? null;
   const running = (attempt?.processes ?? []).filter(item => item.status === 'RUNNING' && !item.completedAt).at(-1) ?? null;
+  // A verification that waits for a simulator or emulator another runner holds (src/devices.js).
+  const waiting = attempt?.status === 'RUNNING' && attempt.deviceWait && !attempt.deviceWait.acquiredAt ? attempt.deviceWait : null;
   const own = events.filter(event => (event.target ?? null) === stream);
   const last = own.at(-1) ?? null;
   const manifests = new Map();
@@ -158,6 +160,7 @@ async function streamSnapshot(root, config, stream, events) {
   let stage = 'idle';
   if (current?.status === 'BLOCKED') stage = 'blocked';
   else if (running) stage = PHASE_STAGE(running.phase) ?? 'execute';
+  else if (waiting) stage = 'verify';
   else if (current || /^issue-/.test(last?.event ?? '')) stage = (last?.event === 'verified' || last?.event === 'issue-verified') ? (last.status === 'PASS' ? 'review' : 'execute') : EVENT_STAGE[last?.event] ?? (current ? 'plan' : 'idle');
   if (stage === 'deliver' && !current && last?.event !== 'issue-reviewed') stage = 'idle';
   const verificationId = attempt?.verificationId ?? current?.verificationId ?? entries.filter(entry => entry.verificationId).at(-1)?.verificationId ?? null;
@@ -178,6 +181,7 @@ async function streamSnapshot(root, config, stream, events) {
   }
   return {
     target: stream, runner: runner ? { status: runner.status, worktree: runner.worktree, branch: runner.branch } : null, stage, phase: running?.phase ?? null, phaseStartedAt: running?.startedAt ?? null,
+    deviceWait: waiting && !running ? { device: waiting.device, project: waiting.holder?.project ?? null, target: waiting.holder?.target ?? null, since: waiting.since } : null,
     current: current && { manifestId: current.manifestId, sha: current.sha, status: current.status, attempts: current.attempts?.length ?? 0, attemptStartedAt: attempt?.startedAt ?? null, planId: current.planId ?? null, error: current.error ? short(current.error, 400) : null, reasonCode: current.reasonCode ?? null, blockedAt: current.blockedAt ?? (current.status === 'BLOCKED' ? attempt?.completedAt ?? null : null), summary: (await manifestOf(current.manifestId))?.summary ?? null, level: (await manifestOf(current.manifestId))?.level ?? null },
     lastEvent: last, live, verification: verificationSummary(found?.report), versions, deliveries
   };

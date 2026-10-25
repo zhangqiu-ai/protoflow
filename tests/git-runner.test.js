@@ -12,6 +12,8 @@ import { versionQueue } from '../src/queue.js';
 import { verify, createReview, decideReview } from '../src/workflow.js';
 import { loadVersion } from '../src/versions.js';
 import { runCommand, withLock, hash, fingerprint, processGroupAlive } from '../src/util.js';
+import { acquireDevices } from '../src/devices.js';
+import { dashboardSnapshot } from '../src/dashboard-data.js';
 
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-git-'));
@@ -1555,6 +1557,39 @@ test('a build that cannot run on this machine blocks with reasonCode environment
   assert.equal(events.at(-1).reasonCode, 'environment');
   const entry = (await sourceStatus(root)).entries[0];
   assert.equal(entry.attempts.length, 1, 'no repair attempt was spent'); assert.equal(entry.reasonCode, 'environment');
+});
+
+test('a runner waits for a simulator another project holds, shows it on the dashboard, and a simulator that did not serve the tests blocks without repair', async t => {
+  const { root, config } = await fixture(t);
+  const locks = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-device-locks-'));
+  const previous = process.env.PROTOFLOW_DEVICE_LOCKS;
+  process.env.PROTOFLOW_DEVICE_LOCKS = locks;
+  t.after(async () => { if (previous === undefined) delete process.env.PROTOFLOW_DEVICE_LOCKS; else process.env.PROTOFLOW_DEVICE_LOCKS = previous; await fs.rm(locks, { recursive: true, force: true }); });
+  // The executor changes native code each time, which would let a build failure go on to repair; a simulator failure never does.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `require('fs').mkdirSync('ios', { recursive: true }); require('fs').writeFileSync('ios/App.swift', String(Math.random()))`];
+  const runs = path.join(locks, 'functional-runs');
+  config.verification = { functional: { argv: [process.execPath, '-e', `require('fs').appendFileSync(${JSON.stringify(runs)}, 'x'); console.error('ProtoFlowTasksUITests-Runner (96777) encountered an error (Early unexpected exit, operation never finished bootstrapping - no restart will be attempted.)'); process.exit(65)`], devices: ['ProtoFlow iPhone 17'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const release = await acquireDevices(['ProtoFlow iPhone 17'], { project: 'siyue', target: 'ios', manifestId: 'git-siyue', phase: 'visual' }, { dir: locks });
+  const events = [];
+  const running = runOnce(root, config, { onEvent: event => events.push(event) });
+  const deadline = Date.now() + 20000;
+  while (!events.some(event => event.event === 'device-wait') && Date.now() < deadline) await delay(20);
+  assert.deepEqual([events.find(event => event.event === 'device-wait').device, events.find(event => event.event === 'device-wait').holder.project], ['ProtoFlow iPhone 17', 'siyue']);
+  const waiting = (await dashboardSnapshot(root, { service: false })).streams[0];
+  assert.deepEqual([waiting.stage, waiting.deviceWait.project, waiting.deviceWait.target, waiting.deviceWait.device], ['verify', 'siyue', 'ios', 'ProtoFlow iPhone 17']);
+  await release();
+  const result = await running;
+  assert.equal(result.status, 'BLOCKED'); assert.equal(result.reasonCode, 'environment');
+  assert.match(result.reason, /Functional tests cannot run in this environment \(VER-[^,]+, functional\): .*operation never finished bootstrapping.*; retried after 0s: FAIL/);
+  assert.equal(await fs.readFile(runs, 'utf8'), 'xx', 'the tests ran once more before blocking');
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'repair', 'device-wait', 'device-acquired', 'verified', 'blocked'].includes(event)), ['execute', 'device-wait', 'device-acquired', 'verified', 'blocked']);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1, 'no repair attempt was spent'); assert.equal(entry.reasonCode, 'environment');
+  assert.equal(entry.attempts[0].deviceWait.holder.project, 'siyue'); assert.ok(entry.attempts[0].deviceWait.acquiredAt);
+  assert.equal((await dashboardSnapshot(root, { service: false })).streams[0].deviceWait, null);
 });
 
 test('a build that fails for the machine after the attempt changed build inputs goes on to repair', async t => {

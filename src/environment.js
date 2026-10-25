@@ -33,6 +33,19 @@ const FALLBACKS = [
   { pattern: /Unable to locate the executable `?cmake`?/i, hint: 'hermes-engine fell back to a source build after its Maven check failed; set HERMES_ENGINE_TARBALL_PATH to a local tarball or check the network to Maven' }
 ];
 
+/**
+ * A simulator or emulator that did not serve the test run: XCUITest could not bootstrap its runner on a busy
+ * simulator, the device went away. The version's tests never ran, so they did not fail.
+ */
+const DEVICE = [
+  /operation never finished bootstrapping|Test crashed with signal \w+ while preparing to run tests/i,
+  /Test runner never began executing tests|Lost connection to the test manager service|Unable to boot (?:the )?(?:Simulator|device)|Failed to (?:install or launch the test runner|prepare device)/i,
+  /\bdevice offline\b|no devices\/emulators found|device '[^']*' not found/i
+];
+
+/** A test that ran and failed: then the run is the version's, whatever the device printed besides. */
+const TEST_FAILED = /\bTest Case\b.*\bfailed\b|: error: -\[|XCTAssert\w* failed|with [1-9]\d* failures?\b|\btests? completed, [1-9]\d* failed\b|FAILURES!!!/i;
+
 const any = patterns => new RegExp(patterns.map(pattern => pattern.source).join('|'), patterns.some(pattern => pattern.flags.includes('i')) ? 'i' : '');
 
 /** An execution that failed because of the machine (login or unreachable network). */
@@ -62,6 +75,14 @@ export function buildEnvironment(result) {
     if ([...UNREACHABLE, ...FLAKY].some(pattern => pattern.test(line))) return { line: line.trim().slice(0, 500) };
   }
   return null;
+}
+
+/** The first output line of a failed test run that shows its simulator or emulator did not serve it, or null. */
+export function deviceEnvironment(result) {
+  const lines = [result?.stderr, result?.stdout, result?.error].filter(Boolean).flatMap(text => String(text).slice(-TAIL).split('\n'));
+  if (lines.some(item => TEST_FAILED.test(item))) return null;
+  const line = lines.find(item => DEVICE.some(pattern => pattern.test(item)));
+  return line ? { line: line.trim().slice(0, 500) } : null;
 }
 
 /** The output line that shows a swallowed build failure, or null. */

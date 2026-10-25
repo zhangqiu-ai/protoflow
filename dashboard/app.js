@@ -76,10 +76,12 @@ function position(stream) {
 }
 const glyphOf = action => ({ say: '◆', read: '↗', edit: '✎', write: '+', run: '▸', search: '⌕', tool: '·', done: action.ok === false ? '✕' : '✓' })[action.kind] ?? '·';
 const ACT = { say: '說明', read: '讀取', edit: '編輯', write: '新增', run: '執行', search: '搜尋', tool: '工具', done: '結束' };
+/** A verification waiting for a simulator or emulator that another runner holds. */
+const deviceWaitLabel = stream => stream.deviceWait ? `等待模擬器（被 ${[stream.deviceWait.project ?? '另一個專案', stream.deviceWait.target].filter(Boolean).join('/')} 使用）` : null;
 /** The live strip on a project card: which version, which phase, how long, and the executor's latest action. */
 function nowStrip(stream) {
-  const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
-  const phase = stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : STAGE_LABEL[stream.stage];
+  const since = stream.deviceWait?.since ?? stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
+  const phase = deviceWaitLabel(stream) ?? (stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : STAGE_LABEL[stream.stage]);
   const round = stream.current?.attempts > 1 ? `第 ${stream.current.attempts} 輪` : null;
   const live = stream.live, last = live?.last;
   const who = live ? (live.executor === 'codex' ? 'C' : /opus/i.test(live.model ?? '') ? 'O' : 'S') : null;
@@ -195,7 +197,7 @@ function pipelines(streams) {
     const { at, tone } = position(stream);
     const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
     const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
-    const sub = [stream.current?.summary, stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null, stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
+    const sub = [stream.current?.summary, deviceWaitLabel(stream) ?? (stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null), stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
     const state = stream.stopped ? `已停止（${STAGE_LABEL[stream.stage] ?? stream.stage}）` : stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
     return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
       h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),

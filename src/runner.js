@@ -458,6 +458,16 @@ function processHooks(root, config, stream, state, record) {
   };
   return { processStarting, processStarted, processFinished };
 }
+/** A verification that waits for a simulator or emulator another runner holds: recorded on the attempt for the dashboard. */
+function deviceWaitHook(root, config, stream, state, record, entry, onEvent) {
+  return async wait => {
+    if (wait.acquired) Object.assign(record.deviceWait ?? {}, { acquiredAt: wait.at, waitedMs: wait.waitedMs });
+    else record.deviceWait = { device: wait.device, holder: wait.holder, phase: wait.phase, since: record.deviceWait?.since ?? wait.at };
+    await saveProgress(root, config, stream, state);
+    await onEvent(wait.acquired ? { event: 'device-acquired', sha: entry.sha, manifestId: entry.manifestId, devices: wait.devices, waitedMs: wait.waitedMs }
+      : { event: 'device-wait', sha: entry.sha, manifestId: entry.manifestId, device: wait.device, holder: wait.holder });
+  };
+}
 /**
  * A sibling target merged changes to files this target verified (a shared top-level file) after this target's worktree
  * forked. Merge that base into the worktree and verify the accepted version again on it; only a PASS on the merged
@@ -484,7 +494,7 @@ export async function reverifyOnBase(root, config, stream, runner, state, diverg
   const hooks = processHooks(root, config, stream, state, record);
   let report;
   await shareWaivers(root, runner.worktree);
-  try { report = await verifyVersion(runner.worktree, config, entry.manifestId, { target: stream ?? undefined, reverify: true, signal, onBeforeSpawn: hooks.processStarting, onStart: hooks.processStarted, onFinish: hooks.processFinished }); }
+  try { report = await verifyVersion(runner.worktree, config, entry.manifestId, { target: stream ?? undefined, reverify: true, signal, onBeforeSpawn: hooks.processStarting, onStart: hooks.processStarted, onFinish: hooks.processFinished, onDeviceWait: deviceWaitHook(root, config, stream, state, record, entry, onEvent) }); }
   catch (error) { record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = error.message; return blocked(`Reverification on base ${base.slice(0, 7)} failed: ${error.message}`); }
   record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
   await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status, reverify: true });
@@ -718,7 +728,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       executionFailure = null; ignoredClaim = null;
       const previous = report;
       await shareWaivers(root, runner.worktree);
-      report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
+      report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished, onDeviceWait: deviceWaitHook(root, config, stream, state, record, entry, onEvent) });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
       const failed = failureKeys(report);
       record.failures = { count: failed.length, keys: failed.slice(0, 100) };
@@ -745,12 +755,13 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       if (report.status === 'PASS') break;
       if (report.status === 'NOT_RUN' && report.reasonCode === 'environment') {
         // A build that failed for the machine blocks at once, unless this attempt changed what the build reads
-        // (manifests, lockfiles, native projects): then the failure may be the version's and repair goes on.
+        // (manifests, lockfiles, native projects): then the failure may be the version's and repair goes on. A
+        // simulator that did not serve the tests always blocks: the tests never ran, whatever the attempt changed.
         const changed = Object.keys({ ...projectBefore.files, ...execution.projectAfter?.files }).filter(file => projectBefore.files[file] !== execution.projectAfter?.files?.[file]);
-        const touched = changed.filter(file => BUILD_INPUTS.test(file));
+        const { phase, line, hint, retry } = report.environment;
+        const touched = phase === 'functional' ? [] : changed.filter(file => BUILD_INPUTS.test(file));
         if (!touched.length) {
-          const { phase, line, hint, retry } = report.environment;
-          throw failure(`Build cannot run in this environment (${report.id}, ${phase}): ${line}${hint ? ` (${hint})` : ''}; retried after ${Math.round(retry.delayMs / 1000)}s: ${retry.status}${retry.line ? `, ${retry.line}` : ''}; fix the machine, then runner retry`, 'environment');
+          throw failure(`${phase === 'functional' ? 'Functional tests' : 'Build'} cannot run in this environment (${report.id}, ${phase}): ${line}${hint ? ` (${hint})` : ''}; retried after ${Math.round(retry.delayMs / 1000)}s: ${retry.status}${retry.line ? `, ${retry.line}` : ''}; fix the machine, then runner retry`, 'environment');
         }
         record.buildInputsChanged = touched.slice(0, 20);
         await saveProgress(root, config, stream, state);

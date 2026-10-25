@@ -24,7 +24,7 @@ const stable = data => hash(JSON.stringify(data, (key, value) => VOLATILE.has(ke
 /** What a project card shows per target: where it is, for how long, and the executor's latest action while it works. */
 export function overviewStream(stream) {
   const live = stream.live?.running ? { executor: stream.live.executor, model: stream.live.model, totals: stream.live.totals, last: stream.live.actions.at(-1) ?? null } : null;
-  return { target: stream.target, stage: stream.stage, phase: stream.phase, phaseStartedAt: stream.phaseStartedAt,
+  return { target: stream.target, stage: stream.stage, phase: stream.phase, phaseStartedAt: stream.phaseStartedAt, deviceWait: stream.deviceWait ?? null,
     current: stream.current && { summary: stream.current.summary, status: stream.current.status, manifestId: stream.current.manifestId, attempts: stream.current.attempts, attemptStartedAt: stream.current.attemptStartedAt, error: stream.current.error },
     live, lastEvent: stream.lastEvent ? { event: stream.lastEvent.event, at: stream.lastEvent.at } : null, lastDelivery: stream.deliveries[0] ?? null };
 }
