@@ -1613,6 +1613,49 @@ test('an executor that names files only the operator may change blocks the versi
   assert.equal(entry.attempts[0].operatorActions[0].change, 'also copy ai.html and ai.css into .protoflow/site');
 });
 
+test('an executor that edits protoflow.config.json has the edit reverted and the version blocked as operator-action before verification', async t => {
+  const { root, config } = await fixture(t);
+  // The executor adds a spec to the functional argv; verification would run the bound argv and deliver the edit unverified.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const fs=require('node:fs');const c=JSON.parse(fs.readFileSync('protoflow.config.json','utf8'));c.verification.functional.argv.push('e2e/board.spec.ts');fs.writeFileSync('protoflow.config.json',JSON.stringify(c,null,2))`];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'operator-action'], JSON.stringify(result));
+  assert.match(result.reason, /^Operator action required after attempt 0: the executor edited protoflow\.config\.json \(verification\.functional\.argv: \[.*\] → \[.*"e2e\/board\.spec\.ts"\]\); verification uses the configuration bound by runner configure/);
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'verified', 'operator-config-reverted', 'operator-action', 'blocked'].includes(event)), ['execute', 'operator-config-reverted', 'operator-action', 'blocked']);
+  const worktree = events.find(event => event.event === 'execute').worktree;
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(worktree, 'protoflow.config.json'), 'utf8')).verification.functional.argv, config.verification.functional.argv, 'the edit is not left for delivery');
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1); assert.equal(entry.attempts[0].operatorActions[0].path, 'protoflow.config.json');
+  assert.equal(entry.attempts[0].configReverted.changes[0].path, 'verification.functional.argv');
+});
+
+test('an executor that only reformats protoflow.config.json has the bytes restored and the version goes on', async t => {
+  const { root, config } = await fixture(t);
+  config.adapters.codex.command.argv = [process.execPath, '-e', `const fs=require('node:fs');fs.writeFileSync('protoflow.config.json',JSON.stringify(JSON.parse(fs.readFileSync('protoflow.config.json','utf8')),null,4))`];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
+  config.policy = { ...config.policy, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.notEqual(result.reasonCode, 'operator-action', JSON.stringify(result));
+  assert.deepEqual(events.find(event => event.event === 'operator-config-reverted').changes, []);
+  assert.ok(events.some(event => event.event === 'verified'));
+  const worktree = events.find(event => event.event === 'execute').worktree;
+  assert.equal(await fs.readFile(path.join(worktree, 'protoflow.config.json'), 'utf8'), JSON.stringify(config));
+});
+
+test('configChanges lists changed leaves and compares arrays whole', async () => {
+  const { configChanges } = await import('../src/runner.js');
+  assert.deepEqual(configChanges({ a: 1, v: { f: { argv: ['x'] } } }, { a: 1, v: { f: { argv: ['x', 'y'] } }, b: true }), [{ path: 'v.f.argv', from: ['x'], to: ['x', 'y'] }, { path: 'b', from: undefined, to: true }]);
+  assert.deepEqual(configChanges({ a: 1 }, { a: 1 }), []);
+  assert.deepEqual(configChanges({ a: 1 }, undefined), [{ path: '(file)', from: { a: 1 }, to: undefined }]);
+});
+
 test('an operator-action claim is read from its context file, trimmed, and ignored when it names only files the executor may deliver', async t => {
   const { operatorActionClaim } = await import('../src/runner.js');
   const worktree = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-operator-'));

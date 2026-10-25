@@ -314,6 +314,16 @@ export async function operatorActionClaim(config, worktree, contextId) {
   return { actions };
 }
 /** Where a failed verification failed, for a reason a person reads: its checks, the first failing test and its error. */
+/** What an edit changed in the operator's configuration, leaf by leaf; arrays (argv) compare whole. */
+export function configChanges(before, after, prefix = '') {
+  const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!plain(before) || !plain(after)) return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ path: prefix || '(file)', from: before, to: after }];
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap(key => configChanges(before[key], after[key], prefix ? `${prefix}.${key}` : key));
+}
+const describeChange = ({ path: key, from, to }) => {
+  const show = value => value === undefined ? '(none)' : JSON.stringify(value).slice(0, 200);
+  return `${key}: ${show(from)} → ${show(to)}`;
+};
 function failureSummary(report, failed) {
   const keys = `${report.id} still fails ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ` and ${failed.length - 8} more` : ''}`;
   const output = report.functional?.status && report.functional.status !== 'PASS' ? `${report.functional.stdout ?? ''}\n${report.functional.stderr ?? ''}` : '';
@@ -585,6 +595,9 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
 
       // What this attempt's executor changes, so a build that fails for the machine can be told from one it broke.
       const projectBefore = await applicationFingerprint(runner.worktree, config, target);
+      // Verification runs the configuration runner configure bound; an executor's edit to it would be delivered unverified.
+      const configFile = await projectPath(runner.worktree, 'protoflow.config.json');
+      const configBefore = await fs.readFile(configFile, 'utf8').catch(() => null);
       // Provider capacity, rate limits and 5xx responses are not the version's fault: retry the attempt after a backoff.
       const retries = config.policy?.transientRetries ?? 3, retryDelayMs = config.policy?.transientRetryDelayMs ?? 60000;
       let execution, diagnostic = '', executionContext = context;
@@ -632,6 +645,23 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         // The failed run may have edited files; a fresh context binds the current application content.
         executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
+      }
+      const configAfter = await fs.readFile(configFile, 'utf8').catch(() => null);
+      if (configBefore !== null && configAfter !== configBefore) {
+        await fs.writeFile(configFile, configBefore);
+        const parse = text => { if (text === null) return undefined; try { return JSON.parse(text); } catch { return '<invalid JSON>'; } };
+        const changes = configChanges(parse(configBefore), parse(configAfter));
+        record.configReverted = { changes: changes.slice(0, 20), at: new Date().toISOString() };
+        await saveProgress(root, config, stream, state);
+        await onEvent({ event: 'operator-config-reverted', sha: entry.sha, manifestId: entry.manifestId, attempt, changes: changes.slice(0, 20) });
+        if (changes.length) {
+          const edits = changes.slice(0, 5).map(describeChange).join('; ') + (changes.length > 5 ? `; and ${changes.length - 5} more` : '');
+          const claim = await operatorActionClaim(config, runner.worktree, record.contextId);
+          record.operatorActions = [{ path: 'protoflow.config.json', change: edits.slice(0, 500), reason: 'the executor edited the operator configuration; verification uses the configuration bound by runner configure, so the edit was reverted and is not delivered' }, ...(claim?.actions ?? [])].slice(0, 10);
+          await saveProgress(root, config, stream, state);
+          await onEvent({ event: 'operator-action', sha: entry.sha, manifestId: entry.manifestId, attempt, actions: record.operatorActions });
+          throw failure(`Operator action required after attempt ${attempt}: the executor edited protoflow.config.json (${edits}); verification uses the configuration bound by runner configure, so the edit was reverted and will not be delivered. Make the change yourself and run runner configure (or drop the requirement), then runner retry`, 'operator-action');
+        }
       }
       if (execution.status !== 'PASS') {
         const reason = `${provider === 'claude' ? 'Claude' : 'Codex'} execution ${execution.status} (${execution.id}, exit ${execution.result.exitCode}${execution.result.timedOut ? ', timed out' : ''}): ${(diagnostic || 'see execution evidence').slice(-1000)}`;

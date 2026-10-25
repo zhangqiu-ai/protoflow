@@ -13,6 +13,6 @@
 - 新增、變更、修復可由瀏覽器覆蓋的功能時，維護專案內 Node.js Playwright 回歸測試並以 runner 執行。
 - 修復循環以配置的上限停止；記錄真實 build、functional、visual 結果，未執行記錄為 `NOT_RUN`。
 - Review 與 UI Baseline 必須綁定當前 manifest、prototype、application 與驗證證據。只有配置 `policy.autoApprove: true` 且該交付已取得獨立 AI review PASS（`adapters.independentReview`）時，Runner 才以 `ai:codex-independent-review:<session>`（`reviewerKind: automated`）自動批准 PASS 版本；其他情況自動代理不得代替人類批准，任何時候都不得把自動批准登記成真人。驗收用到維護者豁免的版本即使開了 autoApprove 也需真人核准。L3 ADR 仍需真人決策。
-- 失敗只能靠修改本專案保留給人的檔案（建置腳本、`protoflow.config.json` 等）解決時，不修改、不在應用裡繞過，寫入 Context Package 的 `operatorActions` 檔案，由操作員處理。
+- 失敗只能靠修改本專案保留給人的檔案（建置腳本、`protoflow.config.json` 等）解決時，不修改、不在應用裡繞過，寫入 Context Package 的 `operatorActions` 檔案，由操作員處理。不得修改 `protoflow.config.json`：驗收只跑操作員綁定的設定，Runner 會還原改動並停下版本；需要新增驗收命令或 spec 時同樣寫入 `operatorActions`。
 - 引擎限制造成的驗收失敗只能申請維護者豁免（`protoflow waiver request` 或修復時寫 `.protoflow/engine-limits/`），不得自行核准、修改門檻或原型；T4 視覺不能豁免。
 <!-- protoflow:end -->
