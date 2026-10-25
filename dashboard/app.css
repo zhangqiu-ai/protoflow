@@ -3,6 +3,7 @@
   --bg:#F4F6F8;--glow:#E3F6F1;--panel:#FFFFFF;--sub:#F7F8FA;--ink:#0E1116;--ink2:#374151;--muted:#6B7280;--faint:#9CA3AF;
   --line:#E5E8EC;--line2:#EEF1F4;--mint:#0FA98F;--mint-hi:#16C2A3;--mint-ink:#0B7F6C;--mint-soft:#E3F6F1;--mint-edge:#BFE9DF;
   --amber:#D97706;--amber-ink:#92400E;--amber-soft:#FEF3C7;--amber-edge:#F5D9A8;--bad:#C0362C;--bad-soft:#FDECEA;
+  --violet:#7C4DCC;--violet-soft:#EFE7FB;
   --console:#0E1116;--chrome:linear-gradient(145deg,#2A2F37,#0E1116);
   --lift:0 18px 40px -18px rgba(14,17,22,.22);--deep:0 30px 60px -30px rgba(14,17,22,.45);
   --sans:"Geist","SF Pro Text","PingFang TC","Noto Sans TC","Microsoft JhengHei",system-ui,-apple-system,sans-serif;
@@ -13,6 +14,7 @@
   --bg:#0B0E12;--glow:#0E2A25;--panel:#12161C;--sub:#0F1318;--ink:#E8ECF2;--ink2:#C3CAD4;--muted:#98A3B0;--faint:#6B7480;
   --line:#232A33;--line2:#1B2129;--mint:#16C2A3;--mint-hi:#3FDCC0;--mint-ink:#5FE0C6;--mint-soft:#0E2A25;--mint-edge:#185246;
   --amber:#F0A63A;--amber-ink:#F6C26B;--amber-soft:#33260E;--amber-edge:#5A4318;--bad:#FF8A80;--bad-soft:#3A1C1A;
+  --violet:#B79CF5;--violet-soft:#2A2140;
   --console:#05070A;--lift:0 18px 40px -18px rgba(0,0,0,.6);--deep:0 30px 60px -30px rgba(0,0,0,.8);color-scheme:dark}}
 *{box-sizing:border-box}
 html{background:var(--bg)}
@@ -327,7 +329,11 @@ kbd{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 
 .scene-f b{font-size:14.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tiers{display:inline-flex;gap:5px}
 .tiers i{width:9px;height:9px;border-radius:50%;background:var(--line)}
-.tiers i.PASS{background:var(--mint)}.tiers i.FAIL{background:var(--bad)}.tiers i.ref{background:var(--faint)}
+.tiers i.PASS{background:var(--mint)}.tiers i.FAIL{background:var(--bad)}.tiers i.ref{background:var(--faint)}.tiers i.waived{background:var(--violet)}
+/* proposal 0005: passed with a maintainer waiver — neither plain PASS nor FAIL */
+.pill.waived{background:var(--violet-soft);color:var(--violet)}
+.waiver-shots{display:grid;grid-template-columns:1fr 1fr;gap:10px}.waiver-shots figure{margin:0}.waiver-shots img{width:100%;border:1px solid var(--line);border-radius:10px}.waiver-shots figcaption{font-size:12px;color:var(--muted)}
+.waivers{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px}.waivers li{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13.5px}.waivers li>span:not(.pill){flex:1;min-width:180px}.waivers li>.pill{flex:none}
 .why{margin:0;padding-left:16px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 
 /* lists */

@@ -71,7 +71,13 @@ protoflow runner start --project /path/to/app --once
 
 **阻塞原因代碼**：BLOCKED 的 entry 帶 `reasonCode`（`environment`、`stalled`、`repair-limit`、`execution`：最後一次執行失敗、`not-run`：驗收無法執行、`needs-human`：規劃者要人決定、`base-moved`：單一 target 的基底已移動，見下方「基底移動後重新開始」；其他阻塞沒有代碼）與 `blockedAt`，並發出 `blocked` 事件（含 `reasonCode` 與原始錯誤前 5 行）。`runner status` 的 `blocked`（多目標時在 `targets.<id>.blocked`）列出 `manifestId`、`status`、`reasonCode`、`since` 與 `reason`（原始錯誤前 5 行）。`runner retry` 清除 `reasonCode` 與 `blockedAt`，原代碼保存在 `retries`。
 
-**桌面通知**：macOS 上，Runner 在 `blocked` 事件（版本阻塞）、`issue-blocked`（Issue 修復阻塞）與 Issue 分流為 `needs-human` 時以 `osascript` 發出系統通知，標題為專案名稱（`dashboard.name`，否則為目錄名）與 target，內容是阻塞原因的第一行。通知是盡力而為，失敗不影響 Runner；`notifications.desktop: false` 關閉。常駐服務以 launchd 使用者代理執行，通知出現在登入的桌面。
+**桌面通知**：macOS 上，Runner 在 `blocked` 事件（版本阻塞）、`issue-blocked`（Issue 修復阻塞）、Issue 分流為 `needs-human` 與 `waiver-requested`（「豁免待核准」）時以 `osascript` 發出系統通知，標題為專案名稱（`dashboard.name`，否則為目錄名）與 target，內容是阻塞原因的第一行。通知是盡力而為，失敗不影響 Runner；`notifications.desktop: false` 關閉。常駐服務以 launchd 使用者代理執行，通知出現在登入的桌面。
+
+**維護者豁免**（[提案 0005](proposals/0005-maintainer-waivers.md)，需 `policy.waivers.reviewers`）：
+
+- 豁免的正本在專案根目錄的 `.protoflow/waivers/`。Runner 每次驗收前把這個目錄整個複製到 runner worktree（先刪除舊副本），所以儀表板上的核准與撤回在下一次驗收生效。
+- 每次驗收後，用到豁免時記錄 `waiver-applied` 事件（`verificationId`、`waivers: [{ id, scene, variant, tier }]`）；有豁免沒套用時記錄 `waiver-skipped`（`skipped: [{ id, tier, why, scene, variant }]`，最多 20 筆），例如發現已改變、豁免屬於別的原型版本、尚未核准或已撤回。
+- **自動申請**：修復請求帶 `engineLimits: ".protoflow/engine-limits/<CTX-id>.json"`。修復代理判斷失敗是引擎限制時寫入 `{ "limits": [{ "scene", "variant", "tier", "reason", "engineIssue" }] }`。修復後的驗收仍 FAIL，而且該場景層級的發現（findingsHash）與修復前那次驗收相同時，Runner 以 `ai:<執行代理>` 建立 `requested` 豁免並記錄 `waiver-requested`（發桌面通知）；申請被拒（例如 T4、層級不是 `required`、該層級沒有失敗）記錄 `waiver-request-failed` 與原因。每次最多 10 筆；同樣的申請已存在時不重複建立。Runner 絕不核准豁免。
 
 **以後續版本取代卡住的版本**：版本 BLOCKED 的原因是原型本身有錯時，修原型只會產生排在它後面的新版本，而 Runner 依序推進，修正永遠輪不到。確認後面的原型版本修好了以後，停在 BLOCKED（或 STOPPED）時由人執行 `runner supersede`：卡住的版本與它之後的所有版本合併成最新那一版，最新版的 manifest 以卡住版本的起點重新計算，範圍與分級涵蓋全部合併的變更（manifest 的 `supersedes` 列出被取代的版本）；被取代的版本退出佇列，manifest 與進度保存在 `.protoflow/superseded/<時間>/` 與 source state 的 `superseded`，事件時間線記一筆 `superseded`（被取代的版本、合併到的版本與存檔位置）。Runner worktree 保留，下一次 `runner start` 在既有實作上重新規劃、修正與驗收；L3 版本要先把 ADR 綁定到結果回報的 `manifestHash`。目前只支援單一 target；已接受的版本不能被取代。
 
@@ -116,6 +122,8 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 - **重新審查**：重啟後已保存的 PASS 失去進程內認證，或審查在得到判斷前因暫時性網路問題 BLOCKED（上限 6 次只計算 provider 實際執行過的審查，provider 執行前的網路失敗不計入，由 Runner 的循環間隔控制頻率；紀錄沒有 `retryable` 旗標時以原因文字判斷，例如 `gh` 的 `Get "…": EOF`）時，Runner 自動走明確重試路徑，執行新的 provider 審查並發出 `review-retry` 事件。審查判斷永不重擲。
 
 審查程序在回答前被停止或終止（例如 Runner 重啟；結束碼為 null、沒有輸出、沒有判斷）屬於基礎設施問題，標為可重試；這版之前的紀錄由 process 證據辨識。
+
+- **用到豁免的版本**：交付中只要有版本的驗收帶 `waivers`，就不建立自動核准；交付停在 `BLOCKED`，`reasonCode: "WAIVER_APPROVAL_REQUIRED"`，原因列出版本、驗收與豁免編號。人在儀表板核准那份驗收（人工審查綁定 `verificationHash`）後，下一次 `delivery sync` 繼續，交付的 `approval` 記為 `{ kind: "human", reviewId, reviewer, independentReviewId, waivers }`，並以 `waivedVersions` 列出每個附豁免的版本與核准它的審查。PR 留言與 `delivery status` 的 `counts`（`passed`、`passedWithWaivers`、`waivers`）把附豁免通過與一般通過分開計數。
 
 未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。
 

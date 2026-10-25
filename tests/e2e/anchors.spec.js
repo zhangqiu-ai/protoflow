@@ -6,6 +6,8 @@ import { execFile, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { parseCliOutput } from '../helpers/cli-json.js';
 import { promisify } from 'node:util';
+import { decideWaiver } from '../../src/waivers.js';
+import { loadConfig } from '../../src/config.js';
 
 const exec = promisify(execFile);
 const engine = path.resolve('.');
@@ -111,6 +113,52 @@ test('each tier reports its own kind of drift', async () => {
     await restore();
 
     expect((await command(root, ['verify', '--manifest', manifest.id])).status).toBe('PASS');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a maintainer waiver lets a failing structure tier pass only while its findings stay the same (proposal 0005)', async () => {
+  test.setTimeout(240000);
+  const root = await project({ target: { tiers: { visual: 'advisory' } } });
+  try {
+    const configFile = path.join(root, 'protoflow.config.json'), config = JSON.parse(await readFile(configFile, 'utf8'));
+    await writeFile(configFile, JSON.stringify({ ...config, policy: { ...config.policy, waivers: { reviewers: ['Fixture Maintainer'] } } }, null, 2));
+    const manifest = await command(root, ['checkpoint']);
+    await edit(root, 'app/tasks.html', '<h1 data-testid="tasks.title">Today</h1>', '<h1 data-testid="tasks.title">Tomorrow</h1>');
+    const failed = await command(root, ['verify', '--manifest', manifest.id], 1);
+    const failing = failed.visual.scenes.flatMap(scene => ['structure', 'tokens', 'layout'].filter(tier => scene.tiers[tier]?.status === 'FAIL').map(tier => ({ scene: scene.id, tier })));
+    expect(failing).toContainEqual({ scene: 'tasks.initial', tier: 'structure' });
+    // T4 is never waivable; only requests are made from the CLI.
+    const visual = await command(root, ['waiver', 'request', '--verification', failed.id, '--scene', 'tasks.initial', '--tier', 'visual', '--reason', 'x', '--requested-by', 'ai:codex'], 1);
+    expect(visual.error).toMatch(/Visual \(T4\) findings can never be waived/);
+    const ids = [];
+    for (const item of failing) {
+      const waiver = await command(root, ['waiver', 'request', '--verification', failed.id, '--scene', item.scene, '--tier', item.tier, '--reason', 'FIXTURE: treated as an engine limitation for this test', '--requested-by', 'ai:codex']);
+      expect([waiver.status, waiver.findings]).toEqual(['requested', failed.visual.scenes.find(scene => scene.id === item.scene).tiers[item.tier].reasons]);
+      ids.push(waiver.id);
+    }
+    // A requested waiver does not apply.
+    const pending = await command(root, ['verify', '--manifest', manifest.id], 1);
+    expect(pending.visual.scenes.find(scene => scene.id === 'tasks.initial').waiverSkipped).toContainEqual(expect.objectContaining({ tier: 'structure', why: 'requested, not approved yet' }));
+    const loaded = await loadConfig(root);
+    for (const waiverId of ids) await decideWaiver(root, loaded, waiverId, { status: 'approved', reviewer: 'Fixture Maintainer' });
+    // A different finding is not covered: the approved waiver does not apply.
+    const restore = await edit(root, 'app/tasks.html', '<h1 data-testid="tasks.title">Tomorrow</h1>', '<h1 data-testid="tasks.title">Yesterday</h1>');
+    const changed = await command(root, ['verify', '--manifest', manifest.id], 1);
+    expect(changed.waivers).toBeUndefined();
+    expect(changed.visual.scenes.find(item => item.id === 'tasks.initial').waiverSkipped).toContainEqual(expect.objectContaining({ tier: 'structure', why: expect.stringMatching(/^findings changed: \d+ not waived/) }));
+    await restore();
+    // The same findings again: the version passes with its waivers.
+    const passed = await command(root, ['verify', '--manifest', manifest.id]);
+    expect(passed.status).toBe('PASS');
+    expect(passed.waivers.map(item => item.id).sort()).toEqual([...ids].sort());
+    const scene = passed.visual.scenes.find(item => item.id === 'tasks.initial');
+    // The tier keeps its FAIL and findings; the summary counts it as waived.
+    expect(scene.tiers.structure.status).toBe('FAIL');
+    expect(scene.tiers.structure.reasons).toContain('tasks.title: text "Today" vs "Tomorrow"');
+    expect(scene.tiers.structure.waiver.id).toBe(ids[failing.findIndex(item => item.scene === 'tasks.initial' && item.tier === 'structure')]);
+    expect(scene.waived).toContainEqual(expect.objectContaining({ tier: 'structure' }));
+    expect(passed.visual.tiers.structure).toEqual(expect.objectContaining({ status: 'PASS', waived: expect.any(Number) }));
+    expect(await readFile(path.resolve(root, passed.visual.artifacts.find(file => file.endsWith('.html'))), 'utf8')).toContain('waived: ');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

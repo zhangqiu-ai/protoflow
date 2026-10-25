@@ -9,6 +9,7 @@ import { recordedVerdict } from './delivery-review.js';
 import { deliveryStatePath, runnerStatePath, loadProgress } from './streams.js';
 import { resolveDeliveryDestination, deliveryGit as git, deliveryGh as gh } from './delivery-scope.js';
 import { openIssues, issuesStatus } from './issues.js';
+import { decideWaiver, findVerification } from './waivers.js';
 
 /**
  * Proposal 0004 D3: what a person may do from the dashboard. Every action is an existing engine operation under its
@@ -16,7 +17,7 @@ import { openIssues, issuesStatus } from './issues.js';
  * attempt is appended to .protoflow/dashboard/actions.jsonl. The dashboard user is the local person; an AI never
  * approves as a person here.
  */
-export const ACTIONS = ['merge', 'handback', 'approve', 'request-changes', 'retry'];
+export const ACTIONS = ['merge', 'handback', 'approve', 'request-changes', 'retry', 'approve-waiver', 'reject-waiver', 'revoke-waiver'];
 const LOG = '.protoflow/dashboard/actions.jsonl';
 
 async function audit(root, record) {
@@ -81,9 +82,12 @@ async function handBack(root, config, { number }) {
   return { status: 'PASS', number, removedLabel: label, actor: `human:${actor}`, next: 'The runner triages the issue again on its next pass once it confirms your write access' };
 }
 
-/** A person approves a verified version (projects without policy.autoApprove), bound to the verification hash. */
+/**
+ * A person approves a verified version, bound to the verification hash: in projects without policy.autoApprove, and
+ * under autoApprove for a version that passed with maintainer waivers (proposal 0005 D).
+ */
 async function approveVersion(root, config, { target = null, manifestId, verificationId }) {
-  if (config.policy?.autoApprove) throw new Error('This project approves automatically (policy.autoApprove)');
+  if (config.policy?.autoApprove && !await findVerification(root, config, verificationId).then(found => found.report.waivers?.length > 0, () => false)) throw new Error('This project approves automatically (policy.autoApprove); only a version that passed with maintainer waivers is approved here');
   const reviewer = await reviewerName(root, config);
   // The verification ran in the target's runner worktree, so the review is created and decided there (its freshness
   // check compares that application) and copied to the project, exactly as the engine's own approvals are.
@@ -119,6 +123,13 @@ async function requestChanges(root, config, { target = null, deliveryId }) {
   return { status: 'PASS', reviewId: decided.id, reviewer: decided.reviewer, manifestId: entry.manifestId, findings: findings.length, next: 'The runner reopens the version and repairs it on its next pass' };
 }
 
+/** Proposal 0005: a maintainer listed in policy.waivers.reviewers approves, rejects or revokes a waiver as themself. */
+async function waiverDecision(root, config, status, { waiverId, notes = '' }) {
+  const reviewer = await reviewerName(root, config);
+  const decided = await decideWaiver(root, config, waiverId, { status, reviewer, notes: notes || { approved: 'Approved from the ProtoFlow dashboard after reviewing the findings and screenshots.', rejected: 'Rejected from the ProtoFlow dashboard.', revoked: 'Revoked from the ProtoFlow dashboard.' }[status] });
+  return { status: 'PASS', waiverId: decided.id, waiver: decided.status, reviewer, ...(decided.decision?.waiverHash && status === 'approved' && { waiverHash: decided.decision.waiverHash }), next: status === 'approved' ? 'The next verification of this version applies the waiver while its findings stay the same' : status === 'revoked' ? 'The next verification no longer applies the waiver; verifications that already used it keep their record' : 'The version keeps failing on these findings' };
+}
+
 async function retry(root, config, { target = null }) {
   return withLock(root, () => retryRunner(root, config, { target }));
 }
@@ -134,6 +145,9 @@ export async function runAction(root, request, { now = () => new Date().toISOStr
       : action === 'handback' ? await handBack(root, config, { number: Number(args.number) })
       : action === 'approve' ? await approveVersion(root, config, args)
       : action === 'request-changes' ? await requestChanges(root, config, args)
+      : action === 'approve-waiver' ? await waiverDecision(root, config, 'approved', args)
+      : action === 'reject-waiver' ? await waiverDecision(root, config, 'rejected', args)
+      : action === 'revoke-waiver' ? await waiverDecision(root, config, 'revoked', args)
       : await retry(root, config, args);
     await audit(root, { ...record, status: result.status ?? 'PASS', result });
     return result;

@@ -20,6 +20,7 @@ import { syncIssues } from './issues.js';
 import { runIssues } from './issue-runner.js';
 import { notifyDesktop } from './notify.js';
 import { EXECUTOR_ENVIRONMENT, BUILD_INPUTS } from './environment.js';
+import { shareWaivers, requestWaiver, waiverReviewers, findingsHash } from './waivers.js';
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -263,6 +264,38 @@ export function executionDiagnostic(execution) {
   return String(diagnostic || execution.result.stderr || '');
 }
 export const MAX_AUTOMATED_REOPENINGS = 3;
+/** Proposal 0005: which maintainer waivers a verification used, and which did not apply and why. */
+async function waiverEvents(entry, report, onEvent) {
+  if (report.waivers?.length) await onEvent({ event: 'waiver-applied', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, waivers: report.waivers.map(({ id, scene, variant, tier }) => ({ id, scene, variant, tier })) });
+  const skipped = (report.visual?.scenes ?? []).flatMap(scene => (scene.waiverSkipped ?? []).map(item => ({ ...item, scene: scene.id, variant: scene.variant ?? null })));
+  if (skipped.length) await onEvent({ event: 'waiver-skipped', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, skipped: skipped.slice(0, 20) });
+}
+/**
+ * Proposal 0005 C: when the repair executor marked a failing scene tier as an engine limitation
+ * (.protoflow/engine-limits/<context>.json) and the same findings failed in the verification it repaired and again
+ * after it, ask the maintainer for a waiver. The request is `requested` only; a person decides it on the dashboard.
+ */
+export async function requestEngineLimitWaivers(root, config, worktree, { entry, record, report, previous, onEvent }) {
+  if (!waiverReviewers(config)?.length || report?.status !== 'FAIL' || !previous || !/^CTX-[A-Za-z0-9-]+$/.test(record.contextId ?? '')) return [];
+  const claim = await readJson(await projectPath(worktree, `.protoflow/engine-limits/${record.contextId}.json`), null).catch(() => null);
+  const tierOf = (verification, limit) => (verification.visual?.scenes ?? []).find(scene => scene.id === limit.scene && (scene.variant ?? null) === (limit.variant ?? null))?.tiers?.[limit.tier];
+  const requested = [];
+  for (const limit of (Array.isArray(claim?.limits) ? claim.limits : []).filter(item => item && typeof item.scene === 'string' && typeof item.tier === 'string').slice(0, 10)) {
+    const now = tierOf(report, limit), before = tierOf(previous, limit);
+    if (now?.status !== 'FAIL' || before?.status !== 'FAIL' || !now.reasons?.length || findingsHash(now.reasons) !== findingsHash(before.reasons ?? [])) continue;
+    const where = { sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, scene: limit.scene, variant: limit.variant ?? null, tier: limit.tier };
+    try {
+      const waiver = await requestWaiver(root, config, {
+        report, reportRoot: worktree, scene: limit.scene, variant: limit.variant ?? null, tier: limit.tier,
+        reason: String(limit.reason ?? '').trim().slice(0, 2000) || 'The executor marked this failure as an engine limitation',
+        engineIssue: typeof limit.engineIssue === 'string' && limit.engineIssue.trim() ? limit.engineIssue.trim().slice(0, 500) : null,
+        requestedBy: { kind: 'ai', name: `ai:${record.executor ?? 'executor'}` }
+      });
+      if (!waiver.existing) { requested.push(waiver.id); await onEvent({ event: 'waiver-requested', ...where, waiverId: waiver.id, findings: waiver.findings.length }); }
+    } catch (error) { await onEvent({ event: 'waiver-request-failed', ...where, reason: error.message.slice(0, 300) }); }
+  }
+  return requested;
+}
 const MAX_REVIEW_ATTEMPTS = 6;
 /**
  * Under policy.autoApprove the runner settles a blocked delivery the way an operator would, without weakening a gate:
@@ -381,10 +414,12 @@ export async function reverifyOnBase(root, config, stream, runner, state, diverg
   await onEvent({ event: 'reverify', sha: entry.sha, manifestId: entry.manifestId, baseSha: base });
   const hooks = processHooks(root, config, stream, state, record);
   let report;
+  await shareWaivers(root, runner.worktree);
   try { report = await verifyVersion(runner.worktree, config, entry.manifestId, { target: stream ?? undefined, reverify: true, signal, onBeforeSpawn: hooks.processStarting, onStart: hooks.processStarted, onFinish: hooks.processFinished }); }
   catch (error) { record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = error.message; return blocked(`Reverification on base ${base.slice(0, 7)} failed: ${error.message}`); }
   record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
   await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status, reverify: true });
+  await waiverEvents(entry, report, onEvent);
   if (report.status !== 'PASS') return blocked(`Reverification on base ${base.slice(0, 7)} is ${report.status} (${report.id}); the merged base changes this target's accepted result and needs a repair`);
   await exportEvidence(root, runner.worktree, report);
   entry.verificationId = report.id; await saveProgress(root, config, stream, state);
@@ -583,6 +618,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         continue;
       }
       executionFailure = null;
+      const previous = report;
+      await shareWaivers(root, runner.worktree);
       report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
       const failed = failureKeys(report);
@@ -590,6 +627,8 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       await reapLeftovers(root, runner.worktree, record, 'verify', onEvent);
       await saveProgress(root, config, stream, state);
       await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
+      await waiverEvents(entry, report, onEvent);
+      if (report.status === 'FAIL') await requestEngineLimitWaivers(root, config, runner.worktree, { entry, record, report, previous, onEvent });
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       if (report.status === 'PASS') break;
       if (report.status === 'NOT_RUN' && report.reasonCode === 'environment') {
