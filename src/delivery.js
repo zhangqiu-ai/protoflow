@@ -93,9 +93,10 @@ async function pendingChanges(worktree) {
  * the base after the last delivery merged, a worktree whose commits are all in the base and which holds no other
  * change fast-forwards to it. Otherwise the version would be built on a stale base and its delivery could never be
  * reviewed, so it blocks before anything runs (`runner rebase` starts the undelivered versions over on the base).
+ * The one exception is the work of a version reopened after its delivery was rejected (see carryRevokedWork).
  * Several targets integrate or reverify at delivery instead.
  */
-export async function alignWorktreeToBase(worktree, config) {
+export async function alignWorktreeToBase(worktree, config, root = null) {
   const options = config.runner?.delivery;
   if (!options || isMultiTarget(config)) return null;
   const base = await currentBase(worktree, options);
@@ -105,11 +106,68 @@ export async function alignWorktreeToBase(worktree, config) {
   const ahead = (await git(worktree, ['rev-list', '--count', `${base.sha}..${head}`])).trim();
   const changes = await pendingChanges(worktree);
   if (ahead !== '0' || changes.length) {
-    const detail = [ahead !== '0' && `${ahead} commit(s) not in the base`, changes.length && `uncommitted changes in ${changes.slice(0, 5).join(', ')}`].filter(Boolean).join(' and ');
+    const carried = root && ahead !== '0' ? await carryRevokedWork(root, config, worktree, base, head) : null;
+    if (carried?.to) return carried;
+    const detail = [ahead !== '0' && `${ahead} commit(s) not in the base`, changes.length && `uncommitted changes in ${changes.slice(0, 5).join(', ')}`, carried?.overlap && `files the base also changed (${carried.overlap.slice(0, 5).join(', ')})`].filter(Boolean).join(' and ');
     throw Object.assign(new Error(`Base ${options.baseBranch} moved to ${base.sha.slice(0, 7)} but the runner worktree has ${detail}; a version built there could not be delivered. Merge or retire its delivery, or run runner rebase to start the undelivered versions over on the current base`), { code: 'BASE_MOVED', baseSha: base.sha });
   }
   await git(worktree, ['merge', '--ff-only', base.sha]);
   return { from: head, to: base.sha };
+}
+
+/**
+ * A version reopened after its delivery was rejected keeps the rejected commit in the runner branch until the next
+ * delivery drops it from the history and keeps its files (dropRevokedHistory). When people move the base meanwhile,
+ * the work moves onto the current base the same way, instead of blocking, when every commit not in the base belongs to
+ * unpublished revoked deliveries, no other delivery is unsettled, and the base changed no file the worktree changed
+ * (or changed it to the same content). HEAD becomes the base, the worktree keeps every file it carried, the files only
+ * the base changed take the base's content, and the commits and uncommitted files are kept under an archive ref.
+ * Returns null when this does not apply, or { overlap } when only the files the base also changed are in the way.
+ */
+async function carryRevokedWork(root, config, worktree, base, head) {
+  const state = await deliveryStatus(root, config, null);
+  if (state.deliveries.some(item => !settled(item))) return null;
+  const fork = await git(worktree, ['merge-base', head, base.sha]);
+  const list = async args => (await git(worktree, args)).split(args.includes('-z') ? '\0' : '\n').filter(Boolean);
+  const revoked = new Set(), deliveries = [];
+  for (const delivery of state.deliveries.filter(item => item.status === 'REVOKED' && unpublished(item))) {
+    for (const commit of deliveryCommits(delivery)) {
+      if (!await isAncestor(worktree, commit, head) || await isAncestor(worktree, commit, base.sha)) continue;
+      for (const sha of await list(['rev-list', `${fork}..${commit}`])) revoked.add(sha);
+      if (!deliveries.includes(delivery.id)) deliveries.push(delivery.id);
+    }
+  }
+  const commits = await list(['rev-list', `${fork}..${head}`]);
+  if (!commits.length || commits.some(sha => !revoked.has(sha))) return null;
+  const moved = await list(['diff', '--name-status', '--no-renames', '-z', fork, base.sha]);
+  const files = [];
+  for (let index = 0; index < moved.length; index += 2) files.push({ status: moved[index], file: moved[index + 1] });
+  const worked = new Set([...await list(['diff', '--name-only', '--no-renames', '-z', fork]), ...await list(['ls-files', '--others', '--exclude-standard', '-z'])]);
+  const baseBlob = async file => { try { return await git(worktree, ['rev-parse', `${base.sha}:${file}`]); } catch { return null; } };
+  const localBlob = async file => (await fs.lstat(path.join(worktree, file)).catch(() => null)) ? git(worktree, ['hash-object', '--', file]) : null;
+  const overlap = [];
+  for (const { file } of files.filter(item => worked.has(item.file))) if (await baseBlob(file) !== await localBlob(file)) overlap.push(file);
+  if (overlap.length) return { overlap };
+
+  const at = new Date().toISOString(), ref = `refs/protoflow/carried/${at.replace(/[:.]/g, '-')}`;
+  const changes = await pendingChanges(worktree);
+  let archive = head;
+  if (changes.length) {
+    // Staging everything is what the next delivery does anyway; here it builds the archive tree.
+    await git(worktree, ['add', '-A', '--', ...changes]);
+    archive = await git(worktree, ['commit-tree', await git(worktree, ['write-tree']), '-p', head, '-m', `ProtoFlow: uncommitted runner changes carried onto ${base.sha.slice(0, 7)}`]);
+  }
+  await git(worktree, ['update-ref', ref, archive]);
+  // HEAD moves to the base keeping the index and files; then the files only the base changed take its content.
+  await git(worktree, ['reset', '-q', '--soft', base.sha]);
+  const removed = files.filter(item => item.status === 'D').map(item => item.file);
+  const updated = files.filter(item => item.status !== 'D').map(item => item.file);
+  for (let index = 0; index < updated.length; index += 200) await git(worktree, ['checkout', base.sha, '--', ...updated.slice(index, index + 200)]);
+  for (const file of removed) {
+    await git(worktree, ['rm', '-q', '--cached', '--ignore-unmatch', '--', file]);
+    await fs.rm(path.join(worktree, file), { force: true });
+  }
+  return { from: head, to: base.sha, carried: { archive: ref, commits: commits.length, deliveries, files: files.length } };
 }
 
 /**
