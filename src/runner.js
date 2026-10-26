@@ -1035,7 +1035,13 @@ export const BEAT_INTERVAL_MS = 60000;
 /** Every runner event with its time, for the dashboard's timeline; rotated to events.1.jsonl past EVENTS_LIMIT bytes. */
 export const EVENTS = '.protoflow/runner/events.jsonl';
 export const EVENTS_LIMIT = 5 * 1024 * 1024;
-async function recordEvent(root, event) {
+/**
+ * A person paused the project's development (`protoflow project pause`, src/pause.js): who, when and why. The runner
+ * takes no work while it exists (versions, issue triage and repair) and keeps scanning, so new commits are frozen.
+ */
+export const PAUSE = '.protoflow/paused.json';
+export async function projectPause(root) { return readJson(await projectPath(root, PAUSE), null); }
+export async function recordEvent(root, event) {
   try {
     const file = await projectPath(root, EVENTS);
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -1074,7 +1080,7 @@ export async function startRunner(root, config, { once = false, service = false,
   // responsive, so a supervisor tells a long step from a hung runner.
   // Issues are synced after every pass, and also while a pass runs long (an hour of repair on one version), at most
   // every issueSyncIntervalMs. Issue work takes the issues lock, so this process runs it one piece at a time.
-  let lastIssueSync = Date.now(), issueQueue = Promise.resolve(), issueBusy = 0;
+  let lastIssueSync = Date.now(), issueQueue = Promise.resolve(), issueBusy = 0, pausedSeen = null;
   const issueWork = task => {
     issueBusy++;
     const run = issueQueue.then(task).finally(() => { issueBusy--; });
@@ -1088,8 +1094,15 @@ export async function startRunner(root, config, { once = false, service = false,
   });
   const pulse = setInterval(() => {
     beat();
-    if (config.issues?.enabled && !issueBusy && !signal?.aborted && Date.now() - lastIssueSync >= issueSyncIntervalMs) syncIssuesNow();
+    if (config.issues?.enabled && !issueBusy && !signal?.aborted && Date.now() - lastIssueSync >= issueSyncIntervalMs) projectPause(root).then(paused => { if (!paused && !issueBusy) syncIssuesNow(); }, () => {});
   }, Math.min(beatIntervalMs, issueSyncIntervalMs));
+  // A paused project is reported once per pause; the pass only scans, and a foreground runner returns PAUSED.
+  const pausedPass = async paused => {
+    if (pausedSeen !== paused.pausedAt) { pausedSeen = paused.pausedAt; await onEvent({ event: 'paused', since: paused.pausedAt, by: paused.by?.name ?? null, reason: paused.reason ?? null }); }
+    lastPass = { at: new Date().toISOString(), status: 'PAUSED', paused: { since: paused.pausedAt, reason: paused.reason ?? null } };
+    await beat();
+    return { status: 'PAUSED', paused, reason: `Development is paused${paused.reason ? `: ${paused.reason}` : ''}; protoflow project resume continues it` };
+  };
   pulse.unref?.();
   return withLock(root, async () => {
     let last = { status: 'IDLE' };
@@ -1100,16 +1113,26 @@ export async function startRunner(root, config, { once = false, service = false,
       try { const scan = await withLock(root, () => scanSource(root, config)); await onEvent({ event: 'scanned', tip: scan.tip, added: scan.added }); }
       catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN' && !service) throw error; }
       if (signal?.aborted) return { status: 'STOPPED' };
+      const paused = await projectPause(root);
+      if (paused) {
+        const result = await pausedPass(paused);
+        if (once || !service) return result;
+        try { await delay(config.runner?.pollMs ?? 15000, undefined, { signal }); } catch (error) { if (error.name !== 'AbortError') throw error; }
+        continue;
+      }
+      if (pausedSeen) { pausedSeen = null; await onEvent({ event: 'resumed' }); }
       // Each target advances through the same versions independently; one blocked target does not hold the others.
+      // A pause that arrives mid-pass takes effect once the version in hand settles: the remaining targets wait.
       const results = {};
       for (const stream of streams) {
         const events = stream ? event => onEvent({ ...event, target: stream }) : onEvent;
+        if (await projectPause(root)) { results[stream ?? ''] = { status: 'PAUSED' }; continue; }
         let result;
         do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
         // An automated rejection (REOPENED) repairs at once; MAX_AUTOMATED_REOPENINGS bounds the loop.
-        while (['PASS', 'REOPENED'].includes(result.status) && !signal?.aborted);
+        while (['PASS', 'REOPENED'].includes(result.status) && !signal?.aborted && !await projectPause(root));
         // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
-        if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted) {
+        if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted && !await projectPause(root)) {
           try {
             const issue = await issueWork(() => runIssues(root, config, stream, { signal, onEvent: events }));
             if (!['IDLE', 'DISABLED'].includes(issue.status)) await events({ event: 'issue-pass', ...issue });
@@ -1121,6 +1144,12 @@ export async function startRunner(root, config, { once = false, service = false,
         results[stream ?? ''] = result;
       }
       last = streams[0] === null ? results[''] : aggregate(results);
+      const pausedNow = await projectPause(root);
+      if (pausedNow) {
+        const result = await pausedPass(pausedNow);
+        if (once || !service) return { ...result, targets: results };
+        continue;
+      }
       // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
       if (config.issues?.enabled && !signal?.aborted) await syncIssuesNow();
       const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));

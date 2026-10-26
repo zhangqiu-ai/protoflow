@@ -24,7 +24,7 @@ const stable = data => hash(JSON.stringify(data, (key, value) => VOLATILE.has(ke
 /** What a project card shows per target: where it is, for how long, and the executor's latest action while it works. */
 export function overviewStream(stream) {
   const live = stream.live?.running ? { executor: stream.live.executor, model: stream.live.model, totals: stream.live.totals, last: stream.live.actions.at(-1) ?? null } : null;
-  return { target: stream.target, stage: stream.stage, phase: stream.phase, phaseStartedAt: stream.phaseStartedAt, deviceWait: stream.deviceWait ?? null,
+  return { target: stream.target, stage: stream.stage, phase: stream.phase, phaseStartedAt: stream.phaseStartedAt, deviceWait: stream.deviceWait ?? null, paused: stream.paused === true, stopped: stream.stopped === true,
     current: stream.current && { summary: stream.current.summary, status: stream.current.status, manifestId: stream.current.manifestId, attempts: stream.current.attempts, attemptStartedAt: stream.current.attemptStartedAt, error: stream.current.error },
     live, lastEvent: stream.lastEvent ? { event: stream.lastEvent.event, at: stream.lastEvent.at } : null, lastDelivery: stream.deliveries[0] ?? null };
 }
@@ -55,7 +55,7 @@ export function createDashboardServer({ home = os.homedir(), host = '127.0.0.1',
     for (const entry of await listProjects({ home })) {
       try {
         const view = await snapshot(entry);
-        out.push({ id: entry.id, name: entry.name, root: entry.root, service: view.service, roles: view.roles, attention: view.attention.length, inbox: view.attention, streams: view.streams.map(overviewStream), issues: { open: view.issues.filter(issue => !['done', 'closed'].includes(issue.status)).length, inProgress: view.issues.filter(issue => issue.status === 'in-progress').length }, lastEvent: view.events[0] ?? null, engineVersion: view.engineVersion });
+        out.push({ id: entry.id, name: entry.name, root: entry.root, paused: view.project.paused ?? null, service: view.service, roles: view.roles, attention: view.attention.length, inbox: view.attention, streams: view.streams.map(overviewStream), issues: { open: view.issues.filter(issue => !['done', 'closed'].includes(issue.status)).length, inProgress: view.issues.filter(issue => issue.status === 'in-progress').length }, lastEvent: view.events[0] ?? null, engineVersion: view.engineVersion });
       } catch (error) { out.push({ id: entry.id, name: entry.name, root: entry.root, error: error.message.slice(0, 300) }); }
     }
     return { protocol: 'protoflow.dashboard-overview/1', generatedAt: new Date().toISOString(), projects: out };

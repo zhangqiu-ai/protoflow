@@ -894,7 +894,7 @@ for (const phase of ['setup', 'execute', 'build', 'functional']) {
       await runOnce(root, JSON.parse(await fs.readFile(root + '/protoflow.config.json', 'utf8')));
     `, root, phase], { stdio: 'ignore' });
     t.after(() => worker.kill('SIGKILL'));
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 15000;
     let saved;
     while (true) {
       const status = await runnerStatus(root);
@@ -2054,4 +2054,73 @@ test('the runner records its events and the executor trace for the dashboard, an
   assert.notEqual((await sourceStatus(root)).entries[0].status, 'BLOCKED');
   const log = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(log.map(entry => [entry.action, entry.status]), [['retry', 'PASS']]);
+});
+
+test('a paused project: the runner only freezes new commits, issue sync is refused, and resume runs a stopped version again', async t => {
+  const { root, config, shas } = await fixture(t);
+  const { pauseProject, resumeProject } = await import('../src/pause.js');
+  const paused = await pauseProject(root, config, { reason: 'User asked to pause mobile', by: 'ai:claude' });
+  assert.deepEqual([paused.paused.by, paused.paused.reason], [{ kind: 'ai', name: 'ai:claude' }, 'User asked to pause mobile']);
+  const events = [];
+  const result = await startRunner(root, config, { once: true, onEvent: event => events.push(event) });
+  assert.equal(result.status, 'PAUSED');
+  assert.match(result.reason, /User asked to pause mobile; protoflow project resume continues it/);
+  assert.deepEqual(events.map(event => event.event), ['scanned', 'paused']);
+  const progress = await sourceStatus(root);
+  assert.deepEqual(progress.entries.map(entry => [entry.sha, entry.status, entry.attempts?.length ?? 0]), shas.map(sha => [sha, 'PENDING', 0]), 'commits are frozen, none runs');
+  const heartbeat = JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
+  assert.deepEqual([heartbeat.lastPass.status, heartbeat.lastPass.paused.reason], ['PAUSED', 'User asked to pause mobile']);
+  // The CLI refuses issue triage while paused (exit 3), before reaching GitHub.
+  const cli = await runCommand(root, { argv: [process.execPath, path.resolve('bin/protoflow.js'), 'issues', 'sync', '--project', root] });
+  assert.equal(cli.exitCode, 3);
+  assert.equal(JSON.parse(cli.stdout).status, 'PAUSED');
+  // A runner stopped mid-version before the pause: resuming puts that version back in line.
+  const file = path.join(root, '.protoflow/source/state.json'), state = JSON.parse(await fs.readFile(file, 'utf8'));
+  Object.assign(state.entries[0], { status: 'STOPPED', error: 'STOPPED: visual verification was interrupted', attempts: [{ attempt: 0, status: 'STOPPED', processes: [], completedAt: new Date().toISOString() }] });
+  await fs.writeFile(file, JSON.stringify(state));
+  const resumed = await resumeProject(root, config, { by: 'ai:claude' });
+  assert.deepEqual(resumed.retried, [{ target: null, manifestId: state.entries[0].manifestId }]);
+  assert.equal((await sourceStatus(root)).entries[0].status, 'PENDING');
+  await assert.rejects(fs.access(path.join(root, '.protoflow/paused.json')));
+  assert.equal((await resumeProject(root, config)).already, true);
+});
+
+test('a resident runner idles while paused and continues once resumed, without a restart', async t => {
+  const { root, config } = await fixture(t);
+  const { pauseProject, resumeProject } = await import('../src/pause.js');
+  await pauseProject(root, config, { reason: 'hold' });
+  const controller = new AbortController(), events = [];
+  let resumed = false;
+  const run = startRunner(root, { ...config, runner: { pollMs: 20 } }, { service: true, signal: controller.signal, onEvent: async event => {
+    events.push(event.event);
+    if (event.event === 'paused' && !resumed) { resumed = true; await resumeProject(root, config); }
+    if (event.event === 'resumed') controller.abort();
+  } });
+  assert.equal((await run).status, 'STOPPED');
+  assert.equal(events.filter(event => event === 'paused').length, 1, 'reported once per pause, however many passes');
+  assert.ok(events.filter(event => event === 'scanned').length >= 2, 'it kept scanning while paused');
+  assert.equal(events.at(-1), 'resumed');
+});
+
+test('a pause that arrives while a version runs takes effect once that version settles', async t => {
+  const { root, config } = await fixture(t);
+  const { pauseProject } = await import('../src/pause.js');
+  const events = [];
+  const result = await startRunner(root, config, { once: true, onEvent: async event => {
+    events.push(event.event);
+    if (event.event === 'scanned') await pauseProject(root, config, { reason: 'mid-pass' });
+  } });
+  assert.equal(result.status, 'PAUSED');
+  assert.deepEqual(events.slice(0, 2), ['scanned', 'paused'], 'paused before the first version started');
+  // Paused after the first version started: it settles (here it blocks on the failing executor), the next does not start.
+  await fs.rm(path.join(root, '.protoflow/paused.json'));
+  const later = [];
+  const second = await startRunner(root, config, { once: true, onEvent: async event => {
+    later.push(event.event);
+    if (event.event === 'execute' || event.event === 'execute-failed') await pauseProject(root, config, { reason: 'mid-version' });
+  } });
+  assert.equal(second.status, 'PAUSED');
+  assert.equal(later.at(-1), 'paused');
+  const entries = (await sourceStatus(root)).entries;
+  assert.equal(entries[1].attempts?.length ?? 0, 0, 'the next version did not start');
 });

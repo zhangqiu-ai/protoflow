@@ -12,6 +12,8 @@ import { openIssues, issuesStatus } from './issues.js';
 import { decideWaiver, findVerification } from './waivers.js';
 import { runnerHealth, runnerAlive } from './dashboard-data.js';
 import { runnerStopped } from './dashboard-diagnosis.js';
+import { pauseProject, resumeProject } from './pause.js';
+import { projectPause } from './runner.js';
 
 /**
  * Proposal 0004 D3: what a person may do from the dashboard. Every action is an existing engine operation under its
@@ -19,7 +21,7 @@ import { runnerStopped } from './dashboard-diagnosis.js';
  * attempt is appended to .protoflow/dashboard/actions.jsonl. The dashboard user is the local person; an AI never
  * approves as a person here.
  */
-export const ACTIONS = ['merge', 'handback', 'answer-issue', 'close-issue', 'approve', 'request-changes', 'retry', 'approve-waiver', 'reject-waiver', 'revoke-waiver'];
+export const ACTIONS = ['merge', 'handback', 'answer-issue', 'close-issue', 'approve', 'request-changes', 'retry', 'approve-waiver', 'reject-waiver', 'revoke-waiver', 'pause', 'resume'];
 const LOG = '.protoflow/dashboard/actions.jsonl';
 
 async function audit(root, record) {
@@ -172,9 +174,19 @@ async function retry(root, config, { target = null, answer = null }) {
   return withLock(root, () => retryRunner(root, config, { target, answer, via: 'dashboard', by }));
 }
 
+/** A person pauses or resumes the project's development as themself (dashboard.reviewer or git user.name). */
+async function pause(root, config, { reason = null }) {
+  const by = await reviewerName(root, config);
+  return withLock(root, () => pauseProject(root, config, { reason, by, via: 'dashboard' }));
+}
+async function resume(root, config) {
+  const by = await reviewerName(root, config);
+  return withLock(root, () => resumeProject(root, config, { by, via: 'dashboard' }));
+}
+
 /** Run one dashboard action and record it, success or not. */
 // Actions whose effect the runner carries out on its next pass or sync.
-const RUNNER_ACTIONS = { retry: 'version', 'request-changes': 'version', handback: 'issue', 'answer-issue': 'issue', 'close-issue': 'issue' };
+const RUNNER_ACTIONS = { retry: 'version', 'request-changes': 'version', handback: 'issue', 'answer-issue': 'issue', 'close-issue': 'issue', resume: 'version' };
 export async function runAction(root, request, { now = () => new Date().toISOString(), service = process.platform === 'darwin' } = {}) {
   const config = await loadConfig(root);
   const { action, ...args } = request ?? {};
@@ -190,9 +202,12 @@ export async function runAction(root, request, { now = () => new Date().toISOStr
       : action === 'approve-waiver' ? await waiverDecision(root, config, 'approved', args)
       : action === 'reject-waiver' ? await waiverDecision(root, config, 'rejected', args)
       : action === 'revoke-waiver' ? await waiverDecision(root, config, 'revoked', args)
+      : action === 'pause' ? await pause(root, config, args)
+      : action === 'resume' ? await resume(root, config)
       : await retry(root, config, args);
     // Done, but nothing runs it while no runner is running: say so, and how to start one, instead of a next step that never comes.
-    if (RUNNER_ACTIONS[action]) {
+    if (RUNNER_ACTIONS[action] && action !== 'resume' && await projectPause(root)) Object.assign(result, { runner: 'paused', next: '專案已暫停，要等恢復開發後 runner 才會處理' });
+    else if (RUNNER_ACTIONS[action]) {
       const { heartbeat, summary } = await runnerHealth(root, { service });
       if (!runnerAlive({ heartbeat, ...summary })) { const stopped = runnerStopped(summary.status, RUNNER_ACTIONS[action]); Object.assign(result, { runner: 'stopped', next: `Runner 沒在跑，要等它啟動才會處理：執行 ${stopped.command}` }); }
     }

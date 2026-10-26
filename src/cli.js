@@ -22,6 +22,8 @@ import { versionQueue } from './queue.js';
 import { syncDeliveries, deliveryReport } from './delivery.js';
 import { requestWaiver, listWaivers, loadWaiver } from './waivers.js';
 import { syncIssues, issuesStatus } from './issues.js';
+import { pauseProject, resumeProject, pauseStatus } from './pause.js';
+import { projectPause } from './runner.js';
 import { createContext, prepareIntegration, executeContext, verify, createReview, decideReview, createBaseline, repair, loadArtifact } from './workflow.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -52,6 +54,10 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          under an archive ref, reset it to the base and run those versions again
   runner gc [--apply]                    List runner worktrees; --apply archives and removes unused clean ones
   runner start --service                 Resident mode: keeps polling through blocks; stops only on SIGTERM/SIGINT
+  project pause [--reason text] [--by name|ai:<agent>] | resume [--by ...] | status
+                                         Pause development: the runner takes no work (versions, issue triage and
+                                         repair) and only scans; runner start --once and issues sync return PAUSED.
+                                         resume runs a STOPPED version again; worktrees and blocked versions stay as they are
   runner service install [--env K=V] | uninstall | status
                                          macOS launchd LaunchAgent: start at login, restart on exit, heartbeat health
   dashboard snapshot | add [--label name] | remove | list
@@ -73,6 +79,7 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          on the dashboard; visual findings are never waivable)
   waiver list | show --waiver id         Waivers and their status
   issues sync | status                   Triage labelled GitHub issues with the Claude planner (issues.enabled)
+                                         (PAUSED while the project is paused)
   doctor                                 Check Git, source, Codex, checks, Chromium and Skill
   watch [--once]                         Debounced prototype checkpoints (Ctrl+C to stop)
   session start [--label text] | list
@@ -92,14 +99,14 @@ Usage: protoflow <command> [action] --project <path> [options]
   status                                Sessions, latest baseline, version queue, Spec Kit/BMad
 All output is JSON: stdout carries the result; on failure the last stderr line is the JSON error
 (earlier stderr lines are notices or diagnostics). Exit codes: 0 success, 1 error/failure, 2 NOT_RUN/NEEDS_REVIEW,
-3 BLOCKED: context/prepare/execute/verify/repair target a version other than the
+3 BLOCKED or PAUSED: context/prepare/execute/verify/repair target a version other than the
 queue's current one; versions are accepted in checkpoint order (policy.sequentialVersions).
 External commands are argv arrays, run without a shell. Nothing commits or pushes.`;
 
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     project: { type: 'string', default: process.cwd() }, help: { type: 'boolean', short: 'h' }, personal: { type: 'boolean' }, 'skip-integrations': { type: 'boolean' }, once: { type: 'boolean' }, service: { type: 'boolean' }, env: { type: 'string', multiple: true }, port: { type: 'string' }, apply: { type: 'boolean' }, 'recover-unknown-start': { type: 'boolean' }, answer: { type: 'string' }, execute: { type: 'boolean' }, 'retry-review': { type: 'boolean' },
-    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery', 'scene', 'variant', 'tier', 'reason', 'engine-issue', 'requested-by', 'waiver'].map(key => [key, { type: 'string' }]))
+    ...Object.fromEntries(['repository', 'branch', 'path', 'start-sha', 'prototype-dir', 'source-dir', 'discovery-dir', 'label', 'session', 'level', 'summary', 'manifest', 'target', 'patch-file', 'output', 'spec', 'adr', 'adapter', 'context', 'verification', 'review', 'reviewer', 'notes', 'baseline', 'findings', 'reviewer-kind', 'model-evidence', 'model-session', 'delivery', 'scene', 'variant', 'tier', 'reason', 'engine-issue', 'requested-by', 'waiver', 'by'].map(key => [key, { type: 'string' }]))
   } });
   const [command, action] = positionals;
   if (values.help || !command) { console.log(help); }
@@ -183,8 +190,17 @@ try {
           if (action === 'list') return { waivers: (await listWaivers(root)).map(({ findings, evidence, ...waiver }) => ({ ...waiver, findings: findings.length })) };
           if (action === 'show') return loadWaiver(root, requireOption('waiver'));
           throw new Error('Use waiver request|list|show (a maintainer approves, rejects or revokes on the dashboard)');
+        case 'project':
+          if (action === 'pause') return pauseProject(root, config, { reason: values.reason ?? null, by: values.by ?? null });
+          if (action === 'resume') return resumeProject(root, config, { by: values.by ?? null });
+          if (action === 'status') return pauseStatus(root);
+          throw new Error('Use project pause|resume|status');
         case 'issues':
-          if (action === 'sync') return syncIssues(root, config);
+          if (action === 'sync') {
+            const paused = await projectPause(root);
+            if (paused) return { status: 'PAUSED', paused, reason: 'Development is paused; protoflow project resume continues issue triage' };
+            return syncIssues(root, config);
+          }
           if (action === 'status') return issuesStatus(root);
           throw new Error('Use issues sync|status');
         case 'session':
@@ -242,14 +258,14 @@ try {
     };
     if (['init', 'install'].includes(command)) await mkdir(root, { recursive: true });
     // Design commands use their own lock so prototype versions can queue while the application pipeline runs.
-    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || command === 'waiver' && action !== 'request' || ['source', 'runner', 'delivery', 'issues'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service' || command === 'dashboard';
+    const readOnly = ['queue', 'status', 'doctor', 'contract'].includes(command) || command === 'waiver' && action !== 'request' || ['source', 'runner', 'delivery', 'issues', 'project'].includes(command) && action === 'status' || command === 'anchors' && action === 'lint' || command === 'runner' && action === 'gc' && !values.apply || command === 'runner' && action === 'service' || command === 'dashboard';
     const result = readOnly || command === 'runner' && action === 'start' ? await operation() : await withLock(root, operation, ['session', 'checkpoint', 'watch'].includes(command) ? 'design' : 'active');
     flushDiagnostics();
     console.log(JSON.stringify(result, null, 2));
     // Integration reminders are for the developer at the terminal; stdout stays machine-readable JSON.
     for (const notice of result?.notices ?? []) console.error(`ProtoFlow: ${notice}`);
     if (['FAIL', 'SCAN_FAILED'].includes(result?.status)) process.exitCode = 1;
-    else if (result?.status === 'BLOCKED') process.exitCode = 3;
+    else if (['BLOCKED', 'PAUSED'].includes(result?.status)) process.exitCode = 3;
     else if (['NOT_RUN', 'NEEDS_REVIEW'].includes(result?.status)) process.exitCode = 2;
   }
 } catch (error) {

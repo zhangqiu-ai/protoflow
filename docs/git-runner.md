@@ -93,6 +93,24 @@ protoflow runner start --project /path/to/app --once
 
 正常停止會終止當前 subprocess group、保存 STOPPED；下一次 start 不擅自重試。setup、Codex、build／functional 與 visual Chromium 在 spawn 前先保存 STARTING／pid:null 意圖，再保存 PID／PGID 與完成時間；正常返回且能證明 spawned:false（例如 ENOENT 或 spawn 前取消）的意圖可記錄已完成，仍可重新配置／重試；PID 尚未落地時崩潰，未知 PID 會保守阻止自動恢復，需人工檢查可能留下的程序；確認後以 `runner retry --recover-unknown-start` 恢復：引擎先以 `lsof`（工作目錄）與 `ps`（命令列）確認沒有存活程序位於或引用該 Runner worktree，有則拒絕並列出 PID；確認無誤才把當前版本中沒有 PID 的啟動意圖記為 `NOT_STARTED`，並在意圖與 `retries` 保存檢查時間、方法與 worktree。此旗標不處理已有 PID 的程序，也不處理其他版本；`lsof` 不可用或輸出不完整時拒絕。執行代理若把子程序放到 worktree 之外的工作目錄，此檢查看不到它們，仍需人工判斷。反過來，Xcode 的 `DTServiceHub` 等系統輔助程序會脫離程序群組、以 worktree 為工作目錄長期存活，也會讓復原被拒；確認不是執行代理後終止它再重試。Visual 透過 Playwright BrowserServer 保存 browser PID／PGID，停止時關閉或終止整組並確認結束；launch 已嘗試但未取得 PID 的錯誤也保留未知啟動意圖，不能自動略過。POSIX 恢復檢查整個 subprocess group；leader 已死而 child 仍活也會阻止 retry／setup。命令正常退出但同組程序未退出時會終止該組並記錄 FAIL，不能 PASS 前進；尚未確認全組結束就不寫完成時間。 若 processGroupActive 仍為 true，立即阻塞，不能啟動後續 functional／visual、repair 或新 Codex；每次新 attempt 前也重新檢查舊的未完成程序，保留其 phase／PID／失敗證據。Windows 無法確認整個程序樹，MVP 保守拒絕受監督命令的自動執行／恢復；命令不得自行 detached／轉移子程序 group，這些形式不在 MVP 的自動恢復保證內。異常退出的 RUNNING 同樣需 `runner retry`，避免重複執行者；死 PID 的本機鎖可恢復，活躍或缺少 owner 的鎖拒絕略過。若 PASS verification 已落地但 completedSha 尚未更新，retry 後會核對 application/frozen/artifact hashes 再復原完成記錄。
 
+### 暫停開發
+
+```sh
+protoflow project pause --project /path/to/app --reason "等新設計" [--by 名字|ai:<agent>]
+protoflow project status --project /path/to/app
+protoflow project resume --project /path/to/app
+```
+
+- **記錄**：暫停寫入 `.protoflow/paused.json`（`pausedAt`、`by: { kind: human|ai, name }`、`reason`、`via: cli|dashboard`）。`--by` 以 `ai:` 開頭記為 AI，其他名字記為人；省略時用 `dashboard.reviewer`、`git config user.name`，最後是系統使用者名稱。每次暫停與恢復都附加到 `.protoflow/pause-history.jsonl`，並記入 Runner 事件（`project-paused`／`project-resumed`），面板時間軸看得到。已暫停時再暫停不會改寫原本的紀錄。
+- **暫停期間**：
+  - Runner 每輪照樣 `source scan`，新提交依序凍結成版本，但不排程執行。
+  - 不執行任何 target 的版本、不同步或分流 Issue、不做 Issue 修復；常駐服務每輪輪詢一次是否已恢復，期間心跳照常，`lastPass.status` 為 `PAUSED`。
+  - 每次暫停 Runner 記錄一次 `paused` 事件，恢復後的第一輪記錄 `resumed`。
+  - 前景 `runner start`（含 `--once`）掃描後回傳 `PAUSED` 並結束；`issues sync` 不連 GitHub，直接回傳 `PAUSED`。兩者都以 exit 3 結束。
+  - `runner retry`、`supersede` 等仍可執行，只改狀態，要等恢復後才會跑。
+- **處理中途暫停**：暫停在版本之間生效。正在處理的版本會做完這一輪（直到 PASS、BLOCKED 或 NOT_RUN），之後其他 target 與後續版本都不開始。要立刻停，停止 Runner（版本記為 STOPPED）。
+- **恢復**：`project resume`（或面板的「恢復開發」）刪除暫停紀錄。每個 target 目前的版本若是 STOPPED，就像 `runner retry` 一樣重新排入；無法重新排入時（例如還有存活程序）列在 `kept`，暫停仍會解除。BLOCKED 的版本不受影響，仍等它自己的決定。worktree 與未提交的修復內容都保持原樣，Runner 下一輪從那裡繼續；沒有 Runner 在跑時，要另外啟動。
+
 ### 回收 runner worktree
 
 Runner 為每條來源路由（多目標時每個 target）保留一個 `.protoflow/runner/worktree-*`。來源、target 或驗收路線改變後，舊 worktree 不會被自動刪除。`protoflow runner gc` 列出本專案登記在 `git worktree list` 中、位於 `.protoflow/runner/worktree-*` 的 worktree 及大小，分為：
@@ -111,6 +129,8 @@ Runner 為每條來源路由（多目標時每個 target）保留一個 `.protof
 `targets` 有多筆時，Runner 對每個 target 維護獨立進度（`.protoflow/targets/<id>/progress.json`）、Runner 狀態（`.protoflow/runner/<id>/state.json`）、worktree（`worktree-<hash>-<id>`）與交付分支（`<runner.delivery.branch>/<id>`）。`runner start` 依序推進每個 target；某個 target BLOCKED 時，其他 target 繼續，`runner retry --target <id>` 只恢復該 target。`runner status`、`queue`、`delivery status` 顯示每個 target 的狀態。多目標時共享的 `.protoflow/source/state.json` 只是掃描紀錄：其 entries 的 `status` 停在掃描時的 `PENDING`、`completedSha` 不更新，真正進度在各 target 的 progress。因此 `runner status`（以及 `doctor` 的 `progress`、`source status`）不直接顯示該欄位：`source.statusBasis` 為 `"targets"`，每筆 entry 的 `status` 由各 target 合成（全部 PASS 為 `PASS`；任一 target `BLOCKED`／`STOPPED`／`RUNNING` 依此優先序顯示；只有部分 target PASS 為 `PARTIAL`；否則 `PENDING`），`targets` 列出各 target 的狀態，`recordedStatus` 保留檔案中的原值；`source.completedSha` 是所有 target 都已 PASS 的最新版本。`targets.<id>.summary` 摘要該 target 的 `status`（第一個未 PASS 版本的狀態，全部 PASS 時為 `IDLE`）、`completedSha`、`current` 與各狀態計數，`progress`／`runner` 仍是完整紀錄。這些只是讀取時的呈現，不改寫狀態檔；PASS 表示 verification 已接受，交付是否完成以 `delivery status` 為準。單一 target 與 schemaVersion 1 的輸出不變；`release.requireTargets` 的 `release.version` 是所有必要 target 都已完成的最新版本（依 checkpoint 順序取各 target 的共同前綴）。未啟用 `runner.delivery` 時「完成」指 verification 已接受（`release.basis: "verification"`）；啟用 `runner.delivery` 時（`release.basis: "delivery"`），該 target 的版本還必須已由交付完成：紀錄為 `MERGED`，或 `merge: "manual"` 下已交給人處理的 `PR_OPEN_MANUAL`。交付 BLOCKED／FAIL、尚未建立 PR 或已 `REVOKED` 的版本不計入 release；各版本的 `acceptance` 欄位仍只反映 verification。啟用 `runner.delivery` 時，每個 target 的交付各自需要獨立 AI review PASS（見下方自動交付）。單一 target 專案沿用原有檔案與路徑。
 
 ## CLI 輸出契約
+
+專案暫停時 `runner start` 與 `issues sync` 的結果是 `{ "status": "PAUSED", "paused": {…}, "reason": … }`，exit code 為 3（與 BLOCKED 相同）。
 
 stdout 只放結果 JSON（`runner start` 先輸出 JSONL 事件，最後是結果）；失敗時 stderr 最後一行是 JSON 錯誤，之前的行是提醒或 `ProtoFlow diagnostic:` 診斷。巡查或其他程式解析輸出時應依此規則，不要把整段 stderr 當 JSON。Node 執行期警告（例如同時設定 `FORCE_COLOR` 與 `NO_COLOR`，Node 24 在連結內建模組時就會發出）也一律轉成 `ProtoFlow diagnostic:` 行；Node 22 與 24 行為一致。
 

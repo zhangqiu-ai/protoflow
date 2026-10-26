@@ -402,3 +402,15 @@ button.device:hover{transform:translateY(-2px) scale(1.02)}
   .mini{grid-template-columns:56px minmax(0,1fr) 44px}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+/* A paused project: who paused it, when and why, and the button that resumes it; the folded control that pauses it */
+.paused-bar{flex-direction:row;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;border-color:var(--amber-soft)}
+.paused-text{display:flex;flex-direction:column;gap:6px;min-width:0;flex:1}
+.paused-text .pill{align-self:flex-start}
+.paused-text b{font-size:16px;overflow-wrap:anywhere}
+.paused-bar .btn.primary{flex:0 0 auto}
+.pause-ctl{position:relative}
+.pause-ctl summary{cursor:pointer;list-style:none;font-size:13px;color:var(--ink2);padding:4px 10px;border:1px solid var(--line);border-radius:999px}
+.pause-ctl summary::-webkit-details-marker{display:none}
+.pause-ctl[open] > div{position:absolute;right:0;top:calc(100% + 8px);z-index:5;display:flex;gap:8px;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 30px -16px rgba(14,17,22,.45);width:min(360px,calc(100vw - 32px))}
+.pause-reason{flex:1;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;font-size:14px}
