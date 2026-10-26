@@ -219,6 +219,30 @@ test('a verification waiting for a simulator another project drives says so on t
   } finally { await server.close(); await waiting.cleanup(); }
 });
 
+test('a project whose runner stopped mid-version reads as stopped on the overview and the sidebar, not as live work', async ({ page }) => {
+  const stopped = await dashboardFixture();
+  const heartbeat = path.join(stopped.root, '.protoflow/runner/heartbeat.json');
+  await fs.writeFile(heartbeat, JSON.stringify({ ...JSON.parse(await fs.readFile(heartbeat, 'utf8')), service: false, at: new Date(Date.now() - 3600000).toISOString() }));
+  await addProject(stopped.root, { home: stopped.home });
+  const server = createDashboardServer({ home: stopped.home, port: 0, service: false, pollMs: 200 });
+  const base = await server.listen();
+  try {
+    await page.goto(base);
+    const card = page.getByRole('main').locator('a.card');
+    await expect(card.locator('.mini em')).toHaveText('已停止');
+    await expect(card.locator('.mini em')).toHaveAttribute('title', '停在實作，runner 沒在跑');
+    await expect(card).not.toHaveClass(/busy/);
+    await expect(card.locator('.strip')).toHaveCount(0);
+    await expect(card.locator('.rail .dot.stop')).toHaveCount(1);
+    await expect(page.locator('#nav-list .nav-state')).toHaveText('已停止');
+    await expect(page.locator('#nav-list .nav-dot.stop')).toHaveCount(1);
+    await page.goto(`${base}#/p/${await projectId(stopped.root)}`);
+    await expect(page.locator('.lane-state em.stop')).toHaveText('已停止（實作）');
+    await expect(page.locator('.track li.stop')).toHaveText('實作');
+    await expect(page.locator('.live-dot')).toHaveCount(0);
+  } finally { await server.close(); await stopped.cleanup(); }
+});
+
 test('a person pauses a project from its page, it says who paused it and why, and resumes it', async ({ page }) => {
   const project = await dashboardFixture();
   await addProject(project.root, { home: project.home });

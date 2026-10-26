@@ -71,6 +71,7 @@ function gauge(label, value, fraction, color) {
 /** Where a stream is on plan → deliver: index of the current node, and whether earlier nodes are done. */
 function position(stream) {
   if (stream.stage === 'blocked') return { at: 0, tone: 'bad' };
+  if (stream.stopped) return { at: Math.max(0, STAGES.findIndex(([key]) => key === stream.stage)), tone: 'stop' };
   if (stream.stage === 'idle') return { at: ['MERGED', 'COMMITTED'].includes(stream.deliveries?.[0]?.status ?? stream.lastDelivery?.status) || stream.versions?.[0]?.status === 'PASS' ? STAGES.length : -1, tone: 'idle' };
   return { at: STAGES.findIndex(([key]) => key === stream.stage), tone: 'now' };
 }
@@ -97,11 +98,11 @@ function nowStrip(stream) {
 function miniTrack(stream) {
   const { at, tone } = position(stream);
   const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
-  const label = stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+  const label = stream.stopped ? '已停止' : stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
   return h('div.mini', {}, h('span', {}, targetName(stream.target)),
     h('div.rail', { role: 'img', 'aria-label': `${targetName(stream.target)}：${label}` }, h('i.bed'), h('i.fill', { style: `width:calc((100% - 12px) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 12px) * ${fraction})` }) : null,
-      h('div.dots', {}, STAGES.map(([, name], i) => h(`span.dot${i < at ? '.done' : i === at ? (tone === 'bad' ? '.bad' : '.now') : ''}${i === at && tone === 'now' ? '.live-dot' : ''}`, { title: name })))),
-    h(`em${tone === 'now' ? '.now' : tone === 'bad' ? '.bad' : ''}`, {}, label));
+      h('div.dots', {}, STAGES.map(([, name], i) => h(`span.dot${i < at ? '.done' : i === at ? `.${tone === 'bad' || tone === 'stop' ? tone : 'now'}` : ''}${i === at && tone === 'now' ? '.live-dot' : ''}`, { title: name })))),
+    h(`em${['now', 'bad', 'stop'].includes(tone) ? `.${tone}` : ''}`, { title: stream.stopped ? `停在${STAGE_LABEL[stream.stage] ?? stream.stage}，runner 沒在跑` : null }, label));
 }
 
 function toast(text, bad = false) {
@@ -203,9 +204,9 @@ function pipelines(streams) {
     return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
       h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),
       h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }) : null,
-        h('ol', {}, STAGES.map(([, label], i) => h(`li${i < at ? '.done' : i === at ? `.${tone === 'bad' ? 'bad' : 'now'}${tone === 'idle' ? '.idle' : ''}` : ''}`, { title: label },
+        h('ol', {}, STAGES.map(([, label], i) => h(`li${i < at ? '.done' : i === at ? `.${tone === 'bad' || tone === 'stop' ? tone : 'now'}${tone === 'idle' ? '.idle' : ''}` : ''}`, { title: label },
           h(`span.node${i === at && tone === 'now' ? '.live-dot' : ''}`, {}, i < at ? icon(ICON.check, 14) : i === at && tone === 'bad' ? '!' : ''), h('span.sr', {}, label))))),
-      h('div.lane-state', {}, h(`em${tone === 'now' ? '.now' : tone === 'bad' ? '.bad' : ''}`, {}, state),
+      h('div.lane-state', {}, h(`em${['now', 'bad', 'stop'].includes(tone) ? `.${tone}` : ''}`, {}, state),
         h('span.timer', { 'data-since': active(stream) ? since ?? '' : '' }, active(stream) ? elapsed(since) : stream.lastEvent ? ago(stream.lastEvent.at) : '')),
       stream.current?.error ? h('p.why-line', {}, stream.current.error) : null);
   };
@@ -563,13 +564,15 @@ function headline(project) {
   if (blocked) return { label: `阻塞${where(blocked)}`, tone: 'bad', stream: blocked };
   const working = streams.find(active);
   if (working) return { label: `${STAGE_LABEL[working.stage] ?? working.stage}${where(working)}`, tone: 'now', stream: working };
+  const stopped = streams.find(stream => stream.stopped);
+  if (stopped) return { label: `已停止${where(stopped)}`, tone: 'stop', stream: stopped };
   const finished = streams.filter(stream => position(stream).at === STAGES.length).length;
   if (finished && finished === streams.length) return { label: '完成', tone: 'ok', stream: streams[0] };
   return { label: finished ? `${finished}/${streams.length} 完成` : '閒置', tone: 'idle', stream: streams[0] ?? null };
 }
 const segments = stream => {
   const { at, tone } = stream ? position(stream) : { at: -1 };
-  return h('span.nav-segs', { 'aria-hidden': 'true' }, STAGES.map((_, i) => h(`i${i < at ? '.done' : i === at ? (tone === 'bad' ? '.bad' : '.now') : ''}`)));
+  return h('span.nav-segs', { 'aria-hidden': 'true' }, STAGES.map((_, i) => h(`i${i < at ? '.done' : i === at ? `.${tone === 'bad' || tone === 'stop' ? tone : 'now'}` : ''}`)));
 };
 const currentId = () => /^#\/p\/([0-9a-f]{12})$/.exec(location.hash)?.[1] ?? null;
 const view = () => currentId() ? 'project' : location.hash === '#/inbox' ? 'inbox' : 'overview';
