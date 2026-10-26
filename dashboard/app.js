@@ -247,7 +247,7 @@ function diagnosisBlock(diagnosis) {
     h('ol', {}, diagnosis.steps.map(step => h('li', {}, withCode(step)))));
 }
 /** One card per item waiting for a person, with the action it allows; the same cards on a project page and in the inbox. */
-function askCards(projectId, items, many) {
+function askCards(projectId, items, many, projectName = '') {
   const run = async (box, made, label, question, result, key) => {
     // A body can be read from the card when the button is pressed (an answer typed into it).
     const body = typeof made === 'function' ? made() : made;
@@ -286,7 +286,7 @@ function askCards(projectId, items, many) {
       const text = () => { const value = answer?.value.trim(); if (!value) { toast('請先寫下回答', true); answer.focus(); return null; } return { action: 'answer-issue', number: item.number, text: value }; };
       return card(item, ICON.issue, `#${item.number} ${item.title ?? ''}`, item.reason ?? (ISSUE[item.status] ?? [item.status])[0],
         [item.questions?.length ? h('ul.qs', {}, item.questions.map(question => h('li', { title: question }, question))) : null, diagnosis, answer],
-        [{ label: '回答並交回', body: text, question: `確定以你的 GitHub 身分在 #${item.number} 留言回答，並交回 AI 重新分流？`, result: '已回答 · 等重新分流' },
+        [{ label: '回答並交回', body: text, question: `確定以你的 GitHub 身分在「${projectName}」的 #${item.number} 留言回答，並交回 AI 重新分流？`, result: '已回答 · 等重新分流' },
           { label: '交回 AI', body: { action: 'handback', number: item.number }, question: `確定不回答、直接把 #${item.number} 交回 AI？沒有新資訊時 AI 會照自己的建議決定；再交回一次就不會重跑分流。`, result: '已交回 AI' },
           { label: '不處理，關閉', body: { action: 'close-issue', number: item.number }, question: `確定以你的 GitHub 身分關閉 #${item.number}（不處理）？`, result: '已關閉' },
           item.url ? { label: 'GitHub', href: item.url } : null].filter(Boolean), key);
@@ -308,7 +308,7 @@ function askCards(projectId, items, many) {
       if (answer) answer.value = drafts.get(key) ?? '';
       const text = () => { const value = answer?.value.trim(); if (!value) { toast('請先寫下回答', true); answer.focus(); return null; } return { action: 'retry', target: item.target, answer: value }; };
       return card(item, ICON.retry, `${where}${item.title} 需要你決定`, item.reason, [diagnosis, answer],
-        [{ label: '回答並重試', body: text, question: '確定送出回答並重試這個版本？規劃者會帶著你的回答重新規劃。', result: '已回答 · 重新排入' },
+        [{ label: '回答並重試', body: text, question: `確定把回答送到「${projectName}」的 ${item.title}，並重試這個版本？規劃者會帶著你的回答重新規劃。`, result: '已回答 · 重新排入' },
           { label: '重試', body: { action: 'retry', target: item.target }, question: '確定不回答、直接重試這個版本？規劃者沒有新資訊時多半會給出同樣的答案。', result: '已重新排入' }], key);
     }
     if (item.kind === 'blocked-version') return card(item, ICON.retry, `${where}${item.title} 阻塞`, item.reason, diagnosis,
@@ -318,7 +318,7 @@ function askCards(projectId, items, many) {
 }
 function decisions(snapshot) {
   const items = snapshot.attention;
-  const cards = askCards(snapshot.project.id, items, snapshot.streams.length > 1);
+  const cards = askCards(snapshot.project.id, items, snapshot.streams.length > 1, snapshot.project.name);
   const open = items.filter(item => item.actions?.length).length;
   return h('div.decide', { 'aria-label': '需要你' },
     h('div.decide-h', {}, h('span.label', {}, '需要你'), h('b', {}, String(open))),
@@ -349,7 +349,7 @@ function renderInbox(data) {
     groups.length ? h('div.inbox', {}, groups.map(({ project, items }, index) => h('section.inbox-group.rise', { 'aria-label': project.name, style: `animation-delay:${index * 60}ms` },
       h('a.inbox-h', { href: `#/p/${project.id}` }, h('span.tile', {}, initial(project.name)), h('div', {}, h('b', {}, project.name), h('small', {}, headline(project).label)),
         h('span.due', {}, '待你', h('b', {}, String(items.length))), h('span.go', { 'aria-hidden': 'true' }, '→')),
-      h('div.inbox-cards', {}, askCards(project.id, items, project.streams?.length > 1)))))
+      h('div.inbox-cards', {}, askCards(project.id, items, project.streams?.length > 1, project.name)))))
       : h('div.ask.calm.rise', {}, h('div.ask-h', {}, h('span.glyph', {}, icon(ICON.check)), h('div', {}, h('b', {}, '沒有需要你決定的事'), h('p', {}, '有新的事時，這裡和分頁標題會先告訴你')))));
 }
 

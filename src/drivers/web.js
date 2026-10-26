@@ -34,7 +34,7 @@ async function settle(page, timeout) {
 }
 
 /** Element facts for each anchor; runs in the page. */
-function inspect({ attribute, ids, dynamicText = [] }) {
+function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   const all = [...document.querySelectorAll(`[${attribute}]`)];
   const interactiveTags = ['BUTTON', 'SELECT', 'SUMMARY', 'TEXTAREA'];
   // Every input control a user can set counts as editable (text, checkbox, radio, range, file, colour...).
@@ -46,10 +46,15 @@ function inspect({ attribute, ids, dynamicText = [] }) {
   // dynamic anchors are. Hidden only while text is read, so bounds and pixels keep it.
   const loose = [...new Set([...document.querySelectorAll('[data-pf-text="dynamic"]'), ...dynamicText.flatMap(selector => [...document.querySelectorAll(selector)])])]
     .filter(node => !node.hasAttribute(attribute));
+  // Anchors the prototype marks dynamic are left out of their containers' text where they are, so a static word
+  // equal to one (a sidebar heading "Settings" beside a title bar reading "Settings") stays. The comparison then
+  // takes the text as it is instead of removing dynamic text by value.
+  const marked = all.filter(node => dynamicAnchors.includes(node.getAttribute(attribute)));
   const readText = node => {
-    const saved = loose.map(item => item.style.getPropertyValue('display'));
-    for (const item of loose) item.style.setProperty('display', 'none');
-    try { return node.innerText; } finally { loose.forEach((item, index) => saved[index] ? item.style.setProperty('display', saved[index]) : item.style.removeProperty('display')); }
+    const hidden = [...loose, ...marked.filter(item => item !== node && !item.contains(node))];
+    const saved = hidden.map(item => item.style.getPropertyValue('display'));
+    for (const item of hidden) item.style.setProperty('display', 'none');
+    try { return node.innerText; } finally { hidden.forEach((item, index) => saved[index] ? item.style.setProperty('display', saved[index]) : item.style.removeProperty('display')); }
   };
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
@@ -71,7 +76,8 @@ function inspect({ attribute, ids, dynamicText = [] }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length ? readText(node) : node.innerText),
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node) : node.innerText),
+      ...(dynamicAnchors.length && { dynamicExcluded: true }),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
   }
@@ -82,11 +88,11 @@ function inspect({ attribute, ids, dynamicText = [] }) {
  * Replay a state on an already loaded page and collect anchor facts and a device-pixel screenshot.
  * Shared by the web and Electron drivers so both sides of a comparison use identical logic.
  */
-export async function captureOnPage(page, { attribute, anchors, steps = [], dynamicText = [], timeoutMs = 10000 }) {
+export async function captureOnPage(page, { attribute, anchors, steps = [], dynamicText = [], dynamicAnchors = [], timeoutMs = 10000 }) {
   await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
   for (const step of steps) await perform(page, attribute, step);
   await settle(page, timeoutMs);
-  const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText });
+  const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText, dynamicAnchors });
   const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
   return { elements, screenshot };
 }
@@ -95,7 +101,7 @@ export async function captureOnPage(page, { attribute, anchors, steps = [], dyna
  * Capture { viewport, screenshot, elements } for one screen state.
  * Throws when navigation or a step fails; the caller records that as the scene's failure.
  */
-export async function captureWeb(browser, { url, attribute, anchors, steps = [], dynamicText = [], fixture = {}, viewport, locale = 'en-US', colorScheme = 'light', timeoutMs = 10000 }) {
+export async function captureWeb(browser, { url, attribute, anchors, steps = [], dynamicText = [], dynamicAnchors = [], fixture = {}, viewport, locale = 'en-US', colorScheme = 'light', timeoutMs = 10000 }) {
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: viewport.scale ?? 1,
     locale, colorScheme, timezoneId: 'UTC', reducedMotion: 'reduce'
@@ -109,7 +115,7 @@ export async function captureWeb(browser, { url, attribute, anchors, steps = [],
     const page = await context.newPage();
     page.setDefaultTimeout(timeoutMs);
     await page.goto(url, { waitUntil: 'networkidle' });
-    const { elements, screenshot } = await captureOnPage(page, { attribute, anchors, steps, dynamicText, timeoutMs });
+    const { elements, screenshot } = await captureOnPage(page, { attribute, anchors, steps, dynamicText, dynamicAnchors, timeoutMs });
     return { viewport: { width: viewport.width, height: viewport.height, scale: viewport.scale ?? 1 }, screenshot, elements };
   } finally {
     await context.close();

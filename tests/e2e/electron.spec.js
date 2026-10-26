@@ -100,6 +100,16 @@ test('a real Electron target is verified on four required tiers against the same
   test.setTimeout(300000);
   const root = await project();
   try {
+    // Fixture text outside any anchor (an unread count) differs between the prototype and the application. Without
+    // anchors.dynamicText on both Electron captures it fails every tasks scene; transparent, it leaves pixels alone.
+    const badge = 'position:absolute;right:0;top:0;color:transparent';
+    const configFile = path.join(root, 'protoflow.config.json');
+    const config = JSON.parse(await readFile(configFile, 'utf8'));
+    await writeFile(configFile, JSON.stringify({ ...config, anchors: { ...config.anchors, dynamicText: ['.badge'] } }, null, 2));
+    const prototypeFile = path.join(root, 'prototype/tasks.html');
+    await writeFile(prototypeFile, (await readFile(prototypeFile, 'utf8')).replace('</h1>', `</h1><span class="badge" style="${badge}">3 new</span>`));
+    const rendererFile = path.join(root, 'desktop/renderer/app.js');
+    await writeFile(rendererFile, (await readFile(rendererFile, 'utf8')).replace("text: 'Today' }),", `text: 'Today' }), element('span', { class: 'badge', style: '${badge}', text: '12 new' }),`));
     const manifest = await command(root, ['checkpoint']);
     expect(manifest.scope.affected).toEqual(['settings', 'tasks']);
 

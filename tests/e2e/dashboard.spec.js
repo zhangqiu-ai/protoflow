@@ -100,7 +100,7 @@ test('an issue waiting for a person is answered from its card; the answer surviv
   await expect.poll(() => page.locator('textarea.answer').evaluate(node => node.dataset.old ?? null), { timeout: 5000 }).toBe(null);
   await expect(answer).toHaveValue('Dark by default.');
   expect(await answer.evaluate(node => [document.activeElement === node, node.selectionStart])).toEqual([true, 4]);
-  page.once('dialog', dialog => dialog.accept());
+  page.once('dialog', dialog => { expect(dialog.message()).toMatch(/在「.+」的 #5 留言回答/); dialog.accept(); });
   await page.getByRole('button', { name: '回答並交回' }).click();
   await expect(page.locator('#toast')).toContainText('回答並交回：完成');
   expect(calls.at(-1)).toEqual({ action: 'answer-issue', number: 5, text: 'Dark by default.' });
@@ -198,7 +198,8 @@ test('a version the planner handed to a person takes an answer with the retry', 
     await expect(page.locator('#toast')).toHaveText('請先寫下回答');
     expect(sent).toEqual([]);
     await card.getByRole('textbox', { name: /^回答 / }).fill('不調整沙箱；以 Runner 驗收為準，依失敗項修一輪。');
-    page.once('dialog', dialog => { expect(dialog.message()).toContain('規劃者會帶著你的回答重新規劃'); dialog.accept(); });
+    // The confirmation names the project and the version the answer goes to.
+    page.once('dialog', dialog => { expect(dialog.message()).toMatch(/^確定把回答送到「Fixture App」的 .+，並重試這個版本？規劃者會帶著你的回答重新規劃/); dialog.accept(); });
     await card.getByRole('button', { name: '回答並重試' }).click();
     await expect(card.locator('.signed')).toContainText('已回答 · 重新排入');
     expect(sent).toEqual([{ action: 'retry', target: null, answer: '不調整沙箱；以 Runner 驗收為準，依失敗項修一輪。' }]);

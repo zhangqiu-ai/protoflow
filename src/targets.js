@@ -115,7 +115,7 @@ export async function retryNotRun(capture, signal) {
   return { ...second, retried: { status: first.status, reason: String(first.reason ?? '').slice(-500) } };
 }
 
-async function captureApplication(root, config, target, settings, browser, scene, request, hooks) {
+async function captureApplication(root, config, target, settings, browser, scene, request, hooks, text) {
   if (target.driver?.kind === 'external') {
     // External drivers are supervised child processes like the browser itself. A capture that produced no result
     // (NOT_RUN: the simulator or the test runner failed, as XCUITest does now and then) is taken once more before the
@@ -129,7 +129,7 @@ async function captureApplication(root, config, target, settings, browser, scene
     };
     return retryNotRun(capture, hooks.signal);
   }
-  if (target.driver?.kind === 'playwright-electron') return captureElectron(root, target, settings, request, hooks);
+  if (target.driver?.kind === 'playwright-electron') return captureElectron(root, target, settings, request, hooks, text);
   if (target.driver?.kind !== 'playwright-web') return { status: 'NOT_RUN', reason: `driver kind ${target.driver?.kind} is not available in this phase` };
   const template = target.driver.urlTemplate;
   if (!template) return { status: 'FAIL', reason: 'playwright-web target requires driver.urlTemplate' };
@@ -138,7 +138,7 @@ async function captureApplication(root, config, target, settings, browser, scene
   try { url = /^https?:/.test(filled) ? filled : await urlFor(root, filled); }
   catch (error) { return { status: 'FAIL', reason: `application screen ${scene.screen} is not reachable at ${filled}: ${error.message}` }; }
   try {
-    return { status: 'PASS', capture: await captureWeb(browser, { url, attribute: settings.locator.attribute, anchors: request.anchors, steps: request.steps, dynamicText: config.anchors?.dynamicText, fixture: request.fixture.data, viewport: settings.viewport, timeoutMs: target.timeoutMs }) };
+    return { status: 'PASS', capture: await captureWeb(browser, { url, attribute: settings.locator.attribute, anchors: request.anchors, steps: request.steps, ...text, fixture: request.fixture.data, viewport: settings.viewport, timeoutMs: target.timeoutMs }) };
   } catch (error) { return { status: 'FAIL', reason: `application could not reach ${scene.screen}.${scene.state}: ${error.message.split('\n')[0]}` }; }
 }
 
@@ -243,11 +243,13 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
       const entry = { id, screen: scene.screen, state: scene.state, affected: scene.affected, status: 'FAIL', tiers: {}, artifacts: [], reportDir: reportFile };
       const request = driverRequest(target, settings, scene, screen, state, `${outRelative}/${segments.join('/')}/${id}/driver`);
       const { anchors } = request;
+      // Text the comparison leaves out, on both sides: the project's selectors and the anchors the prototype marks dynamic.
+      const text = { dynamicText: config.anchors?.dynamicText ?? [], dynamicAnchors: screen.anchors.filter(anchor => anchor.dynamic).map(anchor => anchor.id) };
       let prototype;
       const prototypeUrl = pathToFileURL(await projectPath(root, `${version.directory}/${screen.page}`)).href;
       if (target.driver?.kind === 'playwright-electron') {
         // Same engine on both sides: the frozen prototype is rendered by the target's Electron build.
-        const reference = await captureElectronPrototype(root, target, settings, request, { url: prototypeUrl, attribute }, hooks);
+        const reference = await captureElectronPrototype(root, target, settings, request, { url: prototypeUrl, attribute, ...text }, hooks);
         if (reference.runtime) {
           const runtimeFile = path.join(sceneDir, 'prototype-runtime.json');
           await writeFile(runtimeFile, `${JSON.stringify(reference.runtime, null, 2)}\n`);
@@ -263,13 +265,13 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         prototype = reference.capture;
       } else {
         try {
-          prototype = await captureWeb(browser, { url: prototypeUrl, attribute, anchors, steps: state.steps, dynamicText: config.anchors?.dynamicText, fixture: request.fixture.data, viewport: settings.viewport });
+          prototype = await captureWeb(browser, { url: prototypeUrl, attribute, anchors, steps: state.steps, ...text, fixture: request.fixture.data, viewport: settings.viewport });
         } catch (error) {
           entry.reason = `prototype state is unreachable: ${error.message.split('\n')[0]}`;
           results.push(entry); continue;
         }
       }
-      const app = await captureApplication(root, config, target, settings, browser, scene, request, hooks);
+      const app = await captureApplication(root, config, target, settings, browser, scene, request, hooks, text);
       if (app.retried) entry.captureRetry = app.retried;
       const write = async (name, buffer) => { const file = path.join(sceneDir, `${name}.png`); await writeFile(file, buffer); entry.artifacts.push(file); };
       await write('prototype', prototype.screenshot);

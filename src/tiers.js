@@ -50,7 +50,8 @@ export function compareStructure(screen, state, prototype, application, { native
   // field's own text shows up in its container differs by platform, so only occurrences beyond those the static leaf
   // anchors account for are removed, last first (a field follows its label). Longer dynamic text goes first: a short
   // part ("Tasks" in a title bar) can also be a word inside a longer one ("Work Tasks Quotes" in a side panel), and
-  // removing it first would break the longer part so it no longer matches.
+  // removing it first would break the longer part so it no longer matches. Removing by value can still take a static
+  // word that is not an anchor of its own, so DOM captures read text without the dynamic anchors instead.
   const parentOf = new Map(screen.anchors.map(anchor => [anchor.id, anchor.parent]));
   const screenId = screen.anchors.find(anchor => anchor.role === 'screen')?.id;
   const isUnder = (item, id) => {
@@ -65,6 +66,8 @@ export function compareStructure(screen, state, prototype, application, { native
   const occurrences = (text, part) => [...` ${text} `.matchAll(new RegExp(`(?<= )${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= )`, 'g'))].map(match => match.index - 1);
   const textOf = (capture, id) => {
     let text = words(normalizeText(element(capture, id).text));
+    // A DOM capture (web, Electron) already left dynamic anchors out where they are.
+    if (element(capture, id).dynamicExcluded) return text;
     const parts = anchors.filter(other => other.dynamic && isUnder(other, id)).map(item => words(normalizeText(element(capture, item.id).text))).filter(Boolean);
     for (const part of parts.sort((a, b) => b.split(' ').length - a.split(' ').length || b.length - a.length)) {
       const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(words(normalizeText(element(capture, leaf.id).text)), part).length, 0);

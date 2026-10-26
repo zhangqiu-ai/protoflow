@@ -135,6 +135,14 @@ test('T2 sampling compares dominant colour inside each side’s bounds when the 
   assert.match(unsampled.note, /nothing was sampled/);
 });
 
+test('T1 structure takes a DOM capture\'s text as it is: its dynamic anchors were already left out where they are', () => {
+  const dom = overrides => { const result = capture(overrides); for (const facts of Object.values(result.elements)) facts.dynamicExcluded = true; return result; };
+  // "12:00" is static text here, beside the clock: by value it would be removed as the clock's text.
+  assert.equal(compareStructure(screen, state, dom({ home: { text: 'Hello Go 12:00' } }), dom({ home: { text: 'Hello Go 12:00' } })).status, 'PASS');
+  assert.deepEqual(compareStructure(screen, state, dom({ home: { text: 'Hello Go 12:00' } }), dom({ home: { text: 'Hello Go' } })).reasons, ['home: text "Hello Go 12:00" vs "Hello Go"']);
+  assert.equal(compareStructure(screen, state, capture({ home: { text: 'Hello Go 12:00' } }), capture({ home: { text: 'Hello Go' } })).status, 'PASS', 'a native capture removes it by value');
+});
+
 test('T2 sampling skips dynamic content and elements without one prevailing colour', () => {
   const left = capture(), right = capture();
   for (const element of Object.values(right.elements)) delete element.style;
