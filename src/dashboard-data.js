@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { streamTargets, loadProgress, runnerStatePath } from './streams.js';
 import { deliveryStatus } from './delivery.js';
 import { recordedVerdict } from './delivery-review.js';
-import { HEARTBEAT, EVENTS } from './runner.js';
+import { HEARTBEAT, EVENTS, projectPause } from './runner.js';
 import { serviceStatus, STALLED_AFTER_SECONDS } from './runner-service.js';
 import { diagnose, runnerStopped } from './dashboard-diagnosis.js';
 import { listWaivers, waiverReviewers } from './waivers.js';
@@ -251,7 +251,7 @@ export function runnerAlive(service) {
   const at = Date.parse(service.heartbeat?.at ?? '');
   return Number.isFinite(at) && (Date.now() - at) / 1000 <= STALLED_AFTER_SECONDS && service.status !== 'STALLED';
 }
-function attention({ streams, issues, reviews, service, config, waivers }) {
+function attention({ streams, issues, reviews, service, config, waivers, paused }) {
   const items = [];
   for (const stream of streams) {
     if (stream.current?.status === 'BLOCKED') items.push({ kind: 'blocked-version', target: stream.target, manifestId: stream.current.manifestId, title: stream.current.summary ?? stream.current.manifestId, reason: stream.current.error, reasonCode: stream.current.reasonCode, since: stream.current.blockedAt, actions: ['retry'], ...(stream.current.reasonCode === 'needs-human' && config.adapters?.planner?.command && { canAnswer: true }) });
@@ -268,14 +268,15 @@ function attention({ streams, issues, reviews, service, config, waivers }) {
     if (!['needs-human', 'blocked', 'rejected'].includes(issue.status)) continue;
     // Handed back, answered or closed: nothing waits for the person unless no runner is there to pick it up.
     if (issue.handedBack) {
-      if (!runnerAlive(service)) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, waiting: 'runner', handedBack: issue.handedBack, reason: issue.reason ?? issue.summary, questions: issue.questions, since: issue.handedBack.at, diagnosis: runnerStopped(service?.status), actions: [] });
+      if (!runnerAlive(service) && !paused) items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, waiting: 'runner', handedBack: issue.handedBack, reason: issue.reason ?? issue.summary, questions: issue.questions, since: issue.handedBack.at, diagnosis: runnerStopped(service?.status), actions: [] });
       continue;
     }
     items.push({ kind: 'issue', number: issue.number, url: issue.url, title: issue.title, status: issue.status, reason: issue.reason ?? issue.summary, questions: issue.questions, since: issue.decidedAt, actions: ['answer-issue', 'handback', 'close-issue'] });
   }
   for (const review of reviews) items.push({ kind: 'review', target: review.target, manifestId: review.manifestId, verificationId: review.verificationId, title: review.summary ?? review.manifestId, waivers: review.waivers ?? 0, since: review.completedAt, actions: ['approve'] });
   for (const waiver of waivers?.waivers ?? []) if (waiver.status === 'requested') items.push({ kind: 'waiver', target: waiver.target, waiverId: waiver.id, title: `${waiver.scene}${waiver.variant ? ` / ${waiver.variant}` : ''} · ${waiver.tier}`, reason: waiver.reason, engineIssue: waiver.engineIssue, findings: waiver.findings, findingCount: waiver.findingCount, requestedBy: waiver.requestedBy, manifestId: waiver.manifestId, verificationId: waiver.verificationId, prototype: waiver.prototype, application: waiver.application, since: waiver.requestedAt, actions: ['approve-waiver', 'reject-waiver'] });
-  if (service && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
+  // A paused project has no runner on purpose: no card says it stopped; the project shows the pause instead.
+  if (service && !paused && ['DEGRADED', 'STALLED', 'DOWN'].includes(service.status)) items.push({ kind: 'service', status: service.status, title: `Runner ${service.status}`, reason: service.reason ?? null, since: service.heartbeat?.lastFailure?.at, actions: [] });
   // A version waits to run (retried, or stopped mid-pass) and no runner will run it: say so instead of a stage that looks live.
   const waitingStreams = streams.filter(stream => stream.stopped);
   if (waitingStreams.length && !items.some(item => item.kind === 'service')) items.push({ kind: 'service', status: service?.status ?? 'NOT_INSTALLED', title: 'Runner 沒在跑', reason: `${waitingStreams.map(stream => stream.target ?? 'application').join('、')} 有版本等 runner 執行`, since: service?.heartbeat?.at ?? null, actions: [] });
@@ -313,15 +314,19 @@ export async function dashboardSnapshot(root, { service = process.platform === '
   const reviews = await pendingReviews(real, config, streams);
   const waivers = await waiverSummaries(real, config);
   const { heartbeat, summary } = await runnerHealth(real, { service, health: knownHealth });
+  // A person paused development: every lane says so, and none is shown as live or stopped.
+  const pause = await projectPause(real).catch(() => null);
+  const paused = pause ? { since: pause.pausedAt, by: pause.by ?? null, reason: pause.reason ?? null } : null;
+  if (paused) for (const stream of streams) stream.paused = true;
   // A stage read from the last event is not live when no runner is running: the lane says it stopped.
-  if (!runnerAlive({ heartbeat, ...summary })) for (const stream of streams) if (!['idle', 'blocked'].includes(stream.stage)) stream.stopped = true;
+  else if (!runnerAlive({ heartbeat, ...summary })) for (const stream of streams) if (!['idle', 'blocked'].includes(stream.stage)) stream.stopped = true;
   return {
     protocol: 'protoflow.dashboard/1', engineVersion: ENGINE_VERSION, generatedAt: new Date().toISOString(),
-    project: { id: await projectId(real), root: real, name: config.dashboard?.name ?? path.basename(real), targets: (config.targets ?? [{ id: 'application', platform: 'web' }]).map(target => ({ id: target.id, platform: target.platform })), delivery: config.runner?.delivery ? { baseBranch: config.runner.delivery.baseBranch, merge: config.runner.delivery.merge ?? 'auto' } : null, autoApprove: config.policy?.autoApprove === true, issues: config.issues?.enabled === true },
+    project: { id: await projectId(real), root: real, name: config.dashboard?.name ?? path.basename(real), targets: (config.targets ?? [{ id: 'application', platform: 'web' }]).map(target => ({ id: target.id, platform: target.platform })), delivery: config.runner?.delivery ? { baseBranch: config.runner.delivery.baseBranch, merge: config.runner.delivery.merge ?? 'auto' } : null, autoApprove: config.policy?.autoApprove === true, issues: config.issues?.enabled === true, paused },
     roles: roles(config),
     service: { status: summary.status, pid: summary.pid ?? summary.heartbeat?.pid ?? null, version: summary.heartbeat?.version ?? null, beatAgeSeconds: summary.beatAgeSeconds ?? null, failingPasses: summary.heartbeat?.failingPasses ?? 0, lastFailure: summary.heartbeat?.lastFailure ?? null, reason: summary.reason ?? null },
     streams, issues, adr: await adrStatus(real, config), waivers,
-    attention: attention({ streams, issues, reviews, service: summary, config, waivers }),
+    attention: attention({ streams, issues, reviews, service: summary, config, waivers, paused }),
     events: events.slice(-eventCount).reverse()
   };
 }

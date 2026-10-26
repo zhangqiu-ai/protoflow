@@ -41,7 +41,7 @@ const elapsed = iso => { if (!iso) return ''; const sec = Math.max(0, Math.round
 const waited = iso => { if (!iso || Number.isNaN(Date.parse(iso))) return null; const min = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000)); return min < 1 ? '剛剛開始等' : min < 60 ? `等了 ${min} 分鐘` : min < 1440 ? `等了 ${Math.floor(min / 60)} 小時${min % 60 ? ` ${min % 60} 分` : ''}` : `等了 ${Math.floor(min / 1440)} 天`; };
 const targetName = target => target ?? '應用';
 const initial = name => [...String(name ?? '?')][0].toUpperCase();
-const active = stream => !['idle', 'blocked'].includes(stream.stage) && !stream.stopped;
+const active = stream => !['idle', 'blocked'].includes(stream.stage) && !stream.stopped && !stream.paused;
 
 /** One avatar per distinct agent: the planner leads, then the executors by area. */
 function agents(roles) {
@@ -169,7 +169,7 @@ function renderOverview(data) {
         gauge('等你', due, projects.filter(project => project.attention).length / projects.length, 'var(--amber)'))),
     h('section.cards', {}, projects.map((project, index) => h(`a.card.rise${project.streams?.some(active) ? '.busy' : ''}`, { href: `#/p/${project.id}`, style: `animation-delay:${index * 60}ms` },
       h('div.card-h', {}, h('div.ident', {}, h('span.tile', {}, initial(project.name)), h('div', {}, h('b', {}, project.name), h('small', {}, project.root?.split('/').slice(-2).join('/') ?? ''))),
-        project.service ? pill(project.service.status) : null),
+        project.paused ? h('span.pill.warn', { title: project.paused.reason ?? '' }, '已暫停') : project.service ? pill(project.service.status) : null),
       project.error ? h('p.empty', {}, `讀取失敗：${project.error}`) : [
         h('div.tracks', {}, project.streams.map(miniTrack)),
         project.streams.filter(active).map(nowStrip),
@@ -194,11 +194,12 @@ function replaceApp(...nodes) {
 /** Every target in one panel: a row per target, the stage names once as column heads so the nodes line up. */
 function pipelines(streams) {
   const lane = stream => {
-    const { at, tone } = position(stream);
+    // A paused lane keeps its place on the track, drawn at rest.
+    const { at, tone: live } = position(stream), tone = stream.paused && live === 'now' ? 'idle' : live;
     const fraction = at <= 0 ? 0 : Math.min(at, STAGES.length - 1) / (STAGES.length - 1);
     const since = stream.phaseStartedAt ?? stream.current?.attemptStartedAt;
     const sub = [stream.current?.summary, deviceWaitLabel(stream) ?? (stream.phase ? PHASE[stream.phase.split(':')[0]] ?? stream.phase : null), stream.phase?.includes(':') ? stream.phase.split(':')[1] : null].filter(Boolean).join(' · ');
-    const state = stream.stopped ? `已停止（${STAGE_LABEL[stream.stage] ?? stream.stage}）` : stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
+    const state = stream.paused ? (stream.stage === 'idle' ? '已暫停' : `已暫停（${STAGE_LABEL[stream.stage] ?? stream.stage}）`) : stream.stopped ? `已停止（${STAGE_LABEL[stream.stage] ?? stream.stage}）` : stream.stage === 'idle' ? (at === STAGES.length ? '完成' : '閒置') : STAGE_LABEL[stream.stage] ?? stream.stage;
     return h(`div.lane${active(stream) ? '.on' : ''}`, { 'aria-label': `${targetName(stream.target)}：${state}` },
       h('div.lane-name', {}, h('b', {}, targetName(stream.target)), sub ? h('span', { title: sub }, sub) : null),
       h('div.track', {}, h('i.bed'), h('i.fill', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }), active(stream) ? h('i.flow', { style: `width:calc((100% - 2 * var(--inset)) * ${fraction})` }) : null,
@@ -468,6 +469,29 @@ function waiverPanel(snapshot) {
       h('small.mono.muted', {}, waiver.id),
       waiver.status === 'approved' ? h('button.btn', { type: 'button', onclick: event => revoke(event.currentTarget, waiver) }, '撤回') : null))));
 }
+/**
+ * A paused project says who paused it, when and why, with the button that resumes it; otherwise a folded control
+ * pauses it. Either is recorded under the dashboard reviewer's name.
+ */
+function pauseBar(snapshot) {
+  const id = snapshot.project.id, paused = snapshot.project.paused;
+  const send = async (button, body, label, question) => {
+    if (!confirm(question)) return;
+    button.disabled = true;
+    try { await act(id, body, label); } catch (error) { toast(`${label}失敗：${error.message}`, true); button.disabled = false; }
+  };
+  if (paused) {
+    const who = paused.by?.name ?? null;
+    return h('section.panel.paused-bar.rise', { 'aria-label': '已暫停' },
+      h('div.paused-text', {}, h('span.pill.warn', {}, '已暫停'),
+        h('b', {}, paused.reason ?? '沒有寫原因'),
+        h('small.muted', { title: paused.since ? new Date(paused.since).toLocaleString() : '' }, [who ? `由 ${who} ` : '', paused.since ? `${ago(paused.since)}暫停` : '', ' · runner 不執行版本、不分流 issue，只凍結新的原型版本；未完成的版本與 worktree 保持原樣'].join(''))),
+      h('button.btn.primary', { type: 'button', onclick: event => send(event.currentTarget, { action: 'resume' }, '恢復開發', '確定恢復開發？runner 會從停下的地方繼續，被停止的版本會重新執行。') }, '恢復開發'));
+  }
+  const reason = h('input.pause-reason', { type: 'text', maxlength: 1000, placeholder: '暫停原因（選填）', 'aria-label': '暫停原因' });
+  return h('details.pause-ctl', {}, h('summary', {}, '暫停開發'),
+    h('div', {}, reason, h('button.btn', { type: 'button', onclick: event => send(event.currentTarget, { action: 'pause', reason: reason.value.trim() || null }, '暫停開發', '確定暫停這個專案的開發？正在處理的版本會先做完這一輪，之後 runner 不再接新工作，直到你恢復。') }, '確定暫停')));
+}
 let lastProject = null;
 function renderProject(snapshot) {
   lastProject = snapshot;
@@ -481,7 +505,9 @@ function renderProject(snapshot) {
       h('div.roles', {}, team.map(agent => h('span.role', { title: agent.name }, avatar(agent), agent.labels.join('／'))),
         snapshot.adr ? h(`span.pill${snapshot.adr.status === 'approved' ? '.ok' : '.warn'}`, { title: snapshot.adr.path }, `ADR ${snapshot.adr.status === 'approved' ? '已核准' : '待核准'}`) : null,
         h(`span.pill${(STATUS[snapshot.service.status] ?? [])[1] ? `.${STATUS[snapshot.service.status][1]}` : ''}`, { title: snapshot.service.reason ?? '' }, (STATUS[snapshot.service.status] ?? [snapshot.service.status])[0]),
-        h('span.pill.plain', { title: '交付與批准方式' }, `${project.delivery?.merge === 'manual' ? '你合併' : '自動合併'} · ${project.autoApprove ? 'AI 批准' : '人工批准'}`))),
+        h('span.pill.plain', { title: '交付與批准方式' }, `${project.delivery?.merge === 'manual' ? '你合併' : '自動合併'} · ${project.autoApprove ? 'AI 批准' : '人工批准'}`),
+        project.paused ? null : pauseBar(snapshot))),
+    project.paused ? pauseBar(snapshot) : '',
     pipelines(snapshot.streams),
     h('section.split', {}, consoleCard(snapshot.streams), decisions(snapshot)),
     evidence(snapshot) ?? '',
@@ -531,6 +557,7 @@ const store = (key, value) => { try { localStorage.setItem(key, value); } catch 
 /** The stream that most needs a look (blocked, then working), else whether every target is done. */
 function headline(project) {
   if (project.error) return { label: '讀取失敗', tone: 'bad', stream: null };
+  if (project.paused) return { label: '已暫停', tone: 'idle', stream: project.streams?.[0] ?? null };
   const streams = project.streams ?? [], where = stream => streams.length > 1 ? ` · ${targetName(stream.target)}` : '';
   const blocked = streams.find(stream => stream.stage === 'blocked');
   if (blocked) return { label: `阻塞${where(blocked)}`, tone: 'bad', stream: blocked };

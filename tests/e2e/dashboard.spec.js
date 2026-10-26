@@ -5,6 +5,7 @@ import path from 'node:path';
 import { dashboardFixture } from '../helpers/dashboard-fixture.js';
 import { addProject, projectId } from '../../src/dashboard-data.js';
 import { createDashboardServer } from '../../src/dashboard-server.js';
+import { runAction } from '../../src/dashboard-actions.js';
 
 let fixture, dashboard, url, id;
 const calls = [];
@@ -216,6 +217,39 @@ test('a verification waiting for a simulator another project drives says so on t
     await expect(page.locator('.track li.now')).toHaveText('驗收');
     await expect(page.locator('.lane-name span')).toContainText('等待模擬器（被 siyue/ios 使用）');
   } finally { await server.close(); await waiting.cleanup(); }
+});
+
+test('a person pauses a project from its page, it says who paused it and why, and resumes it', async ({ page }) => {
+  const project = await dashboardFixture();
+  await addProject(project.root, { home: project.home });
+  // No runner: before the pause a card says the runner stopped.
+  const heartbeat = path.join(project.root, '.protoflow/runner/heartbeat.json');
+  await fs.writeFile(heartbeat, JSON.stringify({ ...JSON.parse(await fs.readFile(heartbeat, 'utf8')), at: new Date(Date.now() - 3600000).toISOString() }));
+  // The engine's own pause and resume actions, run against the FAKE project state (no launchd query).
+  const server = createDashboardServer({ home: project.home, port: 0, service: false, pollMs: 200, actions: (root, body) => runAction(root, body, { service: false }) });
+  const base = await server.listen();
+  try {
+    page.on('dialog', dialog => dialog.accept());
+    await page.goto(`${base}#/p/${await projectId(project.root)}`);
+    await expect(page.locator('.decide')).toContainText('Runner 沒在跑');
+    await page.getByText('暫停開發', { exact: true }).click();
+    await page.getByLabel('暫停原因').fill('Waiting for the new design');
+    await page.getByRole('button', { name: '確定暫停' }).click();
+    const bar = page.getByRole('region', { name: '已暫停' });
+    await expect(bar).toContainText('Waiting for the new design');
+    await expect(bar).toContainText('由 Fixture Person');
+    await expect(page.locator('.decide')).not.toContainText('Runner 沒在跑');
+    await expect(page.locator('.lane-state em')).toHaveText('已暫停（實作）');
+    // The overview and the sidebar say it is paused, not working.
+    await page.goto(base);
+    const card = page.getByRole('main').getByRole('link', { name: /Fixture App/ });
+    await expect(card.locator('.pill.warn')).toHaveText('已暫停');
+    await expect(card).not.toHaveClass(/busy/);
+    await page.goto(`${base}#/p/${await projectId(project.root)}`);
+    await bar.getByRole('button', { name: '恢復開發' }).click();
+    await expect(bar).toHaveCount(0);
+    await expect(page.locator('.decide')).toContainText('Runner 沒在跑');
+  } finally { await server.close(); await project.cleanup(); }
 });
 
 test('the inbox gathers what waits across projects, most urgent first, with the fix for a known failure', async ({ page, context }) => {

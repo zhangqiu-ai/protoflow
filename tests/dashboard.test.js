@@ -293,3 +293,35 @@ test('issues: a waiting issue offers answer, hand back and close; once handed ba
   const runner = view.attention.find(item => item.kind === 'service');
   assert.deepEqual([runner.title, runner.reason, runner.diagnosis.kind, runner.diagnosis.title], ['Runner 沒在跑', 'application 有版本等 runner 執行', 'runner-stopped', '版本處理停住了：runner 沒在跑']);
 });
+
+test('a paused project shows who paused it and why instead of runner-stopped cards, and resumes from the dashboard', async t => {
+  const { root } = await fixture(t);
+  // No runner (the heartbeat is an hour old) and an answered issue: unpaused, both say the runner stopped.
+  const heartbeat = path.join(root, '.protoflow/runner/heartbeat.json');
+  await fs.writeFile(heartbeat, JSON.stringify({ ...JSON.parse(await fs.readFile(heartbeat, 'utf8')), at: new Date(Date.now() - 3600000).toISOString() }));
+  await fs.mkdir(path.join(root, '.protoflow/dashboard'), { recursive: true });
+  await fs.writeFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), action: 'answer-issue', args: { number: 5, text: 'FAKE FIXTURE answer' }, via: 'dashboard', status: 'PASS', result: { actor: 'human:fixture' } })}\n`);
+  let view = await dashboardSnapshot(root, { service: false });
+  assert.equal(view.attention.some(item => item.kind === 'service'), true);
+  assert.equal(view.project.paused, null);
+  const paused = await runAction(root, { action: 'pause', reason: 'Waiting for the new design' }, { service: false });
+  assert.deepEqual([paused.status, paused.paused.by, paused.paused.reason, paused.paused.via], ['PASS', { kind: 'human', name: 'Fixture Person' }, 'Waiting for the new design', 'dashboard']);
+  view = await dashboardSnapshot(root, { service: false });
+  assert.deepEqual(view.project.paused, { since: paused.paused.pausedAt, by: { kind: 'human', name: 'Fixture Person' }, reason: 'Waiting for the new design' });
+  assert.equal(view.attention.some(item => item.kind === 'service' || item.waiting === 'runner'), false, 'no card says the runner stopped');
+  assert.deepEqual(view.attention.map(item => item.kind).sort(), ['manual-merge'], 'decisions that do not need a runner stay');
+  assert.deepEqual([view.streams[0].paused, view.streams[0].stopped], [true, undefined]);
+  assert.deepEqual([overviewStream(view.streams[0]).paused, overviewStream(view.streams[0]).stopped], [true, false]);
+  assert.equal(view.events[0].event, 'project-paused');
+  // Pausing again changes nothing; resuming with no runner says how to start one.
+  assert.equal((await runAction(root, { action: 'pause', reason: 'other' }, { service: false })).already, true);
+  const resumed = await runAction(root, { action: 'resume' }, { service: false });
+  assert.deepEqual([resumed.status, resumed.resumed.by.name, resumed.paused.reason, resumed.runner], ['PASS', 'Fixture Person', 'Waiting for the new design', 'stopped']);
+  view = await dashboardSnapshot(root, { service: false });
+  assert.equal(view.project.paused, null);
+  assert.equal(view.attention.some(item => item.kind === 'service'), true, 'resumed without a runner: the card is back');
+  const history = (await fs.readFile(path.join(root, '.protoflow/pause-history.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(history.map(record => [record.event, record.by.name, record.via]), [['project-paused', 'Fixture Person', 'dashboard'], ['project-resumed', 'Fixture Person', 'dashboard']]);
+  const audit = (await fs.readFile(path.join(root, '.protoflow/dashboard/actions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)).slice(1);
+  assert.deepEqual(audit.map(record => [record.action, record.status]), [['pause', 'PASS'], ['pause', 'PASS'], ['resume', 'PASS']]);
+});

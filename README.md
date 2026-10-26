@@ -163,6 +163,7 @@ protoflow runner status --project /path/to/app
   - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。
   - 原型 diff 過大（單檔超過 32 KiB，或整頁產生在同一行）時，送給執行代理的 context 改為指向凍結檔（`frozenBefore`／`frozenAfter`），並附變更處摘錄；`git.diff` 不再和各檔 diff 重複。已凍結的版本直接 `runner retry` 即可套用，不需要重新凍結。見 [大型原型 diff](docs/integrations.md#codex)。
 - **恢復**：BLOCKED、STOPPED 或中斷的 RUNNING 必須先查明原因，再執行 `runner retry [--target id]`。設定錯誤時，先用 `runner configure` 明確綁定新設定。啟動意圖沒有留下 PID 時，用 `runner retry --recover-unknown-start`；引擎會先確認沒有存活程序。規劃者以 `needs-human` 擋下版本時，用 `runner retry --answer "<回答>"`（或面板卡片的「回答並重試」）回答它的問題；回答存在 `retries`，重新規劃時規劃者會讀到。原型本身有錯、修正排在後面的版本時，用 `runner supersede` 把卡住的版本併入最新版；舊引擎誤判等級（例如卡在不需要的 `--spec`）時，用 `runner reclassify` 以目前引擎重新分級，見 [重新分級](docs/git-runner.md)。單一 target 的基底在上次交付後被人移動時，Runner 在版本執行前就快轉到新基底，worktree 有未交付內容時則提前 BLOCKED；但被獨立審查否決、退回重修的版本，只要基底沒有改到 worktree 改過的檔案，就把工作（含被否決交付的內容與修復中的變更）帶到新基底繼續，原提交存在 `refs/protoflow/carried/`；已卡住的交付用 `runner rebase` 退回並在目前基底上重跑。`runner gc [--apply]` 會封存並回收不再使用的乾淨 worktree。
+- **暫停開發**：`project pause --reason "<原因>"`（或面板專案頁的「暫停開發」）記錄誰、何時、為什麼暫停。暫停期間 Runner 只掃描並凍結新提交，不執行版本、不分流或修復 Issue；常駐服務不退出，前景 `runner start --once` 與 `issues sync` 回傳 `PAUSED`（exit 3）。正在處理的版本會先做完這一輪才停。面板不再顯示「Runner 沒在跑」，改為「已暫停」與「恢復開發」。`project resume` 後從停下的地方繼續：STOPPED 的版本重新排入（同 `runner retry`），BLOCKED 的版本仍等它自己的決定，worktree 不動。見 [暫停開發](docs/git-runner.md#暫停開發)。
 - **定期巡查**：可在 Codex app 建立 heartbeat 自動化，定期執行 `runner start --once`、`delivery sync` 與 `delivery status`，見 [定期巡查](docs/git-runner.md#定期巡查codex-自動化)。
 
 ### 本機設計流程（未配置 Git 來源）
@@ -249,6 +250,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port] [--service]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准；常駐服務在引擎升版後自動重新啟動（見 [docs/dashboard.md](docs/dashboard.md)） |
 | `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查；`delivery status` 分開計數通過與附豁免通過的版本 |
 | `waiver request --verification ID --scene ID --tier structure\|tokens\|layout [--variant ID] --reason TEXT [--engine-issue URL] --requested-by NAME` / `waiver list` / `waiver show --waiver ID` | 申請維護者豁免（只建立「申請中」，核准只在儀表板）／列出與查看豁免 |
+| `project pause [--reason TEXT] [--by NAME]` / `project resume` / `project status` | 暫停開發（Runner 只凍結新提交，不執行版本、不分流或修復 Issue）／恢復開發（被停止的版本重新排入）／暫停狀態；面板也能暫停與恢復 |
 | `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |
 | `queue` / `status` | 版本佇列（含 `release`）／會話、Baseline、佇列與整合狀態 |
 | `anchors lint` / `anchors suggest [--patch-file]` | 檢查錨點與 sidecar／產生錨點建議 patch（v2） |
