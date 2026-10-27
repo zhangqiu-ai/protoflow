@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planVersion, normalizePlan, contractAnchors, approvedAdr, PLAN_SCHEMA } from '../src/planner.js';
+import { planVersion, planIssue, normalizePlan, contractAnchors, approvedAdr, verificationChecks, PLAN_SCHEMA } from '../src/planner.js';
+import { reviewPrompt } from '../src/review-prompt.js';
 import { hash } from '../src/util.js';
 
 const adapter = fileURLToPath(new URL('../scripts/claude-adapter.js', import.meta.url));
@@ -115,4 +116,39 @@ test('FAKE CLI only: planners that write, answer off-schema, cannot log in or fo
   const script = `let i='';process.stdin.on('data',c=>i+=c).on('end',()=>process.stdout.write(JSON.stringify({...${JSON.stringify(forged)},requestId:JSON.parse(i).id})))`;
   await assert.rejects(planVersion(root, { adapters: { planner: { command: { argv: [process.execPath, '-e', script] } } } }, context), error => error.planner && /Planner trace rejected: .*beyond read-only: Bash/.test(error.message));
   await assert.rejects(fs.readdir(path.join(root, '.protoflow/plans')), { code: 'ENOENT' });
+});
+
+test('verificationChecks names the build and functional argv ProtoFlow verification runs for a target', () => {
+  const web = { id: 'web', platform: 'web', build: { argv: ['npm', 'run', 'build'] }, functional: { argv: ['npx', 'playwright', 'test', 'e2e/login.spec.js'] } };
+  const mobile = { id: 'mobile', platform: 'react-native', variants: [{ id: 'ios', build: { argv: ['xcodebuild'] } }, { id: 'android', build: { argv: ['gradle'] } }], functional: { argv: ['detox', 'test'] } };
+  const config = { schemaVersion: 2, targets: [web, mobile] };
+  assert.deepEqual(verificationChecks(config, 'web'), { build: ['npm', 'run', 'build'], functional: ['npx', 'playwright', 'test', 'e2e/login.spec.js'] });
+  assert.deepEqual(verificationChecks(config, 'mobile'), { build: { ios: ['xcodebuild'], android: ['gradle'] }, functional: ['detox', 'test'] });
+  assert.deepEqual(verificationChecks({ verification: { build: { argv: ['make'] }, functional: { adapter: 'acceptance' } } }), { build: ['make'], functional: 'adapters.acceptance' });
+  assert.deepEqual(verificationChecks({}), { build: null, functional: null });
+});
+
+test('FAKE CLI only: planners see the checks verification runs and may only promise evidence from them', async t => {
+  const { root, config } = await fixture(t);
+  const target = { id: 'web', platform: 'web', root: 'app', build: { argv: ['npm', 'run', 'build'] }, functional: { argv: ['npx', 'playwright', 'test', 'e2e/login.spec.js'] } };
+  const v2 = { ...config, schemaVersion: 2, targets: [target] };
+  const checks = { build: ['npm', 'run', 'build'], functional: ['npx', 'playwright', 'test', 'e2e/login.spec.js'] };
+  const promise = /only evidence of a passing check that reaches the independent reviewer[\s\S]*never make a check that command does not run \(a whole suite such as `npm test`[\s\S]*return "needs-human" and say in questions which check the operator must add to the target's functional command/;
+  const version = await withFake({ FAKE_CLAUDE_MODE: 'pass', FAKE_CLAUDE_OUTPUT: JSON.stringify(plan()), FAKE_CLAUDE_RECORD: path.join(root, 'version.json') }, () => planVersion(root, v2, context));
+  const request = JSON.parse(await fs.readFile(path.join(root, `.protoflow/plans/${version.id}/request.json`), 'utf8'));
+  assert.deepEqual(request.data.verification, checks); assert.match(request.instructions, promise);
+  const snapshot = { id: 'ISS-fixture', hash: 'sha256:issue', number: 7, repository: { nameWithOwner: 'acme/app' }, title: 'Board shows done tasks', body: 'FAKE FIXTURE ISSUE', author: 'maintainer', labels: ['protoflow'], comments: [] };
+  const triage = { decision: 'implement', level: 'L1', area: 'frontend', targets: ['web'], summary: 'FAKE FIXTURE TRIAGE', steps: ['Filter done tasks'], acceptanceCriteria: [{ id: 'AC1', text: 'e2e/login.spec.js covers the filter', evidence: 'test' }], tests: ['e2e/login.spec.js'], risks: [], questions: [] };
+  const issue = await withFake({ FAKE_CLAUDE_MODE: 'pass', FAKE_CLAUDE_OUTPUT: JSON.stringify(triage) }, () => planIssue(root, v2, snapshot, { targets: [{ id: 'web', platform: 'web', root: 'app' }] }));
+  const issueRequest = JSON.parse(await fs.readFile(path.join(root, `.protoflow/plans/${issue.id}/request.json`), 'utf8'));
+  assert.deepEqual(issueRequest.data.targets, [{ id: 'web', platform: 'web', root: 'app', verification: checks }]); assert.match(issueRequest.instructions, promise);
+  // The schema still takes only target ids.
+  assert.deepEqual(issueRequest.schema.properties.targets.items.enum, ['web']);
+});
+
+test('the independent reviewer treats a check verification did not run as a configuration gap, not a product finding', () => {
+  const prompt = reviewPrompt({ id: 'AIR-fixture', bindingHash: 'sha256:binding' });
+  assert.match(prompt, /Evidence that a check passed reaches you only through the bound verification records/);
+  assert.match(prompt, /could not run a check in its own sandbox \(no local port, no browser or Electron\) is not a finding/);
+  assert.match(prompt, /if that is your only concern return NOT_RUN naming the criterion ids and the missing check[^.]*instead of FAIL/);
 });
