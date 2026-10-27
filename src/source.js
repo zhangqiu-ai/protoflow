@@ -368,6 +368,14 @@ export async function supersedeVersions(root, config, { from }) {
 }
 
 /**
+ * The maintainer answers (runner retry --answer) a version keeps when it restarts from scratch: a rebase or a
+ * reclassification runs the same prototype again, so the questions they answered stay answered for its next plan.
+ */
+export function carriedAnswers(entry, carried) {
+  const retries = (entry.retries ?? []).filter(retry => retry.answer?.text).map(retry => ({ ...retry, carried: retry.carried ?? carried }));
+  return retries.length ? { retries } : {};
+}
+/**
  * Classify a blocked version again with the current engine: its level was fixed when it was scanned, so a corrected
  * classification would never reach it. The frozen prototype must be unchanged; only the manifest is rebuilt. The old
  * manifest is archived, and the entry starts over (its attempts are kept in `state.reclassified`). A version the
@@ -396,7 +404,7 @@ export async function reclassifyVersion(root, config, { from, engineVersion }) {
   const record = { at, manifestId: entry.manifestId, from: previous.level, to: level, previousManifestHash: hash(previous), engineVersion, archive };
   const manifest = await publishCheckpoint(root, config, repository, entry.sha, before, after, entry.ordinal, { reclassified: record });
   state.reclassified = [...(state.reclassified ?? []), { ...record, manifestHash: hash(manifest), entry }];
-  state.entries[index] = { sha: entry.sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [] };
+  state.entries[index] = { sha: entry.sha, manifestId: manifest.id, prototypeHash: manifest.afterHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [], ...carriedAnswers(entry, { by: 'reclassify', at }) };
   await saveSourceState(root, state);
   return { manifest, ...record };
 }

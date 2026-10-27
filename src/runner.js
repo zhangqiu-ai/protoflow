@@ -629,7 +629,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       // So is its last verification, and what a maintainer answered with runner retry --answer.
       const verified = entry.attempts.findLast(attempt => /^VER-[A-Za-z0-9-]+$/.test(attempt.verificationId ?? ''));
       const lastVerification = verified ? verificationBrief(await readJson(await projectPath(runner.worktree, `.protoflow/verifications/${verified.verificationId}.json`), null)) : null;
-      const answers = (entry.retries ?? []).filter(retry => retry.answer?.text).slice(-5).map(retry => ({ text: retry.answer.text, at: retry.at, via: retry.answer.via, ...(retry.answer.by && { by: retry.answer.by }) }));
+      const answers = (entry.retries ?? []).filter(retry => retry.answer?.text).slice(-5).map(retry => ({ text: retry.answer.text, at: retry.at, via: retry.answer.via, ...(retry.answer.by && { by: retry.answer.by }), ...(retry.carried && { before: retry.carried.by }) }));
       const previous = earlier || lastVerification || answers.length ? {
         ...(earlier && { id: earlier.id, summary: earlier.plan.summary, steps: earlier.plan.steps, acceptanceCriteria: earlier.plan.acceptanceCriteria }),
         attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null,
