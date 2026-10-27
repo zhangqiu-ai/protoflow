@@ -52,7 +52,7 @@ export function electronRoute(route, request) {
  * Launch one supervised Electron process, let `navigate(page)` bring its first window to the screen, then capture.
  * Returns { status, reason?, capture?, runtime }. The process group must be gone before this returns.
  */
-async function launchAndCapture({ executablePath, args, cwd, env, viewport, attribute, request, timeout, stepTimeout, phase, navigate, hooks }) {
+async function launchAndCapture({ executablePath, args, cwd, env, viewport, attribute, request, text, timeout, stepTimeout, phase, navigate, hooks }) {
   const { signal, onBeforeSpawn, onStart, onFinish } = hooks;
   let app = null, pid = null, exit = null, exited = null, outcome, failure = null, launchAttempted = false, profileDir = null, runtime = { executablePath, args };
   let forcedTermination = false, resolveAbort;
@@ -110,7 +110,7 @@ async function launchAndCapture({ executablePath, args, cwd, env, viewport, attr
         outcome = { status: 'FAIL', reason: `${phase === 'visual-electron' ? 'Electron application' : 'Prototype in Electron'} window is ${describe(runtime.viewport)}, expected ${describe(expected)}; the window was resized or clamped (create its BrowserWindow with enableLargerThanScreen: true on macOS when the viewport exceeds the screen)`, runtime };
         return outcome;
       }
-      const { elements, screenshot } = await captureOnPage(page, { attribute, anchors: request.anchors, steps: request.steps, timeoutMs: stepTimeout });
+      const { elements, screenshot } = await captureOnPage(page, { attribute, anchors: request.anchors, steps: request.steps, ...text, timeoutMs: stepTimeout });
       const image = PNG.sync.read(screenshot);
       runtime.screenshot = { width: image.width, height: image.height };
       const pixels = { width: Math.round(expected.width * expected.scale), height: Math.round(expected.height * expected.scale) };
@@ -207,8 +207,11 @@ async function electronContext(root, target, settings) {
   return { executablePath, env, scaleArg: `--force-device-scale-factor=${settings.viewport.scale ?? 1}`, timeout: target.timeoutMs ?? 30000 };
 }
 
-/** Capture the target's real Electron application (phase 'visual-electron'). */
-export async function captureElectron(root, target, settings, request, hooks = {}) {
+/**
+ * Capture the target's real Electron application (phase 'visual-electron'). Text matched by `dynamicText` selectors and
+ * the `dynamicAnchors` is left out of anchor text as in the web driver, on this side and the prototype's.
+ */
+export async function captureElectron(root, target, settings, request, hooks = {}, { dynamicText = [], dynamicAnchors = [] } = {}) {
   const context = await electronContext(root, target, settings);
   if (!context.executablePath) return { status: 'NOT_RUN', reason: context.reason };
   const targetRoot = target.root && target.root !== '.' ? await projectPath(root, target.root) : await realpath(root);
@@ -216,7 +219,7 @@ export async function captureElectron(root, target, settings, request, hooks = {
   return launchAndCapture({
     executablePath: context.executablePath, args: [context.scaleArg, main, ...(target.driver.args ?? [])], cwd: targetRoot,
     env: { ...context.env, PROTOFLOW_SCREEN: request.screen, PROTOFLOW_STATE: request.state, PROTOFLOW_FIXTURE: JSON.stringify(request.fixture.data ?? {}) },
-    viewport: settings.viewport, attribute: settings.locator.attribute, request, timeout: context.timeout, stepTimeout: target.timeoutMs ?? 10000,
+    viewport: settings.viewport, attribute: settings.locator.attribute, request, text: { dynamicText, dynamicAnchors }, timeout: context.timeout, stepTimeout: target.timeoutMs ?? 10000,
     phase: 'visual-electron', hooks,
     navigate: async page => {
       const route = electronRoute(target.driver.route, request);
@@ -230,13 +233,13 @@ export async function captureElectron(root, target, settings, request, hooks = {
 }
 
 /** Capture the frozen prototype page in the same Electron build (phase 'visual-electron-prototype'). */
-export async function captureElectronPrototype(root, target, settings, request, { url, attribute }, hooks = {}) {
+export async function captureElectronPrototype(root, target, settings, request, { url, attribute, dynamicText = [], dynamicAnchors = [] }, hooks = {}) {
   const context = await electronContext(root, target, settings);
   if (!context.executablePath) return { status: 'NOT_RUN', reason: context.reason };
   return launchAndCapture({
     executablePath: context.executablePath, args: [context.scaleArg, VIEWER], cwd: await realpath(root),
     env: { ...context.env, PROTOFLOW_VIEWER_URL: url, PROTOFLOW_VIEWER_WIDTH: String(settings.viewport.width), PROTOFLOW_VIEWER_HEIGHT: String(settings.viewport.height) },
-    viewport: settings.viewport, attribute, request, timeout: context.timeout, stepTimeout: target.timeoutMs ?? 10000,
+    viewport: settings.viewport, attribute, request, text: { dynamicText, dynamicAnchors }, timeout: context.timeout, stepTimeout: target.timeoutMs ?? 10000,
     phase: 'visual-electron-prototype', hooks,
     navigate: async page => { await page.reload({ waitUntil: 'load' }); return url; }
   });
