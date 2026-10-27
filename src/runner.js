@@ -27,9 +27,12 @@ import { shareWaivers, requestWaiver, waiverReviewers, findingsHash } from './wa
  * entries' status combined from those targets (see sourceView).
  */
 export async function runnerStatus(root, config = null) {
+  // Passes that keep failing before any version moves (a changed config) show here, not only in the service log.
+  const beat = await readJson(await projectPath(root, HEARTBEAT), null);
+  const failing = beat?.failingPasses > 0 ? { failing: { passes: beat.failingPasses, lastFailure: beat.lastFailure ?? null } } : {};
   if (!config || !isMultiTarget(config)) {
     const source = await sourceStatus(root);
-    return { ...blockedSummary(source), source, runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
+    return { ...failing, ...blockedSummary(source), source, runner: await readJson(await projectPath(root, runnerStatePath(config ?? {}, null)), null) };
   }
   const targets = {};
   for (const stream of streamTargets(config)) {
@@ -37,7 +40,7 @@ export async function runnerStatus(root, config = null) {
     targets[stream] = { ...blockedSummary(progress), summary: progressSummary(progress), progress, runner: await readJson(await projectPath(root, runnerStatePath(config, stream)), null) };
   }
   const source = await sourceView(root, config, Object.fromEntries(Object.entries(targets).map(([stream, item]) => [stream, item.progress])));
-  return { source, targets };
+  return { ...failing, source, targets };
 }
 /** The blocked current version first, so runner status shows why it waits without reading every attempt. */
 function blockedSummary(progress) {
@@ -64,6 +67,13 @@ function assertNoActiveProcesses(entry) {
     }
   }
 }
+/** Top-level config keys that differ, and the runner fields within runner, so a config-change failure says what moved. */
+function changedConfigKeys(before, after, prefix = '') {
+  return [...new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])].flatMap(key => {
+    if (hash(before?.[key] ?? null) === hash(after?.[key] ?? null)) return [];
+    return key === 'runner' && !prefix ? changedConfigKeys(before?.[key], after?.[key], 'runner.') : [`${prefix}${key}`];
+  });
+}
 async function ensureWorktree(root, config, { signal, stream = null } = {}) {
   const statePath = runnerStatePath(config, stream);
   let runner = await readJson(await projectPath(root, statePath), null);
@@ -76,7 +86,12 @@ async function ensureWorktree(root, config, { signal, stream = null } = {}) {
     if (runner.worktree !== worktree) throw new Error('Runner worktree identity changed');
     const current = (await git(worktree, ['rev-parse', '--show-toplevel'])).trim();
     if (await fs.realpath(current) !== await fs.realpath(worktree)) throw new Error('Runner checkout is not its recorded worktree');
-    if (hash(config) !== runner.configHash) throw new Error('Runner config changed; run runner configure after inspecting the failure');
+    if (hash(config) !== runner.configHash) {
+      // The worktree holds the configured file unless a delivery deferred it: name the fields that moved only then.
+      const configured = await readJson(path.join(worktree, 'protoflow.config.json'), null);
+      const changed = configured && hash(configured) === runner.configHash ? changedConfigKeys(configured, config) : [];
+      throw new Error(`Runner config changed${changed.length ? ` (${changed.join(', ')})` : ''}; run runner configure after inspecting the failure`);
+    }
     return runner;
   }
   const base = runner?.base ?? (await git(root, ['rev-parse', `${config.runner?.applicationRef ?? 'HEAD'}^{commit}`])).trim();
@@ -1022,7 +1037,7 @@ export async function configureRunner(root, config) {
 /** Combine per-target results: any BLOCKED, then NOT_RUN, then PASS, otherwise IDLE. */
 function aggregate(results) {
   const statuses = Object.values(results).map(result => result.status);
-  const status = ['BLOCKED', 'NOT_RUN', 'STOPPED', 'PASS'].find(item => statuses.includes(item)) ?? 'IDLE';
+  const status = ['ERROR', 'BLOCKED', 'NOT_RUN', 'STOPPED', 'PASS'].find(item => statuses.includes(item)) ?? 'IDLE';
   return { status, targets: results };
 }
 /**
@@ -1064,7 +1079,7 @@ export async function startRunner(root, config, { once = false, service = false,
   const waiting = new Map();
   const startedAt = new Date().toISOString();
   // Consecutive passes that could not read the source or reach GitHub: a supervisor reports them as degraded.
-  let lastEvent = null, lastPass = null, failingPasses = 0, lastFailure = null, passIssueError = null;
+  let lastEvent = null, lastPass = null, failingPasses = 0, lastFailure = null, passIssueError = null, passError = null;
   const beat = async () => {
     try { await writeJson(await projectPath(root, HEARTBEAT), { schemaVersion: 1, pid: process.pid, version: ENGINE_VERSION, service, startedAt, at: new Date().toISOString(), beatIntervalMs, lastPass, lastEvent, failingPasses, lastFailure }); }
     catch { /* liveness is advisory */ }
@@ -1109,7 +1124,7 @@ export async function startRunner(root, config, { once = false, service = false,
     await beat();
     while (!signal?.aborted) {
       let scanError = null;
-      passIssueError = null;
+      passIssueError = null; passError = null;
       try { const scan = await withLock(root, () => scanSource(root, config)); await onEvent({ event: 'scanned', tip: scan.tip, added: scan.added }); }
       catch (error) { scanError = error.message; await onEvent({ event: 'scan-failed', error: error.message }); if (error.code === 'SOURCE_HISTORY_REWRITTEN' && !service) throw error; }
       if (signal?.aborted) return { status: 'STOPPED' };
@@ -1128,9 +1143,20 @@ export async function startRunner(root, config, { once = false, service = false,
         const events = stream ? event => onEvent({ ...event, target: stream }) : onEvent;
         if (await projectPause(root)) { results[stream ?? ''] = { status: 'PAUSED' }; continue; }
         let result;
-        do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
-        // An automated rejection (REOPENED) repairs at once; MAX_AUTOMATED_REOPENINGS bounds the loop.
-        while (['PASS', 'REOPENED'].includes(result.status) && !signal?.aborted && !await projectPause(root));
+        try {
+          do { result = await withLock(root, () => runOnce(root, config, { signal, onEvent: events, target: stream })); }
+          // An automated rejection (REOPENED) repairs at once; MAX_AUTOMATED_REOPENINGS bounds the loop.
+          while (['PASS', 'REOPENED'].includes(result.status) && !signal?.aborted && !await projectPause(root));
+        } catch (error) {
+          // A pass that throws (a changed config, a live child process) is a failure a person sees: an event, the
+          // heartbeat, and the service health. The resident runner keeps polling instead of exiting into a restart loop.
+          if (signal?.aborted) throw error;
+          const message = error.message.slice(0, 300);
+          passError ??= message;
+          await events({ event: 'pass-failed', error: message });
+          if (!service) { failingPasses++; lastFailure = { at: new Date().toISOString(), error: message }; await beat(); throw error; }
+          result = { status: 'ERROR', reason: message };
+        }
         // Proposal 0003: an idle, fully delivered target takes one planned GitHub issue per pass; prototypes come first.
         if (config.issues?.enabled && result.status === 'IDLE' && !signal?.aborted && !await projectPause(root)) {
           try {
@@ -1152,10 +1178,10 @@ export async function startRunner(root, config, { once = false, service = false,
       }
       // Proposal 0003: triage labelled GitHub issues once the prototype streams have had their turn.
       if (config.issues?.enabled && !signal?.aborted) await syncIssuesNow();
-      const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN'].includes(result.status));
-      const failure = scanError ?? passIssueError;
+      const stuck = Object.values(results).every(result => ['BLOCKED', 'NOT_RUN', 'ERROR'].includes(result.status));
+      const failure = passError ?? scanError ?? passIssueError;
       if (failure) { failingPasses++; lastFailure = { at: new Date().toISOString(), error: failure.slice(0, 300) }; } else failingPasses = 0;
-      lastPass = { at: new Date().toISOString(), status: last.status, stuck, ...(scanError && { scanError: scanError.slice(0, 200) }), ...(passIssueError && { issuesError: passIssueError.slice(0, 200) }), targets: Object.fromEntries(Object.entries(results).map(([key, result]) => [key || 'default', result.status])) };
+      lastPass = { at: new Date().toISOString(), status: last.status, stuck, ...(passError && { passError: passError.slice(0, 200) }), ...(scanError && { scanError: scanError.slice(0, 200) }), ...(passIssueError && { issuesError: passIssueError.slice(0, 200) }), targets: Object.fromEntries(Object.entries(results).map(([key, result]) => [key || 'default', result.status])) };
       await beat();
       // A resident runner waits for a person to resolve a block instead of exiting into a supervisor restart loop.
       if (once || (stuck && !service)) return scanError && last.status === 'IDLE' ? { ...last, status: 'SCAN_FAILED', reason: scanError } : last;

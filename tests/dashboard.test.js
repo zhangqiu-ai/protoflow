@@ -181,6 +181,8 @@ test('a known failure becomes what to do before retrying: which login expired, t
   assert.match(claude.steps.join(' '), /`\/login`/);
   assert.deepEqual([diagnose('HTTP 401: Bad credentials (https://api.github.com/graphql)').command, diagnose('codex exec failed: 401 Unauthorized').command], ['gh auth login', 'codex login']);
   assert.equal(diagnose('fatal: unable to access: Could not resolve host: github.com').kind, 'network');
+  const config = diagnose('3 consecutive passes failed: Runner config changed (runner.adr); run runner configure after inspecting the failure');
+  assert.equal(config.kind, 'config-changed'); assert.equal(config.command, 'protoflow runner configure');
   assert.equal(diagnose('rate_limit_error: 429 Too Many Requests').kind, 'quota');
   assert.equal(diagnose('write ENOSPC: no space left on device').command, 'protoflow runner gc');
   assert.equal(diagnose('Executor timed out after 1800000ms').kind, 'timeout');
