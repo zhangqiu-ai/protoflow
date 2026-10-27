@@ -106,7 +106,7 @@ export function roles(config) {
 }
 
 const PHASE_STAGE = phase => phase === 'execute' ? 'execute' : /^(build|functional|visual)/.test(phase ?? '') ? 'verify' : null;
-const EVENT_STAGE = { planned: 'execute', 'plan-failed': 'execute', execute: 'execute', repair: 'execute', 'execute-failed': 'execute', 'execute-retry': 'execute', 'executor-fallback': 'execute', 'issue-started': 'execute', 'issue-execute': 'execute', 'issue-repair': 'execute', 'issue-reviewed': 'deliver', 'issue-merged': 'deliver', delivered: 'deliver', reopened: 'plan', reverify: 'verify' };
+const EVENT_STAGE = { planned: 'execute', 'plan-reused': 'execute', 'plan-failed': 'execute', execute: 'execute', repair: 'execute', 'execute-failed': 'execute', 'execute-retry': 'execute', 'executor-fallback': 'execute', 'issue-started': 'execute', 'issue-execute': 'execute', 'issue-repair': 'execute', 'issue-reviewed': 'deliver', 'issue-merged': 'deliver', delivered: 'deliver', reopened: 'plan', reverify: 'verify' };
 
 async function latestVerification(roots, verificationId) {
   if (!verificationId) return null;

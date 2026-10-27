@@ -21,6 +21,8 @@ import { runIssues } from './issue-runner.js';
 import { notifyDesktop } from './notify.js';
 import { EXECUTOR_ENVIRONMENT, BUILD_INPUTS } from './environment.js';
 import { shareWaivers, requestWaiver, waiverReviewers, findingsHash } from './waivers.js';
+import { failureKeys, functionalFailure, classifyFailures, identicalFailures, unrepairableSummary, UNREPAIRABLE_KINDS } from './repairability.js';
+export { failureKeys };
 
 /**
  * Source progress and runner state; with several targets, one { summary, progress, runner } per target and the source
@@ -242,16 +244,32 @@ export const EXECUTOR_QUOTA = /usage limit|rate.?limit|quota|credit balance|over
 export const TRANSIENT_PROVIDER = /model is at capacity|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service unavailable|overloaded|temporarily unavailable|stream disconnected/i;
 // Login and unreachable-network signatures live in environment.js with the build ones.
 export { EXECUTOR_ENVIRONMENT };
-/** What a verification failed on: one key per failing check, build variant or scene. */
-export function failureKeys(report) {
-  const keys = ['build', 'functional', 'hygiene'].filter(section => report?.[section]?.status && report[section].status !== 'PASS');
-  for (const [name, result] of Object.entries(report?.build?.variants ?? {})) if (result?.status !== 'PASS') keys.push(`build:${name}`);
-  const scenes = (report?.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS').map(scene => `scene:${scene.variant ? `${scene.variant}/` : ''}${scene.id}`);
-  keys.push(...scenes);
-  if (report?.visual?.status && report.visual.status !== 'PASS' && !scenes.length) keys.push('visual');
-  if (report?.changedDuringVerification) keys.push('changedDuringVerification');
-  return keys;
+/** The Context Package was over the executor's input limit: the version's diff, not the executor, is the problem. */
+export const CONTEXT_TOO_LARGE = /Context Package is \d+ characters, above the/;
+/** Over fitContext's own budget, every executor would refuse it; over the adapter's limit, a fallback executor may take it. */
+const OVER_ANY_BUDGET = /above the executor budget/;
+/**
+ * A plan still stands when the version runs again for a reason that is not the plan's: an independent review rejected
+ * the delivery (its findings repair the planned version; a new plan would move the acceptance criteria instead), or the
+ * version blocked for the machine, the base or the executor's input limit. It is planned again after a maintainer
+ * answered the planner, when the repair stalled or ran out of attempts, when the plan itself failed or wanted a person,
+ * and whenever `policy.replanOnReopen` is true.
+ */
+const REUSE_PLAN_AFTER = new Set(['environment', 'base-moved', 'context-too-large', 'operator-action', 'not-run']);
+export function planReuseReason(config, earlier, cause, answers = []) {
+  if (!earlier?.createdAt || earlier.plan?.decision !== 'implement' || config.policy?.replanOnReopen === true || !cause?.at) return null;
+  if (!(cause.at > earlier.createdAt) || answers.some(answer => answer.at > earlier.createdAt)) return null;
+  if (cause.kind === 'reopening') return 'the independent review rejected the delivery; its findings repair the planned version';
+  if (REUSE_PLAN_AFTER.has(cause.reasonCode)) return `the version blocked for ${cause.reasonCode}, not for its plan`;
+  return null;
 }
+/** Why a version runs again: its latest retry (with the block's reasonCode) or reopening. */
+export function rerunCause(entry) {
+  const causes = [...(entry.retries ?? []).map(retry => ({ kind: 'retry', at: retry.at, reasonCode: retry.reasonCode ?? null })), ...(entry.reopenings ?? []).map(item => ({ kind: 'reopening', at: item.at }))];
+  return causes.filter(cause => cause.at).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1) ?? null;
+}
+/** The scenes a failed verification failed on (skipped ones were never captured), for a failing-first repair check. */
+const failingScenes = report => (report?.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS' && !scene.skipped).map(scene => ({ id: scene.id, variant: scene.variant ?? null }));
 /**
  * A repair round makes progress only when it fails fewer checks than the round before. Equal counts, a superset and a
  * same-size swap (one fixed, another broken) all count as no progress; after policy.stallRounds such rounds in a row
@@ -353,12 +371,6 @@ function failureSummary(report, failed) {
   const line = functionalFailure(report);
   return line ? `${keys} (functional: ${line})` : keys;
 }
-function functionalFailure(report) {
-  const output = report.functional?.status && report.functional.status !== 'PASS' ? `${report.functional.stdout ?? ''}\n${report.functional.stderr ?? ''}` : '';
-  const lines = output.split('\n').map(item => item.trim());
-  // A test runner names the failing test (Playwright `1) [project] › file:line`) and then its error.
-  return [lines.find(item => /^\d+\) /.test(item)), lines.find(item => /^\w*Error\b.*:|\bENOENT\b/.test(item))].filter(Boolean).join(' — ').slice(0, 400) || null;
-}
 /**
  * A version's last verification, briefly, for its planner: the checks that failed, the first failing test and each
  * failing scene's failing tiers with their reasons. The runner verifies outside the executor's sandbox, so this, not
@@ -366,10 +378,11 @@ function functionalFailure(report) {
  */
 export function verificationBrief(report) {
   if (!report?.id) return null;
-  const scenes = (report.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS');
+  // Scenes a failing-first check skipped were not verified: they are neither failures nor evidence.
+  const scenes = (report.visual?.scenes ?? []).filter(scene => scene.status !== 'PASS' && !scene.skipped);
   const section = name => report[name]?.status ? { status: report[name].status } : null;
   return {
-    id: report.id, status: report.status, failures: failureKeys(report).slice(0, 40),
+    id: report.id, status: report.status, failures: failureKeys(report).slice(0, 40), ...(report.partial?.skipped && { skippedScenes: report.partial.skipped }),
     build: section('build'), hygiene: section('hygiene'),
     functional: report.functional?.status ? { status: report.functional.status, ...(report.functional.timedOut && { timedOut: true }), ...(report.functional.status !== 'PASS' && { firstFailure: functionalFailure(report), error: report.functional.error?.slice(0, 300) ?? null }) } : null,
     scenes: scenes.slice(0, 20).map(scene => ({
@@ -629,6 +642,23 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     if (error.code !== 'BASE_MOVED') {
       await onEvent({ event: 'base-check-failed', sha: entry.sha, manifestId: entry.manifestId, reason: String(error.stderr || error.message).trim().slice(-300) });
     } else {
+      // The worktree holds undelivered work the base's move invalidated. Unless runner.delivery.autoRebase is false,
+      // the runner does what a person would do with `runner rebase`, when it can (no pushed or open delivery): the work
+      // is archived, the versions restart on the current base, and the pass goes on instead of waiting for someone.
+      let rebased = null;
+      if (config.runner?.delivery?.autoRebase !== false) {
+        try { rebased = await rebaseDeliveries(root, config, runner.worktree); }
+        catch (refusal) { error.message += `; automatic rebase refused: ${refusal.message}`; }
+      }
+      if (rebased) {
+        await recordRebases(root, runner.worktree, await loadProgress(root, config, stream));
+        runner.status = 'IDLE'; runner.current = null; runner.base = rebased.to;
+        runner.rebaseHistory = [...(runner.rebaseHistory ?? []), { at: rebased.at, from: rebased.from, to: rebased.to, archive: rebased.archive, automated: true }];
+        await saveRunner(root, runner, statePath);
+        await onEvent({ event: 'rebased', at: rebased.at, sha: entry.sha, manifestId: entry.manifestId, automated: true, from: rebased.from, to: rebased.to, archive: rebased.archive, deliveries: rebased.deliveries, versions: rebased.versions, reason: errorHead(error.message) });
+        // Progress, not a block: the restarted versions run on the next pass, which a single-target runner takes at once.
+        return { status: 'REOPENED', manifestId: entry.manifestId, sha: entry.sha, reason: `Base moved to ${rebased.to.slice(0, 7)}: ${rebased.versions.length} version(s) restart on the current base (archive ${rebased.archive})`, rebased };
+      }
       entry.status = 'BLOCKED'; entry.error = error.message; entry.reasonCode = 'base-moved'; entry.blockedAt = new Date().toISOString(); runner.status = 'BLOCKED';
       await saveProgress(root, config, stream, state); await saveRunner(root, runner, statePath);
       await onEvent({ event: 'base-moved', sha: entry.sha, manifestId: entry.manifestId, baseSha: error.baseSha, reason: error.message });
@@ -645,7 +675,6 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     // Proposal 0003: Claude plans the version first; a planner that cannot answer leaves the version unplanned.
     let plan = null;
     if (config.adapters?.planner?.command) {
-      const planning = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
       // A version that runs again (blocked, reopened by a rejection) is replanned with its earlier plan as evidence.
       const earlier = entry.planId && /^PLN-[A-Za-z0-9-]+$/.test(entry.planId) ? await readJson(await projectPath(runner.worktree, `.protoflow/plans/${entry.planId}.json`), null) : null;
       // So is its last verification, and what a maintainer answered with runner retry --answer.
@@ -657,21 +686,36 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         attempts: entry.attempts.length, lastError: (entry.error ?? entry.retries?.at(-1)?.reason ?? null)?.slice(0, 1000) ?? null,
         ...(lastVerification && { lastVerification }), ...(answers.length && { answers })
       } : null;
-      try { plan = await planVersion(runner.worktree, config, planning, { previous, signal }); }
-      catch (error) {
-        if (!error.planner) throw error;
-        entry.planError = { reason: error.message.slice(0, 500), reasonCode: error.reasonCode, at: new Date().toISOString() };
-        await saveProgress(root, config, stream, state);
-        await onEvent({ event: 'plan-failed', sha: entry.sha, manifestId: entry.manifestId, reason: error.message.slice(0, 200) });
+      // A review rejection or an environmental block does not change what the version is: the plan and its acceptance
+      // criteria stay, and the executor repairs against them (planReuseReason).
+      const reused = planReuseReason(config, earlier, rerunCause(entry), answers);
+      if (reused) {
+        plan = earlier;
+        await onEvent({ event: 'plan-reused', sha: entry.sha, manifestId: entry.manifestId, planId: earlier.id, criteria: earlier.plan.acceptanceCriteria.length, reason: reused });
+      } else {
+        const planning = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target });
+        try { plan = await planVersion(runner.worktree, config, planning, { previous, signal }); }
+        catch (error) {
+          if (!error.planner) throw error;
+          entry.planError = { reason: error.message.slice(0, 500), reasonCode: error.reasonCode, at: new Date().toISOString() };
+          await saveProgress(root, config, stream, state);
+          await onEvent({ event: 'plan-failed', sha: entry.sha, manifestId: entry.manifestId, reason: error.message.slice(0, 200) });
+        }
       }
-      if (plan) {
+      if (plan && !reused) {
         entry.planId = plan.id; await saveProgress(root, config, stream, state);
         await onEvent({ event: 'planned', sha: entry.sha, manifestId: entry.manifestId, planId: plan.id, decision: plan.plan.decision, criteria: plan.plan.acceptanceCriteria.length, costUsd: plan.costUsd });
         if (plan.plan.decision === 'needs-human') throw failure(`Planner ${plan.id} needs a person: ${plan.plan.summary}${plan.plan.questions.length ? ` Questions: ${plan.plan.questions.join(' ')}` : ''}`, 'needs-human');
       }
     }
     const stallRounds = config.policy?.stallRounds ?? 2, failureCounts = [];
-    let ignoredClaim = null;
+    // Repair verification: the scenes that failed last are captured first and, while one of them still fails, the rest
+    // are not captured (policy.repairVerification "scoped", the default; "full" captures everything every round).
+    const scoped = (config.policy?.repairVerification ?? 'scoped') !== 'full';
+    // Evidence a verification may reuse: the last report of this run, or the PASS report a review rejection reopened
+    // (a repair that touched only tests leaves the build and every capture valid; verify() checks that itself).
+    const reopenedReport = entry.reopenings?.at(-1)?.verificationId ? await readJson(await projectPath(runner.worktree, `.protoflow/verifications/${entry.reopenings.at(-1).verificationId}.json`), null) : null;
+    let ignoredClaim = null, unrepairable = null;
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
@@ -694,7 +738,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }) } : null, signal,
+          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }), ...(unrepairable?.length && { unrepairable }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -711,8 +755,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         record.executor = provider;
         if (execution.status === 'PASS') break;
         diagnostic = executionDiagnostic(execution);
-        // The primary executor has no capacity for us (quota, rate limit): the fallback redoes this attempt, once.
-        if (provider === executors.primary && executors.fallback && executorCommand(config, executors.fallback) && EXECUTOR_QUOTA.test(diagnostic)) {
+        // The primary executor has no capacity for us (quota, rate limit), or its adapter refused the Context Package
+        // as too large: the fallback redoes this attempt, once.
+        const oversized = CONTEXT_TOO_LARGE.test(diagnostic);
+        if (provider === executors.primary && executors.fallback && executorCommand(config, executors.fallback) && (EXECUTOR_QUOTA.test(diagnostic) || (oversized && !OVER_ANY_BUDGET.test(diagnostic)))) {
           record.executorFallback = { from: provider, to: executors.fallback, executionId: execution.id, reason: diagnostic.slice(-300), at: new Date().toISOString() };
           provider = executors.fallback;
           await saveProgress(root, config, stream, state);
@@ -720,6 +766,12 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
           executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
           record.contextId = executionContext.id; retry -= 1;
           continue;
+        }
+        // A Context Package no executor can take is the version's diff, not a failed attempt: another attempt would
+        // send the same package again, so the version blocks at once for a person to split it or raise the limit.
+        if (oversized) {
+          record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.reasonCode = 'context-too-large';
+          throw failure(`Context Package too large for the ${provider} executor (${execution.id}): ${diagnostic.slice(-600)}; make the version's change smaller, split it into several versions, or configure an executor with a higher input limit (policy.executor.fallback), then runner retry`, 'context-too-large', diagnostic);
         }
         if (!execution.result.timedOut && EXECUTOR_ENVIRONMENT.test(diagnostic.slice(-2000))) {
           record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.reasonCode = 'environment';
@@ -762,16 +814,22 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         await onEvent({ event: 'execute-failed', sha: entry.sha, manifestId: entry.manifestId, attempt, reason: reason.slice(0, 300) });
         continue;
       }
-      executionFailure = null; ignoredClaim = null;
+      executionFailure = null; ignoredClaim = null; unrepairable = null;
       const previous = report;
       await shareWaivers(root, runner.worktree);
-      report = await verify(runner.worktree, config, entry.manifestId, { target, signal, onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished, onDeviceWait: deviceWaitHook(root, config, stream, state, record, entry, onEvent) });
+      const reuse = previous ?? reopenedReport;
+      const priority = scoped && attempt > 0 && previous?.status === 'FAIL' ? failingScenes(previous) : [];
+      report = await verify(runner.worktree, config, entry.manifestId, {
+        target, signal, ...(reuse && { reuse: { report: reuse } }), ...(priority.length && { priority: { scenes: priority, failFast: true } }),
+        onBeforeSpawn: processStarting, onStart: processStarted, onFinish: processFinished, onDeviceWait: deviceWaitHook(root, config, stream, state, record, entry, onEvent)
+      });
       record.verificationId = report.id; record.status = report.status; record.completedAt = new Date().toISOString();
       const failed = failureKeys(report);
-      record.failures = { count: failed.length, keys: failed.slice(0, 100) };
+      record.failures = { count: failed.length, keys: failed.slice(0, 100), ...(report.partial?.skipped && { skippedScenes: report.partial.skipped }) };
+      if (report.reused) record.reused = report.reused;
       await reapLeftovers(root, runner.worktree, record, 'verify', onEvent);
       await saveProgress(root, config, stream, state);
-      await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status });
+      await onEvent({ event: 'verified', sha: entry.sha, manifestId: entry.manifestId, verificationId: report.id, status: report.status, ...(report.reused && { reused: report.reused }), ...(report.partial && { partial: report.partial }) });
       await waiverEvents(entry, report, onEvent);
       if (report.status === 'FAIL') await requestEngineLimitWaivers(root, config, runner.worktree, { entry, record, report, previous, onEvent });
       if (report.status === 'FAIL') {
@@ -803,10 +861,20 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         record.buildInputsChanged = touched.slice(0, 20);
         await saveProgress(root, config, stream, state);
       } else if (report.status === 'NOT_RUN') throw failure('Verification NOT_RUN; configure all checks before retry', 'not-run');
+      // Failures no repair of the application can fix (the driver captured at the wrong size, the build never produced
+      // the declared output, the frozen prototype cannot reach the state) are the target's configuration or the
+      // prototype: alone they block at once, without spending an attempt; mixed with real failures the executor is told.
+      const classified = classifyFailures(report);
+      if (classified.unrepairable.length && !classified.repairable.length) {
+        throw failure(`Verification ${report.id} fails only on configuration or prototype problems the executor cannot repair (${unrepairableSummary(classified)}): ${[...new Set(classified.unrepairable.map(item => item.kind))].map(kind => `${kind} — ${UNREPAIRABLE_KINDS[kind]}`).join('; ')}. Fix the target configuration or the prototype, then runner retry`, 'verification-config');
+      }
+      if (classified.unrepairable.length) unrepairable = classified.unrepairable.map(item => ({ ...item, note: UNREPAIRABLE_KINDS[item.kind] }));
       failureCounts.push(failed.length);
       const rounds = stalledRounds(failureCounts);
-      if (stallRounds > 0 && rounds >= stallRounds && attempt < maximum) {
-        throw failure(`Repair made no progress: ${rounds} rounds in a row did not reduce the failures (${failureCounts.slice(-rounds - 1).join(' → ')}); ${failureSummary(report, failed)}`, 'stalled');
+      if (stallRounds > 0 && attempt < maximum) {
+        if (rounds >= stallRounds) throw failure(`Repair made no progress: ${rounds} rounds in a row did not reduce the failures (${failureCounts.slice(-rounds - 1).join(' → ')}); ${failureSummary(report, failed)}`, 'stalled');
+        // The same failures with the same reasons after a repair: the executor changed nothing that matters.
+        if (identicalFailures(previous, report)) throw failure(`Repair made no progress: attempt ${attempt} left the same failures with the same reasons as ${previous.id}; ${failureSummary(report, failed)}`, 'stalled');
       }
     }
     if (report?.status !== 'PASS') throw failure(`Repair limit exhausted (${config.policy?.maxRepairAttempts ?? 3})${report ? `: ${failureSummary(report, failureKeys(report))}` : ''}`, 'repair-limit');

@@ -126,6 +126,9 @@
             "draft": {
               "type": "boolean"
             },
+            "autoRebase": {
+              "type": "boolean"
+            },
             "paths": {
               "type": "array",
               "minItems": 1,
@@ -256,6 +259,15 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 10
+        },
+        "repairVerification": {
+          "enum": [
+            "scoped",
+            "full"
+          ]
+        },
+        "replanOnReopen": {
+          "type": "boolean"
         },
         "transientRetries": {
           "type": "integer",

@@ -145,13 +145,14 @@ async function captureApplication(root, config, target, settings, browser, scene
 const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 function renderReport(target, scenes, waivers = []) {
   const rows = scenes.map(scene => {
-    const tiers = TIERS.map(tier => { const status = scene.tiers[tier]?.status ?? 'NOT_RUN', waiver = scene.tiers[tier]?.waiver; return `<td class="${escapeHtml(waiver ? 'WAIVED' : status)}">${escapeHtml(status)}${waiver ? ` (waived: ${escapeHtml(waiver.id)})` : ''}</td>`; }).join('');
+    const origin = scene.reusedFrom ? ` (evidence of ${escapeHtml(scene.reusedFrom)})` : '';
+    const tiers = TIERS.map(tier => { const status = scene.tiers?.[tier]?.status ?? 'NOT_RUN', waiver = scene.tiers[tier]?.waiver; return `<td class="${escapeHtml(waiver ? 'WAIVED' : status)}">${escapeHtml(status)}${waiver ? ` (waived: ${escapeHtml(waiver.id)})` : ''}</td>`; }).join('');
     const waived = waivers.filter(item => item.scene === scene.id).map(item => `Waiver ${item.id} (${item.tier}): ${item.reason}${item.engineIssue ? ` — ${item.engineIssue}` : ''}; the ${item.tier} findings below were waived by a maintainer`);
     const skipped = (scene.waiverSkipped ?? []).map(item => `Waiver ${item.id} (${item.tier}) not applied: ${item.why}`);
-    const reasons = [scene.reason, ...waived, ...skipped, ...TIERS.flatMap(tier => (scene.tiers[tier]?.reasons ?? []).map(reason => `${tier}: ${reason}`))].filter(Boolean);
-    const image = name => scene.artifacts.find(file => file.endsWith(`/${name}.png`));
+    const reasons = [scene.reason, ...waived, ...skipped, ...TIERS.flatMap(tier => (scene.tiers?.[tier]?.reasons ?? []).map(reason => `${tier}: ${reason}`))].filter(Boolean);
+    const image = name => (scene.artifacts ?? []).find(file => file.endsWith(`/${name}.png`));
     const images = ['prototype', 'application', 'diff'].filter(image).map(name => `<figure><figcaption>${name}</figcaption><img alt="${name}" src="${escapeHtml(path.relative(path.dirname(scene.reportDir), image(name)))}"></figure>`).join('');
-    return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}</h2><table><tr><th>structure</th><th>tokens</th><th>layout</th><th>visual</th></tr><tr>${tiers}</tr></table><ul>${reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><div class="images">${images}</div></section>`;
+    return `<section><h2>${escapeHtml(scene.id)} — ${escapeHtml(scene.status)}${origin}</h2><table><tr><th>structure</th><th>tokens</th><th>layout</th><th>visual</th></tr><tr>${tiers}</tr></table><ul>${reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><div class="images">${images}</div></section>`;
   }).join('');
   return `<!doctype html><html lang="en"><meta charset="utf-8"><title>ProtoFlow anchor review</title><style>body{font:15px system-ui;margin:24px;background:#fafafa;color:#111}section{border:1px solid #ddd;background:#fff;padding:16px;margin:20px 0}td,th{border:1px solid #ddd;padding:4px 10px}.PASS{color:#06713b}.FAIL{color:#b00020;font-weight:700}.NOT_RUN{color:#8a6d00}.WAIVED{color:#7a4cc2;font-weight:700}.images{display:flex;gap:12px;flex-wrap:wrap}figure{margin:0;max-width:32%}img{max-width:100%;border:1px solid #eee}</style><h1>ProtoFlow anchor review — target ${escapeHtml(target.id)}${target.variant ? ` / ${escapeHtml(target.variant)}` : ''} (${escapeHtml(target.platform)})</h1><p>T1 structure, T2 tokens, T3 layout, T4 visual. Required tiers decide acceptance; advisory tiers are informational. A tier marked waived failed, and a maintainer approved a waiver for exactly these findings of this prototype version.</p>${rows}</html>`;
 }
@@ -172,8 +173,19 @@ function summarize(scenes, policy) {
  * records: { status, mode: 'anchors', target, tiers, scenes, artifacts, prototypeSource: 'version' }. A target with
  * variants is verified on each variant; it passes when every required variant passes, and the result adds `variants`.
  */
-export async function verifyTarget(root, config, manifest, version, { target: targetId, build = null, ...options } = {}) {
+export async function verifyTarget(root, config, manifest, version, { target: targetId, build = null, reuse = null, priority = null, ...options } = {}) {
   const variants = targetVariants(selectTarget(config, targetId));
+  // `reuse`: Map<"variant/scene", scene> of PASS scenes a previous verification of this manifest proved (workflow.js
+  // decides what still holds); `priority: { scenes: [{ id, variant }], failFast }`: capture those scenes of a variant
+  // first (a scene without a variant applies to every variant) and, with failFast, leave the rest uncaptured once one
+  // of them fails again. Each variant decides for itself; the combined result sums `reused` and `skipped`.
+  const forVariant = variant => ({
+    ...options, reuse,
+    priority: priority && {
+      keys: new Set((priority.scenes ?? []).filter(scene => scene.variant == null || scene.variant === (variant.variant ?? null)).map(scene => `${variant.variant ?? ''}/${scene.id}`)),
+      failFast: priority.failFast !== false
+    }
+  });
   // Captures need a working build: an app whose build failed cannot start, and every scene would wait out the driver's
   // launch timeout instead. A capture configuration whose build did not pass is skipped with the build's verdict.
   const skipped = (variant, phase, result) => ({
@@ -183,7 +195,7 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
   });
   if (!variants[0].variant) {
     if (build && build.status !== 'PASS') return skipped(variants[0], 'build', build);
-    return verifyVariant(root, config, manifest, version, variants[0], options);
+    return verifyVariant(root, config, manifest, version, variants[0], forVariant(variants[0]));
   }
   const results = [];
   for (const variant of variants) {
@@ -191,7 +203,7 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
     // A failed target build leaves no variant builds; a variant without its own build relies on the target build.
     const own = build?.variants?.[variant.variant];
     const failed = build && (own ? own.status !== 'PASS' : build.status !== 'PASS' && !Object.keys(build.variants ?? {}).length);
-    results.push({ variant, result: failed ? skipped(variant, own ? `build:${variant.variant}` : 'build', own ?? build) : await verifyVariant(root, config, manifest, version, variant, options) });
+    results.push({ variant, result: failed ? skipped(variant, own ? `build:${variant.variant}` : 'build', own ?? build) : await verifyVariant(root, config, manifest, version, variant, forVariant(variant)) });
   }
   const combine = statuses => statuses.includes('FAIL') ? 'FAIL' : statuses.length && statuses.every(status => status === 'PASS') ? 'PASS' : 'NOT_RUN';
   const required = results.filter(item => item.variant.required);
@@ -202,8 +214,10 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
   }]));
   const failing = results.filter(item => item.result.status !== 'PASS').map(item => `${item.variant.variant}${item.variant.required ? '' : ' (optional)'}: ${item.result.reason ?? item.result.status}`);
   const first = results[0].result;
+  const sum = field => results.reduce((total, item) => total + (item.result[field] ?? 0), 0);
   return {
     status: combine(required.map(item => item.result.status)), mode: 'anchors', target: first.target, platform: first.platform, regression: first.regression, tiers,
+    ...(sum('reused') && { reused: sum('reused') }), ...(sum('skipped') && { skipped: sum('skipped') }),
     scenes: results.flatMap(item => (item.result.scenes ?? []).map(scene => ({ ...scene, variant: item.variant.variant }))),
     artifacts: results.flatMap(item => item.result.artifacts ?? []), prototypeSource: 'version', contract: first.contract,
     ...(results.some(item => item.result.waivers?.length) && { waivers: results.flatMap(item => item.result.waivers ?? []) }),
@@ -213,7 +227,7 @@ export async function verifyTarget(root, config, manifest, version, { target: ta
 }
 
 /** Verify one capture configuration (a target, or one variant of it). */
-async function verifyVariant(root, config, manifest, version, target, { outDir, signal, onBeforeSpawn, onStart, onFinish } = {}) {
+async function verifyVariant(root, config, manifest, version, target, { outDir, signal, onBeforeSpawn, onStart, onFinish, reuse = null, priority = null } = {}) {
   const settings = targetSettings(target);
   // Evidence of a variant lives under <target>/<variant>; a plain target keeps <target>.
   const segments = [target.id, ...(target.variant ? [target.variant] : [])];
@@ -222,6 +236,29 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
   if (contract.errors.length) return { status: 'FAIL', mode: 'anchors', target: target.id, reason: `Prototype contract is invalid: ${contract.errors.join('; ')}`, scenes: [], artifacts: [], prototypeSource: 'version' };
   const scenes = scenesFor(contract, manifest.scope, settings.regression);
   if (!scenes.length) return { status: 'NOT_RUN', mode: 'anchors', target: target.id, reason: 'No screens to verify for this version', scenes: [], artifacts: [], prototypeSource: 'version' };
+  // Scenes a previous verification already proved keep their result and screenshots (`reusedFrom`); the others are
+  // captured, the ones that failed before first.
+  const key = scene => `${target.variant ?? ''}/${scene.screen}.${scene.state}`;
+  const reused = scenes.filter(scene => reuse?.has(key(scene))).map(scene => { const { variant, ...previous } = reuse.get(key(scene)); return { ...previous, reportDir: reportFile }; });
+  const pending = scenes.filter(scene => !reuse?.has(key(scene)));
+  const first = priority?.keys ? pending.filter(scene => priority.keys.has(key(scene))) : [];
+  const ordered = [...first, ...pending.filter(scene => !first.includes(scene))];
+  const failFast = first.length > 0 && first.length < pending.length && priority.failFast !== false;
+  const finish = async (captured, usedWaivers) => {
+    const byId = new Map([...reused, ...captured].map(scene => [scene.id, scene]));
+    const results = scenes.map(scene => byId.get(`${scene.screen}.${scene.state}`));
+    const artifacts = results.flatMap(scene => scene.artifacts ?? []);
+    await mkdir(path.dirname(reportFile), { recursive: true });
+    await writeFile(reportFile, renderReport(target, results, usedWaivers));
+    artifacts.push(reportFile);
+    const statuses = results.map(scene => scene.status);
+    const status = statuses.includes('FAIL') ? 'FAIL' : statuses.every(item => item === 'PASS') ? 'PASS' : 'NOT_RUN';
+    const skipped = results.filter(scene => scene.skipped).length;
+    const failing = results.filter(scene => scene.status !== 'PASS' && !scene.skipped).map(scene => `${scene.id}: ${scene.reason ?? TIERS.filter(tier => scene.tiers[tier]?.status === 'FAIL').join(', ')}`);
+    return { status, mode: 'anchors', target: target.id, platform: target.platform, regression: settings.regression, tiers: summarize(results, settings.tiers), scenes: results.map(({ reportDir, ...scene }) => scene), artifacts, prototypeSource: 'version', contract: { extractorVersion: contract.extractorVersion, screens: Object.keys(contract.screens) }, ...(usedWaivers.length && { waivers: usedWaivers }), ...(reused.length && { reused: reused.length }), ...(skipped && { skipped }), ...(failing.length && { reason: failing.join('; ') }) };
+  };
+  // Everything was proved before: no browser, no driver; the report is rendered from the reused evidence.
+  if (!pending.length) return finish([], []);
   let tokens = [];
   if (config.anchors?.tokens && version.files[config.anchors.tokens]) {
     tokens = flattenTokens(JSON.parse(await readFile(await projectPath(root, `${version.directory}/${config.anchors.tokens}`), 'utf8')));
@@ -232,9 +269,14 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
   const waivers = await listWaivers(root), manifestHash = hash(manifest);
   const run = async browser => {
     const results = [], usedWaivers = [];
-    const artifacts = [];
-    for (const scene of scenes) {
+    for (const [index, scene] of ordered.entries()) {
       if (signal?.aborted) throw new Error('STOPPED: visual verification was interrupted');
+      if (failFast && index === first.length && results.some(entry => entry.status !== 'PASS')) {
+        // A scene that failed before still fails: the repair did not land, and capturing the other screens would only
+        // cost the round time. They are recorded as skipped, so this verification can never pass.
+        for (const rest of ordered.slice(index)) results.push({ id: `${rest.screen}.${rest.state}`, screen: rest.screen, state: rest.state, affected: rest.affected, status: 'NOT_RUN', skipped: true, reason: 'skipped: a scene that failed before still fails', tiers: {}, artifacts: [], reportDir: reportFile });
+        break;
+      }
       const screen = contract.screens[scene.screen];
       const state = screen.states[scene.state];
       const id = `${scene.screen}.${scene.state}`;
@@ -260,7 +302,7 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
           entry.status = reference.status === 'NOT_RUN' ? 'NOT_RUN' : 'FAIL';
           entry.reason = reference.status === 'NOT_RUN' ? reference.reason : `prototype state is unreachable: ${reference.reason}`;
           for (const tier of TIERS) entry.tiers[tier] = { status: entry.status === 'NOT_RUN' ? 'NOT_RUN' : 'FAIL', reasons: [entry.reason] };
-          artifacts.push(...entry.artifacts); results.push(entry); continue;
+          results.push(entry); continue;
         }
         prototype = reference.capture;
       } else {
@@ -292,7 +334,7 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         if (sizeIssues.length) {
           entry.status = 'FAIL'; entry.reason = sizeIssues.join('; ');
           for (const tier of TIERS) entry.tiers[tier] = { status: 'FAIL', reasons: sizeIssues };
-          artifacts.push(...entry.artifacts); results.push(entry); continue;
+          results.push(entry); continue;
         }
         // Reviewed platform conventions (target.deviations): an anchor allowed to differ in a tier is left out of that
         // tier's comparison; the screen anchor always stays. Structure (T1) never has a deviation.
@@ -320,17 +362,9 @@ async function verifyVariant(root, config, manifest, version, target, { outDir, 
         await writeFile(elements, `${JSON.stringify({ prototype: prototype.elements, application: app.capture.elements }, null, 2)}\n`);
         entry.artifacts.push(elements);
       }
-      artifacts.push(...entry.artifacts);
       results.push(entry);
     }
-    const report = reportFile;
-    await mkdir(path.dirname(report), { recursive: true });
-    await writeFile(report, renderReport(target, results, usedWaivers));
-    artifacts.push(report);
-    const statuses = results.map(scene => scene.status);
-    const status = statuses.includes('FAIL') ? 'FAIL' : statuses.every(item => item === 'PASS') ? 'PASS' : 'NOT_RUN';
-    const failing = results.filter(scene => scene.status !== 'PASS').map(scene => `${scene.id}: ${scene.reason ?? TIERS.filter(tier => scene.tiers[tier]?.status === 'FAIL').join(', ')}`);
-    return { status, mode: 'anchors', target: target.id, platform: target.platform, regression: settings.regression, tiers: summarize(results, settings.tiers), scenes: results.map(({ reportDir, ...scene }) => scene), artifacts, prototypeSource: 'version', contract: { extractorVersion: contract.extractorVersion, screens: Object.keys(contract.screens) }, ...(usedWaivers.length && { waivers: usedWaivers }), ...(failing.length && { reason: failing.join('; ') }) };
+    return finish(results, usedWaivers);
   };
   return superviseBrowser(outDir, hooks, run);
 }

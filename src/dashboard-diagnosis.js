@@ -44,6 +44,8 @@ const BY_CODE = {
   stalled: () => ({ kind: 'stalled', make: () => ({ title: '修復沒有進展', steps: ['看最後兩次驗收的失敗項，判斷是應用真的做不到，還是驗收誤判', '是驗收誤判時回報 ProtoFlow；是需求或原型的問題時先修改原型', '處理後重試；要放寬判定可調高 `policy.stallRounds`（0 為關閉）'], command: null }) }),
   'operator-action': () => ({ kind: 'operator-action', make: () => ({ title: '需要操作員處理', steps: ['看原因列出的檔案與要改的內容：專案規定執行代理不能改這些檔案（例如建置腳本、protoflow.config.json）', '由你修改這些檔案並提交到基底分支；或判斷不需要改時，調整需求或原型', '回到這裡重試'], command: null }) }),
   'repair-limit': () => ({ kind: 'repair-limit', make: () => ({ title: '修復次數用完', steps: ['看最後一次驗收的失敗項與執行紀錄', '處理後重試；需要更多次自動修復時調高 `policy.maxRepairAttempts`'], command: null }) }),
+  'verification-config': () => ({ kind: 'verification-config', make: () => ({ title: '驗收失敗來自配置或原型，不是應用', steps: ['看原因中的種類：capture-size 是驅動器擷取尺寸與 target viewport 不符（檢查 target 的 viewport／scale 與裝置設定）；build-output 是 build 沒有產出 target 宣告的檔案（檢查 build 命令與 outputs）；prototype-unreachable 是凍結原型本身到不了該狀態（修改原型）', '處理後 `runner retry`；修復代理不會再花修復次數在這些項目上'], command: null }) }),
+  'context-too-large': () => ({ kind: 'context-too-large', make: () => ({ title: 'Context Package 超過執行者上限', steps: ['原型 diff 太大（整頁單行 HTML 等）時，縮小該版本的變更、拆成多個版本，或改用上限較高的執行者（`policy.executor.fallback`）', '處理後 `runner retry`'], command: null }) }),
   'base-moved': () => ({ kind: 'base-moved', make: () => ({ title: '基底分支已移動', steps: ['先合併或關閉尚未處理的交付 PR', '原因列出「files the base also changed」時，是基底改到了 worktree 正在改的檔案：把基底上的那些修改撤回，或確認後改走 rebase', '要放棄未交付的版本、在目前的基底重新開始時，執行 `protoflow runner rebase`', '回到這裡重試'], command: 'protoflow runner rebase' }) })
 };
 /** Work waits for a runner that is not running (a handed-back issue, a retried or unfinished version): say how to start it. */

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFile, writeFile, mkdir, realpath, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, realpath, stat, access } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readJson, writeJson, id, hash, projectPath, fingerprint, gitInfo, runCommand, applicationHygiene } from './util.js';
 import { snapshot } from './sessions.js';
@@ -7,7 +7,7 @@ import { verifyVisual } from './visual.js';
 import { runAcceptanceAdapter } from './acceptance.js';
 import { loadVersion } from './versions.js';
 import { assertCurrentVersion, verificationRevocation, REJECTING } from './queue.js';
-import { buildEnvironment, deviceEnvironment, swallowedFailure } from './environment.js';
+import { buildEnvironment, deviceEnvironment, swallowedFailure, TEST_ONLY_FILES } from './environment.js';
 import { acquireDevices, commandDevices } from './devices.js';
 import { selectTarget, targetSettings, targetVariants, versionContract, verifyTarget, updateAnchorIndex, anchorIndex } from './targets.js';
 import { fitContext } from './context-budget.js';
@@ -306,7 +306,44 @@ export async function executeContext(root, config, contextId, { execute = false,
   const omitted = (request.manifest?.changes ?? []).filter(change => change.diffOmitted).map(change => change.path);
   return persist(root, 'contexts', { schemaVersion: 1, id: id('EXEC'), createdAt: date(), contextId, executor: provider, request: full, ...((omitted.length || request.manifest?.git?.diffOmitted) && { sent: { hash: hash(request), size: JSON.stringify(request).length, omittedDiffs: omitted, gitDiffOmitted: Boolean(request.manifest?.git?.diffOmitted) } }), result, status: result.status, livePrototypeChanged, projectAfter: await applicationFingerprint(root, config, context.target) });
 }
-export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, onDeviceWait, reverify = false } = {}) {
+/**
+ * What a previous verification of the same manifest still proves about the application as it is now. Its PASS build and
+ * PASS scenes (whose screenshots still exist) hold when the application did not change at all, or changed only in files
+ * that cannot affect the build or the screens (TEST_ONLY_FILES). A build that did not pass is run again: it may have
+ * failed for the machine. Returns { build, scenes: Map<"variant/scene", scene>, changedFiles? }, { skipped } with the
+ * reason nothing is reused, or null without a report. Functional tests and hygiene are never reused.
+ */
+async function reusableEvidence(report, { manifestHash, project }) {
+  if (!report) return null;
+  if (report.manifestHash !== manifestHash) return { skipped: 'manifest differs' };
+  let changedFiles = null;
+  if (report.project?.hash !== project.hash) {
+    const files = [...new Set([...Object.keys(report.project?.files ?? {}), ...Object.keys(project.files)])].filter(file => report.project?.files?.[file] !== project.files[file]).sort();
+    const application = files.filter(file => !TEST_ONLY_FILES.test(file));
+    if (application.length) return { skipped: `application changed outside test files: ${application.slice(0, 5).join(', ')}${application.length > 5 ? ` and ${application.length - 5} more` : ''}` };
+    changedFiles = files;
+  }
+  if (report.build?.status !== 'PASS') return { skipped: `build of ${report.id} was ${report.build?.status ?? 'NOT_RUN'}` };
+  const scenes = new Map();
+  for (const scene of report.visual?.scenes ?? []) {
+    if (scene.status !== 'PASS' || !scene.tiers) continue;
+    // A scene that passed through a maintainer waiver is captured again, so the new record carries the waiver it used
+    // and the delivery gate sees it (a waived PASS needs a person under autoApprove).
+    if (scene.waived?.length || Object.values(scene.tiers).some(tier => tier?.waiver)) continue;
+    const present = await Promise.all((scene.artifacts ?? []).map(file => access(file).then(() => true, () => false)));
+    if (!present.every(Boolean)) continue;
+    scenes.set(`${scene.variant ?? ''}/${scene.id}`, { ...scene, reusedFrom: scene.reusedFrom ?? report.id });
+  }
+  return { build: { ...report.build, reusedFrom: report.id }, scenes, ...(changedFiles && { changedFiles: changedFiles.slice(0, 20) }) };
+}
+/**
+ * `reuse: { report }` reuses the evidence of a previous verification of this manifest that still holds (reusableEvidence);
+ * `priority: { scenes: [{ id, variant }], failFast }` captures those scenes first and, with failFast, leaves the other
+ * scenes of a variant uncaptured once one of them fails again (`partial.skipped`), so a repair round that did not fix
+ * what it was asked to fix costs one build and the failing scenes, not every scene. Both apply to anchored targets
+ * (schemaVersion 2); a schemaVersion 1 visual verification reuses the build only.
+ */
+export async function verify(root, config, manifestId, { target, signal, onBeforeSpawn, onStart, onFinish, onDeviceWait, reverify = false, reuse = null, priority = null } = {}) {
   // `reverify` re-checks an accepted version after its target merged a moved base; the latest PASS then accepts it.
   await assertCurrentVersion(root, config, manifestId, { target, allowAccepted: reverify });
   const { manifest, version } = await manifestVersion(root, config, manifestId);
@@ -357,13 +394,20 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
     if (deviceRecord.waits.length) await onDeviceWait?.({ phase, acquired: true, devices, waitedMs: deviceRecord.waitedMs, at: date() });
   };
   try {
-    if (buildDevices.length) await holdDevices('build');
-    const build = await buildAll((phase, command) => runBuild(root, runPhase, phase, command, { retryDelayMs, signal }), variants, commands.build);
+    const current = await applicationFingerprint(root, config, target);
+    const prior = await reusableEvidence(reuse?.report, { manifestHash: hash(manifest), project: current });
+    let build;
+    if (prior?.build) build = prior.build;
+    else {
+      if (buildDevices.length) await holdDevices('build');
+      build = await buildAll((phase, command) => runBuild(root, runPhase, phase, command, { retryDelayMs, signal }), variants, commands.build);
+    }
     // A build this machine cannot run leaves nothing to check: the version waits for the machine, not for a repair.
     const environment = build.status === 'NOT_RUN' ? [build, ...Object.values(build.variants ?? {})].find(result => result.reasonCode === 'environment')?.environment : null;
     const skipped = environment && { status: 'NOT_RUN', reason: `Build could not run in this environment (${environment.phase}): ${environment.line}` };
     if (!skipped) await holdDevices(commandDevices(commands.functional).length ? 'functional' : 'visual');
-    const before = await applicationFingerprint(root, config, target);
+    // Content is bound after the build (its ignored outputs are not content); a reused build changed nothing.
+    const before = prior?.build ? current : await applicationFingerprint(root, config, target);
     const acceptanceEvidence = { manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, source: manifest.source ?? null, prototypeVersion: versionReference(version), scenes: config.visual?.scenes ?? [] };
     const functional = skipped ? { ...skipped } : !isV2(config) && commands.functional?.adapter === 'acceptance'
       ? await runAcceptanceAdapter(root, config, 'functional', acceptanceEvidence, { signal, onBeforeSpawn, onStart, onFinish })
@@ -374,7 +418,7 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
     if (signal?.aborted) throw new Error('STOPPED: verification was interrupted before visual');
     const visual = skipped || deviceSkipped ? { ...(skipped || deviceSkipped), scenes: [], artifacts: [] } : isV2(config)
       // Anchored acceptance covers every affected screen by construction (scenesFor); no mapping coverage check.
-      ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, signal, onBeforeSpawn, onStart, onFinish })
+      ? await verifyTarget(root, config, manifest, version, { target, build, outDir: directory, reuse: prior?.scenes ?? null, priority, signal, onBeforeSpawn, onStart, onFinish })
       : await verifyVisual(root, config, directory, { version, liveMatches, signal, onBeforeSpawn, onStart, onFinish, evidence: acceptanceEvidence });
     const covered = new Set(visual.scenes.flatMap(scene => scene.mappings ?? []).filter(mapping => mapping.status === 'PASS').map(mapping => mapping.id));
     const missing = isV2(config) ? [] : manifest.mappings.filter(mapping => !covered.has(mapping));
@@ -395,7 +439,8 @@ export async function verify(root, config, manifestId, { target, signal, onBefor
     const hygiene = await applicationHygiene(root, after.files);
     const checks = [build.status, functional.status, visual.status, hygiene.status];
     const status = changedDuringVerification || checks.includes('FAIL') ? 'FAIL' : checks.every(x => x === 'PASS') ? 'PASS' : 'NOT_RUN';
-    const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(visual.waivers?.length && { waivers: visual.waivers }), ...(deviceRecord && { devices: deviceRecord }), ...((environment || deviceSkipped) && status === 'NOT_RUN' && { reasonCode: 'environment', environment: environment ?? functional.environment }) };
+    const reused = prior?.build && { from: reuse.report.id, build: true, scenes: visual.reused ?? 0, ...(prior.changedFiles && { changedFiles: prior.changedFiles }) };
+    const record = { schemaVersion: 1, id: verificationId, createdAt: date(), ...(isV2(config) && { target: selectTarget(config, target).id }), manifestId, manifestHash: hash(manifest), prototypeHash: manifest.afterHash, prototypeVersion: versionReference(version), project: after, git: await gitInfo(root), build, functional, visual, artifactHashes, changedDuringVerification, hygiene, status, ...(visual.waivers?.length && { waivers: visual.waivers }), ...(deviceRecord && { devices: deviceRecord }), ...((environment || deviceSkipped) && status === 'NOT_RUN' && { reasonCode: 'environment', environment: environment ?? functional.environment }), ...(reused && { reused }), ...(prior?.skipped && { reuseSkipped: prior.skipped }), ...(visual.skipped && { partial: { skipped: visual.skipped, reason: 'a scene that failed before still fails; the other scenes were not captured' } }) };
     // The anchor index is a hint for later executors; it lives in .protoflow, outside the application hash.
     if (isV2(config) && status === 'PASS') await updateAnchorIndex(root, config, await versionContract(root, config, version), target);
     return persist(root, 'verifications', record);
