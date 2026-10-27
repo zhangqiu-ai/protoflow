@@ -1894,6 +1894,18 @@ test('FAKE CLI only: a configured planner plans the version first; its plan reac
       const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${again.find(event => event.event === 'planned').planId}/request.json`), 'utf8'));
       assert.deepEqual(request.data.previous.answers.map(answer => [answer.text, answer.via]), [['Use the local backend.', 'cli']]);
       assert.match(request.instructions, /data\.previous\.answers are a maintainer's answers to your earlier questions/);
+      // A reclassified version starts over from scratch; the maintainer's answer still reaches its next plan.
+      const manifestPath = path.join(root, `.protoflow/manifests/${entry.manifestId}.json`);
+      const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+      await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, level: 'L3', requires: { ...manifest.requires, spec: true, architecture: true } }, null, 2));
+      const reclassified = await reclassifyRunner(root, config);
+      const restarted = (await sourceStatus(root)).entries[0];
+      assert.deepEqual([restarted.status, restarted.attempts.length, restarted.retries.map(retry => [retry.answer.text, retry.carried.by, retry.carried.at])], ['PENDING', 0, [['Use the local backend.', 'reclassify', (await sourceStatus(root)).reclassified.at(-1).at]]], JSON.stringify(reclassified));
+      const after = [];
+      await runOnce(root, config, { onEvent: event => after.push(event) });
+      const replanned = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${after.find(event => event.event === 'planned').planId}/request.json`), 'utf8'));
+      assert.deepEqual(replanned.data.previous.answers.map(answer => [answer.text, answer.via, answer.before]), [['Use the local backend.', 'cli', 'reclassify']]);
+      assert.equal(replanned.data.previous.attempts, 0);
     } else {
       assert.match(events.find(event => event.event === 'plan-failed').reason, /did not return a plan run \(FAIL, exit 3\)/);
       assert.match(entry.planError.reason, /exit 3/); assert.equal(entry.planId, undefined);

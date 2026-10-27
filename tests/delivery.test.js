@@ -1711,9 +1711,17 @@ test('single target: after runner rebase the restarted version executes again on
   await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
   const human = await humanCommit(f, 'docs/human.md', 'TASK-082\n');
   assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED');
+  // A maintainer answered the planner's questions with runner retry --answer before the base moved.
+  const answered = await sourceStatus(f.root);
+  answered.entries[0].retries = [{ previousStatus: 'BLOCKED', reason: 'Planner PLN-fixture needs a person: Which backend?', reasonCode: 'needs-human', at: '2026-10-27T04:57:00.000Z', answer: { text: 'Use the local backend.', via: 'cli' } }, { previousStatus: 'STOPPED', reason: 'Interrupted', at: '2026-10-27T04:57:30.000Z' }];
+  await saveSourceState(f.root, answered);
   // Rebased by an engine that did not record the rebase for the queue (0.3.46): only the source state knows.
   const rebased = await rebaseDeliveries(f.root, f.config, f.worktree);
   assert.deepEqual(rebased.versions, [`git-${f.shas[0]}`]);
+  // The version starts over, but the answer stays with it for its next plan, marked as given before the rebase.
+  const [restarted] = (await sourceStatus(f.root)).entries;
+  assert.deepEqual([restarted.status, restarted.attempts], ['PENDING', []]);
+  assert.deepEqual(restarted.retries, [{ ...answered.entries[0].retries[0], carried: { by: 'rebase', at: rebased.at, archive: rebased.archive } }]);
   assert.equal((await versionQueue(f.worktree, f.config)).versions[0].acceptedBy, 'VER-1', 'before the fix the old PASS still accepts the version');
 
   const controller = new AbortController(), events = [];

@@ -7,6 +7,7 @@ import { requestIndependentReview, assertIndependentReview, recordedVerdict, isR
 import { alignDeliveredRunner } from './runner-alignment.js';
 import { deliveryGit as git, deliveryGh as gh, deliveryPullRequest, resolveDeliveryDestination, markTransient, transientFailure } from './delivery-scope.js';
 import { verificationRevocation } from './queue.js';
+import { carriedAnswers } from './source.js';
 
 // The automated approver is recorded as such; it never stands in for a named human.
 export const AUTOMATED_REVIEWER = 'ai:codex-independent-review';
@@ -232,7 +233,7 @@ export async function rebaseDeliveries(root, config, worktree) {
   }
   const restarted = source.entries.slice(first);
   source.rebased = [...(source.rebased ?? []), { at, from: head, to: base.sha, archive: ref, deliveries: [...ids], entries: restarted }];
-  source.entries = [...source.entries.slice(0, first), ...restarted.map(entry => ({ sha: entry.sha, manifestId: entry.manifestId, prototypeHash: entry.prototypeHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [] }))];
+  source.entries = [...source.entries.slice(0, first), ...restarted.map(entry => ({ sha: entry.sha, manifestId: entry.manifestId, prototypeHash: entry.prototypeHash, ordinal: entry.ordinal, status: 'PENDING', attempts: [], ...carriedAnswers(entry, { by: 'rebase', at, archive: ref }) }))];
   source.completedSha = source.entries[first - 1]?.sha ?? null;
   await saveDelivery(root, config, null, state); await saveProgress(root, config, null, source);
   return { at, from: head, to: base.sha, archive: ref, deliveries: [...ids], versions: restarted.map(entry => entry.manifestId) };
