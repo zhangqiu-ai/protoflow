@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
+import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview, executorHandoff, attemptChanges } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, reclassifyVersion, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
@@ -715,7 +715,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
     // Evidence a verification may reuse: the last report of this run, or the PASS report a review rejection reopened
     // (a repair that touched only tests leaves the build and every capture valid; verify() checks that itself).
     const reopenedReport = entry.reopenings?.at(-1)?.verificationId ? await readJson(await projectPath(runner.worktree, `.protoflow/verifications/${entry.reopenings.at(-1).verificationId}.json`), null) : null;
-    let ignoredClaim = null, unrepairable = null;
+    let ignoredClaim = null, previousAttempt = null, unrepairable = null;
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
@@ -738,7 +738,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }), ...(unrepairable?.length && { unrepairable }) } : null, signal,
+          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(previousAttempt && { previousAttempt }), ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }), ...(unrepairable?.length && { unrepairable }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -787,6 +787,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
       }
+      // A repair runs in a fresh session: it starts from what this attempt changed and the executor's own handoff note.
+      const handoff = await executorHandoff(runner.worktree, record.contextId);
+      if (handoff) record.handoff = handoff;
+      previousAttempt = { attempt, changes: attemptChanges(projectBefore, execution.projectAfter), ...(handoff && { handoff }) };
       const configAfter = await fs.readFile(configFile, 'utf8').catch(() => null);
       if (configBefore !== null && configAfter !== configBefore) {
         await fs.writeFile(configFile, configBefore);

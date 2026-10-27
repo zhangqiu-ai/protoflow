@@ -8,7 +8,7 @@ const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recu
 // A 1×1 PNG.
 export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
-export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null, waivers = false, deviceWait = null } = {}) {
+export async function dashboardFixture({ executing = true, autoApprove = true, reviewRejected = false, blockedError = null, blockedReasonCode = null, blockedAt = null, waivers = false, deviceWait = null, subagents = false } = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-dashboard-')));
   const root = path.join(base, 'project'), worktree = path.join(root, '.protoflow/runner/worktree-fixture'), home = path.join(base, 'home');
   await write(path.join(root, 'protoflow.config.json'), { schemaVersion: 1, prototypeDir: 'prototype', mappings: [], dashboard: { name: 'Fixture App', reviewer: 'Fixture Person' },
@@ -31,11 +31,13 @@ export async function dashboardFixture({ executing = true, autoApprove = true, r
   await write(path.join(root, '.protoflow/runner/heartbeat.json'), { pid: process.pid, service: true, version: '0.0.0-fixture', at: new Date().toISOString(), failingPasses: 0 });
   await write(path.join(root, '.protoflow/runner/events.jsonl'), [{ at: new Date(Date.now() - 90000).toISOString(), event: 'planned', manifestId: `git-${sha2}`, decision: 'implement' }, { at: new Date(Date.now() - 60000).toISOString(), event: 'execute', manifestId: `git-${sha2}`, attempt: 0 }].map(event => JSON.stringify(event)).join('\n') + '\n');
   // The executor's live trace (Claude stream-json shape).
-  await write(path.join(worktree, '.protoflow/live/execute.json'), { contextId: 'CTX-fixture', executor: 'claude', model: 'claude-sonnet-5-5', kind: 'implement', manifestId: `git-${sha2}`, startedAt: new Date(Date.now() - 60000).toISOString() });
+  await write(path.join(worktree, '.protoflow/live/execute.json'), { contextId: 'CTX-fixture', executor: 'claude', model: subagents ? 'claude-opus-5-5' : 'claude-sonnet-5-5', ...(subagents && { subagentModel: 'claude-sonnet-5-5' }), kind: 'implement', manifestId: `git-${sha2}`, startedAt: new Date(Date.now() - 60000).toISOString() });
   await write(path.join(worktree, '.protoflow/live/execute.jsonl'), [
     { type: 'system', subtype: 'init', session_id: 'fixture' },
     { type: 'assistant', message: { content: [{ type: 'text', text: 'FAKE FIXTURE: adding the weekly toggle.' }, { type: 'tool_use', name: 'Read', input: { file_path: `${worktree}/app/settings.js` } }] } },
-    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: `${worktree}/app/settings.js` } }] } },
+    // With --subagent-model the executor delegates to a worker subagent, whose events carry parent_tool_use_id.
+    ...(subagents ? [{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_worker', name: 'Agent', input: { description: 'Weekly toggle storage', subagent_type: 'protoflow-worker' } }] } }] : []),
+    { type: 'assistant', ...(subagents && { parent_tool_use_id: 'toolu_worker' }), message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: `${worktree}/app/settings.js` } }] } },
     { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'Run unit tests' } }] } }
   ].map(event => JSON.stringify(event)).join('\n') + '\n');
   // Newest verification with one scene and its screenshots.

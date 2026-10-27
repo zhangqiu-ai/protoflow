@@ -24,16 +24,26 @@ function environment() {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_') && !['GH_REPO', 'GH_HOST', 'GITHUB_API_URL', 'GITHUB_SERVER_URL'].includes(key)));
 }
 
+const PREFIX = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+/**
+ * Where a checkout's legacy grafts file would be, asked of Git once per checkout: a delivery runs hundreds of Git
+ * commands and the lookup doubled them. Whether the file exists is still checked before every command.
+ */
+const graftPaths = new Map();
+async function assertNoGrafts(root, env) {
+  const key = path.resolve(root);
+  if (!graftPaths.has(key)) graftPaths.set(key, path.resolve(root, (await exec('git', [...PREFIX, 'rev-parse', '--git-path', 'info/grafts'], { cwd: root, env, timeout: 60000 })).stdout.trim()));
+  try { await fs.lstat(graftPaths.get(key)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
 /** Review and publication share exactly the same Git configuration and environment. */
 export async function deliveryGit(root, args, { encoding = 'utf8' } = {}) {
-  const prefix = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
   const env = environment();
-  const graft = (await exec('git', [...prefix, 'rev-parse', '--git-path', 'info/grafts'], { cwd: root, env, timeout: 60000 })).stdout.trim();
-  try { await fs.lstat(path.resolve(root, graft)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await assertNoGrafts(root, env);
   let result;
   for (let attempt = 0; ; attempt++) {
-    try { result = await exec('git', [...prefix, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 }); break; }
+    try { result = await exec('git', [...PREFIX, ...args], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, encoding, timeout: 60000, maxBuffer: 32 * 1024 * 1024 }); break; }
     catch (error) {
       markTransient(error, String(error.stderr ?? ''));
       if (!error.transient || !READ_GIT.includes(args[0]) || attempt >= networkRetries()) throw error;
@@ -55,12 +65,9 @@ export async function deliveryBlobDigests(root, oids) {
   if (!wanted.length) return digests;
   if (wanted.some(oid => !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(oid))) throw blocked('Malformed blob id');
   const env = environment();
-  const prefix = ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
-  const graft = (await exec('git', [...prefix, 'rev-parse', '--git-path', 'info/grafts'], { cwd: root, env, timeout: 60000 })).stdout.trim();
-  try { await fs.lstat(path.resolve(root, graft)); throw blocked('Legacy Git grafts are forbidden for delivery'); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await assertNoGrafts(root, env);
   await new Promise((resolve, reject) => {
-    const child = spawn('git', [...prefix, 'cat-file', '--batch'], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('git', [...PREFIX, 'cat-file', '--batch'], { cwd: root, env: { ...env, GIT_GRAFT_FILE: '/dev/null' }, stdio: ['pipe', 'pipe', 'pipe'] });
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(blocked('git cat-file --batch timed out')); }, Math.max(60000, wanted.length * 50));
     let pending = Buffer.alloc(0), current = null, stderr = '', failed = null;
     child.stdout.on('data', chunk => {

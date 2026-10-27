@@ -18,7 +18,14 @@ test('executor traces become readable actions for Claude stream-json and Codex J
     { type: 'result', is_error: false }
   ], { root: '/w' });
   assert.deepEqual(claude.actions.map(action => [action.kind, action.text]), [['say', 'Looking at the settings screen.'], ['read', 'app/a.js'], ['edit', 'app/a.js'], ['write', 'app/a.test.js'], ['run', 'Run tests: npm test'], ['search', 'toggle'], ['done', 'finished']]);
-  assert.deepEqual(claude.totals, { edits: 2, commands: 1, reads: 1, searches: 1 }); assert.deepEqual(claude.files, ['app/a.js', 'app/a.test.js']);
+  assert.deepEqual(claude.totals, { edits: 2, commands: 1, reads: 1, searches: 1, subagents: 0 }); assert.deepEqual(claude.files, ['app/a.js', 'app/a.test.js']);
+  // Delegations to worker subagents (--subagent-model) are counted; what the workers do is listed with the rest.
+  const delegated = traceActivity([
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_a', name: 'Agent', input: { description: 'Settings toggle', subagent_type: 'protoflow-worker' } }, { type: 'tool_use', id: 'toolu_b', name: 'Agent', input: { subagent_type: 'protoflow-worker' } }] } },
+    { type: 'assistant', parent_tool_use_id: 'toolu_a', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: '/w/app/a.js' } }] } }
+  ], { root: '/w' });
+  assert.deepEqual(delegated.actions.map(action => [action.kind, action.text]), [['agent', 'Settings toggle'], ['agent', 'protoflow-worker'], ['edit', 'app/a.js']]);
+  assert.deepEqual(delegated.totals, { edits: 1, commands: 0, reads: 0, searches: 0, subagents: 2 });
   const codex = traceActivity([
     { type: 'thread.started' }, { type: 'item.started', item: { type: 'command_execution', command: 'gradle test' } },
     { type: 'item.completed', item: { type: 'command_execution', command: 'gradle test', exit_code: 1 } },
@@ -168,7 +175,7 @@ test('the overview carries each working target\'s version, phase, timer start an
   assert.equal(card.current.summary, 'Settings toggle');
   assert.equal(card.current.attempts, 1);
   assert.deepEqual(card.live.last, { kind: 'run', text: 'Run unit tests: npm test' });
-  assert.deepEqual(card.live.totals, { edits: 1, commands: 1, reads: 1, searches: 0 });
+  assert.deepEqual(card.live.totals, { edits: 1, commands: 1, reads: 1, searches: 0, subagents: 0 });
   assert.equal(card.lastEvent.event, 'execute');
   // An idle target sends no live activity, so the card stays quiet.
   const idle = await fixture(t, { executing: false });

@@ -220,6 +220,22 @@ test('a verification waiting for a simulator another project drives says so on t
   } finally { await server.close(); await waiting.cleanup(); }
 });
 
+test('an executor that delegates to worker subagents shows both models and how many workers it started', async ({ page }) => {
+  const delegating = await dashboardFixture({ subagents: true });
+  await addProject(delegating.root, { home: delegating.home });
+  const server = createDashboardServer({ home: delegating.home, port: 0, service: false, pollMs: 200 });
+  const base = await server.listen();
+  try {
+    await page.goto(base);
+    await expect(page.locator('.strip .agent.working')).toHaveText('O');
+    await expect(page.locator('.strip-act em')).toHaveText('✎1 ▸1 ⑂1');
+    await page.goto(`${base}#/p/${await projectId(delegating.root)}`);
+    await expect(page.locator('.console .who')).toContainText('claude-opus-5-5 + claude-sonnet-5-5');
+    await expect(page.locator('.console-h')).toContainText('子 Agent 1');
+    await expect(page.locator('.acts')).toContainText('Weekly toggle storage');
+  } finally { await server.close(); await delegating.cleanup(); }
+});
+
 test('a project whose runner stopped mid-version reads as stopped on the overview and the sidebar, not as live work', async ({ page }) => {
   const stopped = await dashboardFixture();
   const heartbeat = path.join(stopped.root, '.protoflow/runner/heartbeat.json');

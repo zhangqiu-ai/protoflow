@@ -147,3 +147,67 @@ test('the executor may edit and run sandboxed commands, nothing else; its trace 
   assert.throws(() => readClaudeTrace(jsonl([init(), call('toolu_1', 'Write'), ran, done()])), /used tools beyond read-only: Write/);
   assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Read'], permissionMode: 'bypassPermissions' }), done()]), { executor: true }), /not dontAsk or acceptEdits/);
 });
+
+test('with a subagent model the executor may delegate only to the worker subagent, under the same tools, sandbox and budget', async () => {
+  const { claudeExecutorArgv, CLAUDE_WORKER } = await import('../src/claude.js');
+  const plain = claudeExecutorArgv({ model: 'claude-opus-5-5' });
+  assert.equal(plain[plain.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash');
+  assert.ok(!plain.includes('--agents') && !plain.includes('--disallowedTools'));
+  const argv = claudeExecutorArgv({ model: 'claude-opus-5-5', maxBudgetUsd: 20, subagentModel: 'claude-sonnet-5-5' });
+  assert.equal(argv[argv.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash,Agent');
+  for (const flag of ['--restricted', '--no-session-persistence', '--strict-mcp-config']) assert.ok(argv.includes(flag), flag);
+  assert.deepEqual(argv.slice(argv.indexOf('--setting-sources'), argv.indexOf('--setting-sources') + 2), ['--setting-sources', '']);
+  assert.equal(argv[argv.indexOf('--max-budget-usd') + 1], '20');
+  const agents = JSON.parse(argv[argv.indexOf('--agents') + 1]);
+  assert.deepEqual(Object.keys(agents), [CLAUDE_WORKER]);
+  assert.equal(agents[CLAUDE_WORKER].model, 'claude-sonnet-5-5');
+  assert.deepEqual(agents[CLAUDE_WORKER].tools, ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash']);
+  assert.match(agents[CLAUDE_WORKER].prompt, /change only the files your task names/);
+  assert.ok(argv[argv.indexOf('--disallowedTools') + 1].split(',').includes('Agent(general-purpose)'));
+  assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1]), { sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false }, env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' } });
+
+  // Shaped like a real 2.1.299 trace: the start lists the tool as Task, calls name it Agent, worker events carry parent_tool_use_id.
+  const executorInit = (agents = ['general-purpose', 'Explore', CLAUDE_WORKER]) => init({ tools: ['Task', 'Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write'], permissionMode: 'acceptEdits', agents });
+  const delegate = (id, type = CLAUDE_WORKER) => ({ type: 'assistant', session_id: 'session-0001', message: { model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name: 'Agent', input: { description: `part ${id}`, subagent_type: type, prompt: 'x' } }] } });
+  const worker = (parent, name = 'Write', model = 'claude-sonnet-5-5') => ({ type: 'assistant', session_id: 'session-0001', parent_tool_use_id: parent, message: { model, content: [{ type: 'tool_use', id: `${parent}-w`, name, input: { file_path: 'a.js' } }] } });
+  const started = id => ({ type: 'system', subtype: 'task_started', session_id: 'session-0001', task_id: `t${id}`, tool_use_id: id });
+  const handBack = id => ({ type: 'user', session_id: 'session-0001', message: { content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: 'done' }] }] } });
+  const finish = done({ structured_output: undefined });
+  const parsed = readClaudeTrace(jsonl([executorInit(), delegate('toolu_a'), started('toolu_a'), delegate('toolu_b'), started('toolu_b'), worker('toolu_a'), worker('toolu_b', 'Bash'), handBack('toolu_a'), handBack('toolu_b'), finish]), { executor: true });
+  assert.deepEqual(parsed.subagents, { count: 2, models: ['claude-sonnet-5-5'] });
+  assert.deepEqual(parsed.toolsUsed, ['Agent', 'Write', 'Bash']);
+  assert.equal(readClaudeTrace(jsonl([executorInit(), read, finish]), { executor: true }).subagents, undefined);
+  // A model override on the call still shows in the models that served the workers.
+  assert.deepEqual(readClaudeTrace(jsonl([executorInit(), delegate('toolu_a'), worker('toolu_a', 'Edit', 'claude-haiku-5-5'), handBack('toolu_a'), finish]), { executor: true }).subagents.models, ['claude-haiku-5-5']);
+  // A denied built-in type starts nothing; a delegation to any other type, a nested one or a worker tool outside the set fails.
+  const denied = { type: 'user', session_id: 'session-0001', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_x', is_error: true, content: "Agent type 'Explore' has been denied by permission rule 'Agent(Explore)' from cliArg." }] } };
+  assert.equal(readClaudeTrace(jsonl([executorInit(), delegate('toolu_x', 'Explore'), denied, finish]), { executor: true }).subagents, undefined);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit(), delegate('toolu_x', 'Explore'), handBack('toolu_x'), finish]), { executor: true }), /delegated to subagent types other than protoflow-worker: Explore/);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit(), delegate('toolu_a'), worker('toolu_a', 'Agent'), finish]), { executor: true }), /used tools beyond the executor set: Agent/);
+  assert.throws(() => readClaudeTrace(jsonl([executorInit(), delegate('toolu_a'), worker('toolu_a', 'WebFetch'), finish]), { executor: true }), /used tools beyond the executor set: WebFetch/);
+  // Without the worker (no --subagent-model) delegation stays outside the executor set, and planners never delegate.
+  assert.throws(() => readClaudeTrace(jsonl([executorInit(['general-purpose']), finish]), { executor: true }), /offered tools beyond the executor set: Task/);
+  assert.throws(() => readClaudeTrace(jsonl([init({ tools: ['Task', 'Read', 'StructuredOutput'], agents: [CLAUDE_WORKER] }), done()])), /offered tools beyond read-only: Task/);
+  // A worker left running in the background would start a second turn after the result: still one session, one result.
+  assert.throws(() => readClaudeTrace(jsonl([executorInit(), delegate('toolu_a'), finish, executorInit(), finish]), { executor: true }), /no single session start/);
+});
+
+test('FAKE CLI only: --subagent-model reaches the executor argv and adds the delegation rules to its prompt', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-claude-exec-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const execAdapter = fileURLToPath(new URL('../scripts/claude-exec-adapter.js', import.meta.url));
+  const request = JSON.stringify({ kind: 'implement', instructions: 'FAKE', manifest: { id: 'MAN-1' } });
+  const claude = path.join(dir, 'claude'); await fs.copyFile(fake, claude); await fs.chmod(claude, 0o755);
+  const runWith = async (args, record) => new Promise(resolve => {
+    const child = spawn(process.execPath, [execAdapter, '--claude', claude, ...args], { cwd: dir, env: { ...process.env, FAKE_CLAUDE_RECORD: record }, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('close', resolve); child.stdin.end(request);
+  });
+  await runWith(['--model', 'claude-opus-5-5', '--subagent-model', 'claude-sonnet-5-5'], path.join(dir, 'with.json'));
+  await runWith(['--model', 'claude-opus-5-5'], path.join(dir, 'without.json'));
+  const withWorkers = JSON.parse(await fs.readFile(path.join(dir, 'with.json'), 'utf8')), without = JSON.parse(await fs.readFile(path.join(dir, 'without.json'), 'utf8'));
+  assert.equal(withWorkers.args[withWorkers.args.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash,Agent');
+  assert.equal(JSON.parse(withWorkers.args[withWorkers.args.indexOf('--agents') + 1])['protoflow-worker'].model, 'claude-sonnet-5-5');
+  assert.match(withWorkers.input, /subagent_type "protoflow-worker".*Delegate only subtasks that are independent and change disjoint files.*run the final checks yourself/s);
+  assert.equal(without.args[without.args.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash');
+  assert.ok(!without.args.includes('--agents'));
+  assert.doesNotMatch(without.input, /protoflow-worker/);
+});

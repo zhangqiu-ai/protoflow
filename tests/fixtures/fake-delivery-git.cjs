@@ -4,9 +4,12 @@ const fs = require('node:fs');
 const { spawnSync, execFileSync } = require('node:child_process');
 const fixture = JSON.parse(fs.readFileSync(process.env.FAKE_DELIVERY_GIT, 'utf8'));
 const args = process.argv.slice(2);
-const calls = fs.existsSync(fixture.log) ? JSON.parse(fs.readFileSync(fixture.log, 'utf8')) : [];
-calls.push({ args: [...args], gitEnvironment: Object.keys(process.env).filter(key => key.startsWith('GIT_')) });
-fs.writeFileSync(fixture.log, JSON.stringify(calls));
+// Without a log the caller (the shell front of tests/helpers/delivery-fixture.js) has logged the call already.
+if (fixture.log) {
+  const calls = fs.existsSync(fixture.log) ? JSON.parse(fs.readFileSync(fixture.log, 'utf8')) : [];
+  calls.push({ args: [...args], gitEnvironment: Object.keys(process.env).filter(key => key.startsWith('GIT_')) });
+  fs.writeFileSync(fixture.log, JSON.stringify(calls));
+}
 let command = 0;
 while (args[command] === '-c' || args[command] === '--no-replace-objects') command += args[command] === '-c' ? 2 : 1;
 // One proxy outage of the next ls-remote, armed by a trigger file; mirrors git's real error text.

@@ -260,7 +260,22 @@ export async function executeContext(root, config, contextId, { execute = false,
   const brief = project => project && { hash: project.hash, fileCount: Object.keys(project.files ?? {}).length };
   const LIMIT = 64 * 1024;
   const clip = text => typeof text === 'string' && text.length > LIMIT ? `${text.slice(0, LIMIT)}\n[truncated: ${text.length} characters, ${text.split('\n').length} lines]` : text;
-  const briefGit = info => info && { ...info, status: clip(info.status), diff: clip(info.diff) };
+  // Lines added and removed per file, from the whole diff, and the untracked files: the overview survives a clipped diff.
+  const diffStat = info => {
+    const files = [];
+    let current = null;
+    for (const line of (typeof info.diff === 'string' ? info.diff : '').split('\n')) {
+      const header = /^diff --git a\/.+? b\/(.+)$/.exec(line);
+      if (header) { current = { path: header[1], added: 0, removed: 0, hunk: false }; files.push(current); }
+      else if (current && line.startsWith('@@')) current.hunk = true;
+      else if (current?.hunk && line[0] === '+') current.added++;
+      else if (current?.hunk && line[0] === '-') current.removed++;
+    }
+    const untracked = (typeof info.status === 'string' ? info.status : '').split('\n').filter(line => line.startsWith('?? ')).map(line => ({ path: line.slice(3), untracked: true }));
+    const all = [...files.map(({ hunk, ...file }) => file), ...untracked];
+    return all.length > 300 ? [...all.slice(0, 300), { omitted: all.length - 300 }] : all;
+  };
+  const briefGit = info => info && { ...info, status: clip(info.status), diff: clip(info.diff), stat: diffStat(info) };
   // A failed build or test run reports its cause at the end of its output; full native build logs run to megabytes and
   // would push the repair request past the executor's input limit, so the executor gets the tail of each stream.
   const TAIL = 16 * 1024;
@@ -278,7 +293,7 @@ export async function executeContext(root, config, contextId, { execute = false,
   const full = {
     ...context, project: brief(context.project), ...(context.git && { git: briefGit(context.git) }), kind: repair ? 'repair' : 'implement',
     repair: repair && { ...repair, ...(repair.verification && { verification: briefVerification(repair.verification) }), engineLimits: `.protoflow/engine-limits/${contextId}.json` },
-    operatorActions: `.protoflow/operator-actions/${contextId}.json`,
+    operatorActions: `.protoflow/operator-actions/${contextId}.json`, handoff: `.protoflow/handoff/${contextId}.json`,
     ...(config.adapters?.codex?.ignoreUserConfig === true && { executor: { ignoreUserConfig: true } })
   };
   // Large prototype diffs travel as references to the frozen files; a request still over budget fails here, by part.
@@ -294,8 +309,8 @@ export async function executeContext(root, config, contextId, { execute = false,
   const before = await snapshot(root, config);
   // What the executor is doing right now, for observers (protoflow dashboard): its raw trace as it streams.
   const live = await projectPath(root, '.protoflow/live/execute.jsonl');
-  const modelAt = command?.argv?.indexOf('--model') ?? -1;
-  await writeJson(await projectPath(root, '.protoflow/live/execute.json'), { contextId, executor: provider, model: modelAt >= 0 ? command.argv[modelAt + 1] : null, kind: request.kind, ...(context.issue && { issue: context.issue.number }), manifestId: context.manifestId, startedAt: date() });
+  const option = flag => { const at = command?.argv?.indexOf(flag) ?? -1; return at >= 0 ? command.argv[at + 1] ?? null : null; };
+  await writeJson(await projectPath(root, '.protoflow/live/execute.json'), { contextId, executor: provider, model: option('--model'), ...(option('--subagent-model') && { subagentModel: option('--subagent-model') }), kind: request.kind, ...(context.issue && { issue: context.issue.number }), manifestId: context.manifestId, startedAt: date() });
   const result = await runCommand(root, command, request, { signal, onBeforeSpawn, onStart, tee: live });
   try { await loadVersion(root, config, manifest); }
   catch (error) { result.status = 'FAIL'; result.error = `Executor changed the frozen prototype version: ${error.message}`; }
@@ -577,6 +592,27 @@ export async function createBaseline(root, config, reviewId) {
   await writeJson(await projectPath(root, '.protoflow/baselines/latest.json'), { id: data.id });
   return data;
 }
+/**
+ * What the executor left the next attempt (.protoflow/handoff/<context>.json): the files it changed, what it tried,
+ * why, and what remains. A repair starts a fresh session; the note is the previous executor's account, not evidence.
+ */
+export async function executorHandoff(worktree, contextId) {
+  if (!/^CTX-[A-Za-z0-9-]+$/.test(contextId ?? '')) return null;
+  const note = await readJson(await projectPath(worktree, `.protoflow/handoff/${contextId}.json`), null).catch(() => null);
+  const text = (value, limit) => typeof value === 'string' && value.trim() ? value.trim().slice(0, limit) : null;
+  const changed = (Array.isArray(note?.changed) ? note.changed : []).map(item => text(item, 300)).filter(Boolean).slice(0, 50);
+  const handoff = { ...(changed.length && { changed }), ...Object.fromEntries(['tried', 'why', 'remaining'].map(key => [key, text(note?.[key], 2000)]).filter(([, value]) => value)) };
+  return Object.keys(handoff).length ? handoff : null;
+}
+/** The files one attempt added, modified or removed, from the application fingerprints taken around its executor. */
+export function attemptChanges(before, after, limit = 200) {
+  if (!before?.files || !after?.files) return null;
+  const files = Object.keys({ ...before.files, ...after.files }).filter(file => before.files[file] !== after.files[file]).sort();
+  return {
+    files: files.slice(0, limit).map(file => ({ path: file, change: !(file in before.files) ? 'added' : !(file in after.files) ? 'removed' : 'modified' })),
+    ...(files.length > limit && { omitted: files.length - limit })
+  };
+}
 export async function repair(root, config, manifestId, { execute = false, spec, adr, target } = {}) {
   const reports = [];
   const executions = [];
@@ -584,11 +620,14 @@ export async function repair(root, config, manifestId, { execute = false, spec, 
   let report = await verify(root, config, manifestId, { target });
   reports.push(report.id);
   const maximum = config.policy?.maxRepairAttempts ?? 3;
+  let previousAttempt = null;
   for (let attempt = 1; report.status === 'FAIL' && execute && attempt <= maximum; attempt++) {
     try {
       const context = await createContext(root, config, manifestId, { spec, adr, target });
-      const execution = await executeContext(root, config, context.id, { execute, repair: { attempt, verification: report } });
+      const execution = await executeContext(root, config, context.id, { execute, repair: { attempt, verification: report, ...(previousAttempt && { previousAttempt }) } });
       executions.push(execution.id);
+      const handoff = await executorHandoff(root, context.id);
+      previousAttempt = { attempt, changes: attemptChanges(context.project, execution.projectAfter), ...(handoff && { handoff }) };
       if (execution.status !== 'PASS') { blockingReason = execution.result.error ?? execution.result.status; break; }
       report = await verify(root, config, manifestId, { target });
       reports.push(report.id);
