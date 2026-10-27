@@ -48,7 +48,9 @@ export function compareStructure(screen, state, prototype, application, { native
   // is left out at every level, so it is checked only for presence, never compared through an ancestor. The same
   // words can also be static text nearby (a field labelled "Password" whose placeholder is "Password"), and whether a
   // field's own text shows up in its container differs by platform, so only occurrences beyond those the static leaf
-  // anchors account for are removed, last first (a field follows its label). Longer dynamic text goes first: a short
+  // anchors account for are removed, last first (a field follows its label). A static anchor whose only descendants are
+  // dynamic (a list row "Returns phrases" with its date) is such a leaf, counted by its own text without them, so a
+  // search field reading "phrases" does not take the word from the rows it matched. Longer dynamic text goes first: a short
   // part ("Tasks" in a title bar) can also be a word inside a longer one ("Work Tasks Quotes" in a side panel), and
   // removing it first would break the longer part so it no longer matches. Removing by value can still take a static
   // word that is not an anchor of its own, so DOM captures read text without the dynamic anchors instead.
@@ -59,7 +61,7 @@ export function compareStructure(screen, state, prototype, application, { native
     for (let parent = parentOf.get(item.id); parent; parent = parentOf.get(parent)) if (parent === id) return true;
     return id === screenId;
   };
-  const leaves = anchors.filter(item => !item.dynamic && !anchors.some(other => isUnder(other, item.id)));
+  const leaves = anchors.filter(item => !item.dynamic && !anchors.some(other => !other.dynamic && isUnder(other, item.id)));
   // Separator glyphs standing alone ("Siyue · 0.0.1") are not read out by every platform: iOS leaves them out of a
   // container's combined label. They carry no words, so both sides compare without them.
   const words = text => text.split(' ').filter(word => !/^[·•‧∙・|—–-]+$/u.test(word)).join(' ');
@@ -70,7 +72,7 @@ export function compareStructure(screen, state, prototype, application, { native
     if (element(capture, id).dynamicExcluded) return text;
     const parts = anchors.filter(other => other.dynamic && isUnder(other, id)).map(item => words(normalizeText(element(capture, item.id).text))).filter(Boolean);
     for (const part of parts.sort((a, b) => b.split(' ').length - a.split(' ').length || b.length - a.length)) {
-      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(words(normalizeText(element(capture, leaf.id).text)), part).length, 0);
+      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(textOf(capture, leaf.id), part).length, 0);
       for (const index of occurrences(text, part).slice(accounted).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
     }
     return text;
