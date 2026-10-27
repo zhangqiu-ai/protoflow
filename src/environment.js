@@ -57,6 +57,14 @@ export const EXECUTOR_ENVIRONMENT = any([...LOGIN, ...UNREACHABLE]);
  */
 export const SWALLOWED_BUILD_FAILURES = [/Something went wrong running `pod install`/];
 
+/**
+ * Files that cannot change what the build produced or what the screens show: test suites, their fixtures, mocks and
+ * runner configs, and documentation. A repair that only touched these leaves the build and the scene evidence of the
+ * previous verification valid, so verify may reuse them (workflow.js); functional tests always run again, since they
+ * are what such a repair changed.
+ */
+export const TEST_ONLY_FILES = /(?:^|\/)(?:tests?|__tests__|e2e|specs?|__mocks__|__snapshots__)\/|(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$|\.(?:md|txt)$|(?:^|\/)(?:jest|vitest|playwright)\.config\.[^/]+$/;
+
 /** Files a repair can break the build through; a failure after such a change is the version's, not the machine's. */
 export const BUILD_INPUTS = /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|app\.json|app\.config\.[cm]?[jt]s|Podfile(?:\.lock|\.properties\.json)?|metro\.config\.[cm]?[jt]s|[^/]+\.podspec)$|(?:^|\/)(?:ios|android)\//;
 

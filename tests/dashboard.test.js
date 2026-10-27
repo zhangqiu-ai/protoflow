@@ -210,6 +210,12 @@ test('a runner reasonCode decides the diagnosis first, and a blocked version say
   assert.equal(diagnose('Repair limit exhausted (3)', 'repair-limit').kind, 'repair-limit');
   assert.deepEqual([diagnose('Operator action required after attempt 0: the executor may not change scripts/build.mjs.', 'operator-action').kind, diagnose('Operator action required', 'operator-action').title], ['operator-action', '需要操作員處理']);
   assert.deepEqual([diagnose('Base main moved to 1a2b3c4 but the runner worktree has 1 commit(s) not in the base', 'base-moved').kind, diagnose('Base main moved', 'base-moved').command], ['base-moved', 'protoflow runner rebase']);
+  const unrepairable = diagnose('Verification failures come from configuration, not the application: capture-size: ipad/nav.me.initial', 'verification-config');
+  assert.deepEqual([unrepairable.kind, unrepairable.title, unrepairable.command], ['verification-config', '驗收失敗來自配置或原型，不是應用', null]);
+  assert.match(unrepairable.steps.join('\n'), /capture-size[\s\S]*build-output[\s\S]*prototype-unreachable/);
+  const oversized = diagnose('Context Package is 1776144 characters, above the Codex input limit of 1048576', 'context-too-large');
+  assert.deepEqual([oversized.kind, oversized.title], ['context-too-large', 'Context Package 超過執行者上限']);
+  assert.match(oversized.steps.join('\n'), /policy\.executor\.fallback/);
   // An environment block still tells an expired login from an unreachable network by its text.
   const login = diagnose('Claude execution cannot run in this environment (EXEC-1, exit 1): OAuth token has expired', 'environment');
   assert.deepEqual([login.kind, login.reasonCode, login.command], ['auth', 'environment', 'claude']);

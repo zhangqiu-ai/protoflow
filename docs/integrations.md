@@ -86,7 +86,7 @@
   - **模型**：子 Agent 的模型由 `protoflow-worker` 定義；主模型若在呼叫時自行指定 `model`，CLI 會以呼叫的為準。指示要求不要指定，trace 會如實記錄實際服務子 Agent 的模型。
   - **Trace**：session 開始列出的工具是 `Task`，呼叫名稱是 `Agent`，子 Agent 的事件帶 `parent_tool_use_id`。驗證時只有 session 提供 `protoflow-worker` 才接受這兩個名稱；分派給其他類型（被拒絕的內建類型除外，它什麼都沒啟動）、子 Agent 再分派或用了六個工具以外的工具，都讓執行失敗。驗證結果多一個 `subagents: { count, models }`；面板的即時進度顯示 `⑂<數量>`，主控台標題列出主模型與子 Agent 模型，分派與子 Agent 的動作都列在動作清單。
 - **依工作分流**（`routes`，可省略）：前端工作（每個原型版本，以及規劃者標為 `area: "frontend"` 或 `"mixed"` 的 Issue）交給 `routes.frontend`，只動非前端程式碼的 Issue（`area: "backend"`：資料、網路、儲存、服務、建置或測試工具，使用者看不到的變更）交給 `routes.backend`。被分流的執行者額度不足時，由 `primary`／`fallback` 中的另一個接手。這樣前端與後端的工作分別消耗兩邊的額度；規劃與驗收不受影響。未設定 `routes` 時，所有工作照 `primary`／`fallback`。
-- **備援**：主要執行者回報額度或限流（usage limit、rate limit、quota、overloaded、429／529、model at capacity）時，同一個 attempt 改由 `fallback` 重做一次，attempt 記錄 `executor` 與 `executorFallback`，並發出 `executor-fallback` 事件。其他失敗照一般規則處理（暫時性重試、失敗 attempt、修復上限）。
+- **備援**：主要執行者回報額度或限流（usage limit、rate limit、quota、overloaded、429／529、model at capacity），或其 adapter 以 Context Package 超過輸入上限拒絕（`Context Package is N characters, above the … input limit`）時，同一個 attempt 改由 `fallback` 重做一次，attempt 記錄 `executor` 與 `executorFallback`，並發出 `executor-fallback` 事件。沒有備援時，過大的 Context Package 讓版本立即 BLOCKED（`reasonCode: "context-too-large"`），不重試也不修復。其他失敗照一般規則處理（暫時性重試、失敗 attempt、修復上限）。
 - **交付證據**：EXEC 紀錄帶 `executor`。Claude 執行者的 trace 以執行者規則驗證（單一 session、工具不超出上述集合、`acceptEdits` 或 `dontAsk`、成功結束），binding 的 `executors` 記錄 `executor: "claude"` 與 session；Codex 紀錄維持原格式。
 - **登入**：Claude CLI 從啟動 ProtoFlow 的環境取得憑證（`claude setup-token` 產生的 `CLAUDE_CODE_OAUTH_TOKEN`，或 `ANTHROPIC_API_KEY`）。ProtoFlow 不讀取或保存憑證；未登入時 Claude 回報失敗，有備援時改由 Codex 執行。
 

@@ -111,33 +111,80 @@ test('single target: a base people moved after the last delivery merged is taken
   assert.deepEqual([second.status, second.baseSha], ['MERGED', human]);
 });
 
-test('single target: the next version blocks before running when the base moved under work left in the worktree, with reasonCode base-moved', async t => {
+test('single target: when the base moves under uncommitted work the runner carries it, rebases a conflicting file automatically, or blocks as base-moved when runner.delivery.autoRebase is false', async t => {
   const f = await fixture(t, { versions: 2 }); f.config.policy.autoApprove = true;
   // The runner names its worktree by the source: move the fixture's worktree there, as runner start would create it.
   const worktree = path.join(await fs.realpath(f.root), '.protoflow/runner', `worktree-${hash(f.config.source).slice(0, 12)}`);
   await git(f.root, 'worktree', 'move', f.worktree, worktree);
-  // The executor never starts: the base check blocks first.
-  f.config.adapters.codex = { command: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutMs: 60000 } };
-  await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
-  const source = await sourceStatus(f.root), { sha, manifestId, ordinal } = source.entries[1];
-  source.entries[1] = { sha, manifestId, ordinal, status: 'PENDING', attempts: [] }; await saveSourceState(f.root, source);
+  // The executor fails at once: what matters here is how the pass starts.
+  f.config.adapters.codex = { command: { argv: [process.execPath, '-e', 'process.exit(9)'], timeoutMs: 10000 } };
+  const resetRunner = async () => {
+    await writeJson(path.join(f.root, '.protoflow/runner/state.json'), { schemaVersion: 1, worktree, status: 'IDLE', configHash: hash(f.config) });
+    const source = await sourceStatus(f.root), { sha, manifestId, ordinal } = source.entries[1];
+    source.entries[1] = { sha, manifestId, ordinal, status: 'PENDING', attempts: [] }; await saveSourceState(f.root, source);
+  };
+  await resetRunner();
   // Version 2 has not run yet: no acceptance evidence.
   for (const dir of [f.root, worktree]) await fs.rm(path.join(dir, '.protoflow/verifications/VER-2.json'));
   const first = await syncDeliveries(f.root, f.config);
   assert.equal(first.status, 'PASS', JSON.stringify(first));
   await git(worktree, 'push', '-q', f.remote, 'HEAD:main');
+  // The fixture GitHub reports a synthetic merge commit; on main the delivery commit itself landed, fast-forwarded.
+  const delivered = await deliveryStatus(f.root);
+  delivered.deliveries[0].mergeCommit = await git(worktree, 'rev-parse', 'HEAD');
+  await writeJson(path.join(f.root, '.protoflow/delivery/state.json'), delivered);
+
+  // 1. The base moved in a file the attempt did not touch: its uncommitted work is carried onto the base and the version runs.
   const human = await humanCommit(f, 'docs/human.md', 'TASK-080\n');
-  // Work left in the worktree is not the base's: version 2 would be built on a stale base.
   await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>half done</main>\n');
-  const events = [];
-  const result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
+  let events = [];
+  let result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
+  assert.notEqual(result.reasonCode, 'base-moved', JSON.stringify({ result, events }));
+  const aligned = events.find(event => event.event === 'base-aligned');
+  assert.deepEqual([aligned.to, aligned.carried.commits, aligned.carried.uncommitted, aligned.carried.files], [human, 0, 1, 1], JSON.stringify(events));
+  assert.ok(!events.some(event => ['base-moved', 'rebased'].includes(event.event)));
+  assert.equal(await git(worktree, 'rev-parse', 'HEAD'), human);
+
+  // 2. The base rewrote the very file the attempt changed: the work cannot be carried, so the runner rebases on its own,
+  // archives the work, restarts the version on the current base and goes on instead of waiting for `runner rebase`.
+  await resetRunner();
+  await git(worktree, 'checkout', '--', 'app/index.html');
+  const rewritten = await humanCommit(f, 'app/index.html', '<main>the base rewrote it</main>\n');
+  await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>half done again</main>\n');
+  events = [];
+  result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
+  assert.deepEqual([result.status, result.manifestId], ['REOPENED', `git-${f.shas[1]}`], JSON.stringify({ result, events }));
+  assert.match(result.reason, /^Base moved to [0-9a-f]{7}: 1 version\(s\) restart on the current base \(archive refs\/protoflow\/rebased\//);
+  assert.deepEqual(events.map(event => event.event), ['rebased']);
+  assert.deepEqual([events[0].automated, events[0].to, events[0].versions, events[0].deliveries], [true, rewritten, [`git-${f.shas[1]}`], []]);
+  assert.match(events[0].reason, /files the base also changed \(app\/index\.html\)/);
+  assert.equal(await git(worktree, 'rev-parse', 'HEAD'), rewritten);
+  assert.equal(await git(worktree, 'status', '--porcelain', '--', 'app', 'docs'), '', 'the worktree is clean apart from the ignored fixture node_modules');
+  assert.equal(await fs.readFile(path.join(worktree, 'app/index.html'), 'utf8'), '<main>the base rewrote it</main>\n');
+  // Nothing is lost: the archive holds the uncommitted work on top of the previous HEAD.
+  assert.equal(await git(worktree, 'rev-parse', `${events[0].archive}^`), human);
+  assert.equal(await git(worktree, 'show', `${events[0].archive}:app/index.html`), '<main>half done again</main>');
+  const restarted = (await sourceStatus(f.root)).entries[1];
+  assert.deepEqual([restarted.status, restarted.attempts], ['PENDING', []]);
+  const runner = await readJson(path.join(f.root, '.protoflow/runner/state.json'));
+  assert.deepEqual([runner.status, runner.base, runner.rebaseHistory.at(-1).automated, runner.rebaseHistory.at(-1).archive], ['IDLE', rewritten, true, events[0].archive]);
+
+  // 3. runner.delivery.autoRebase false keeps the decision with a person: the version blocks with reasonCode base-moved.
+  f.config.runner.delivery.autoRebase = false;
+  await resetRunner();
+  const again = await humanCommit(f, 'app/index.html', '<main>the base rewrote it twice</main>\n');
+  await fs.writeFile(path.join(worktree, 'app/index.html'), '<main>half done, third time</main>\n');
+  events = [];
+  result = await runOnce(f.root, f.config, { onEvent: event => { events.push(event); } });
   assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'base-moved'], JSON.stringify({ result, events }));
   assert.deepEqual(events.map(event => event.event), ['base-moved', 'blocked']);
-  assert.equal(events[0].baseSha, human);
+  assert.equal(events[0].baseSha, again);
   assert.deepEqual([events[1].reasonCode, events[1].manifestId], ['base-moved', `git-${f.shas[1]}`]);
   assert.match(events[1].reason, /runner rebase/);
+  assert.doesNotMatch(events[0].reason, /automatic rebase refused/);
   const entry = (await sourceStatus(f.root)).entries[1];
   assert.deepEqual([entry.status, entry.reasonCode, typeof entry.blockedAt], ['BLOCKED', 'base-moved', 'string']);
+  assert.equal(await fs.readFile(path.join(worktree, 'app/index.html'), 'utf8'), '<main>half done, third time</main>\n', 'the work waits in the worktree for the person');
 });
 
 test('single target: runner rebase retires a delivery built on a moved base and runs its versions again on the current base', async t => {
@@ -215,6 +262,31 @@ test('single target: the work of a version reopened after its delivery was rejec
   assert.equal(await git(f.worktree, 'show', `${aligned.carried.archive}:app/repair.txt`), 'repair in progress');
   // The base is in the worktree now: the next check passes without moving anything.
   assert.equal(await alignWorktreeToBase(f.worktree, f.config, f.root), null);
+});
+
+test('single target: uncommitted work of an attempt in progress moves onto a base people moved meanwhile, keeping its content', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  const landed = await git(f.worktree, 'rev-parse', 'HEAD');
+  await git(f.worktree, 'push', '-q', f.remote, 'HEAD:main');
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-090\n');
+  // The executor is mid-repair: a tracked file changed and a new file appeared; the base touched neither.
+  await fs.writeFile(path.join(f.worktree, 'app/index.html'), '<main>half done</main>\n');
+  await fs.writeFile(path.join(f.worktree, 'app/repair.txt'), 'repair in progress\n');
+  const aligned = await alignWorktreeToBase(f.worktree, f.config, f.root);
+  assert.deepEqual([aligned.from, aligned.to, aligned.carried.commits, aligned.carried.deliveries, aligned.carried.files, aligned.carried.uncommitted], [landed, human, 0, [], 1, 2]);
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
+  assert.equal(await fs.readFile(path.join(f.worktree, 'app/index.html'), 'utf8'), '<main>half done</main>\n');
+  assert.equal(await fs.readFile(path.join(f.worktree, 'app/repair.txt'), 'utf8'), 'repair in progress\n');
+  assert.equal(await fs.readFile(path.join(f.worktree, 'docs/human.md'), 'utf8'), 'TASK-090\n');
+  // Nothing is lost: the archive holds the uncommitted work on top of the previous HEAD.
+  assert.equal(await git(f.worktree, 'rev-parse', `${aligned.carried.archive}^`), landed);
+  assert.equal(await git(f.worktree, 'show', `${aligned.carried.archive}:app/repair.txt`), 'repair in progress');
+  assert.equal(await alignWorktreeToBase(f.worktree, f.config, f.root), null);
+  // The base changed a file the attempt also changed, to other content: it blocks and names the file.
+  const again = await humanCommit(f, 'app/index.html', '<main>the base rewrote it</main>\n');
+  await assert.rejects(alignWorktreeToBase(f.worktree, f.config, f.root), error => error.code === 'BASE_MOVED' && error.baseSha === again && /uncommitted changes in app\/index\.html/.test(error.message) && /files the base also changed \(app\/index\.html\)/.test(error.message));
+  assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
 });
 
 test('single target: the runner carries a rejected delivery\'s work onto a moved base and runs the version instead of blocking', async t => {

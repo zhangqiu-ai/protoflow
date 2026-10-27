@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { scanSource, sourceStatus, git, gitSnapshot } from '../src/source.js';
-import { runOnce, retryRunner, supersedeRunner, reclassifyRunner, configureRunner, startRunner, runnerStatus } from '../src/runner.js';
+import { runOnce, retryRunner, supersedeRunner, reclassifyRunner, configureRunner, startRunner, runnerStatus, planReuseReason, rerunCause } from '../src/runner.js';
 import { versionQueue } from '../src/queue.js';
 import { verify, createReview, decideReview } from '../src/workflow.js';
 import { loadVersion } from '../src/versions.js';
@@ -1610,7 +1610,8 @@ test('a build that fails for the machine after the attempt changed build inputs 
 
 test('repair rounds that do not reduce the failures block as stalled before the attempts run out', async t => {
   const { root, config } = await fixture(t);
-  // The executor succeeds without changing anything; the build keeps failing the same way.
+  // The executor succeeds without changing anything; the build keeps failing the same way. One repair round that
+  // leaves the same failures with the same reasons is already a stall: the executor changed nothing that matters.
   config.adapters.codex.command.argv = [process.execPath, '-e', 'process.exit(0)'];
   config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(3)'] }, functional: { argv: [process.execPath, '-e', 'process.exit(0)'] } };
   config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 0 };
@@ -1619,18 +1620,28 @@ test('repair rounds that do not reduce the failures block as stalled before the 
   const events = [];
   const result = await runOnce(root, config, { onEvent: event => events.push(event.event) });
   assert.equal(result.status, 'BLOCKED'); assert.equal(result.reasonCode, 'stalled');
-  assert.match(result.reason, /2 rounds in a row did not reduce the failures \((\d+) → \1 → \1\).*build/);
-  assert.deepEqual(events.filter(event => ['execute', 'repair', 'verified', 'blocked'].includes(event)), ['execute', 'verified', 'repair', 'verified', 'repair', 'verified', 'blocked']);
+  assert.match(result.reason, /^Repair made no progress: attempt 1 left the same failures with the same reasons as VER-\S+; .*build/);
+  assert.deepEqual(events.filter(event => ['execute', 'repair', 'verified', 'blocked'].includes(event)), ['execute', 'verified', 'repair', 'verified', 'blocked']);
   const entry = (await sourceStatus(root)).entries[0];
-  assert.equal(entry.attempts.length, 3, 'the fourth attempt was not spent'); assert.equal(entry.reasonCode, 'stalled');
+  assert.equal(entry.attempts.length, 2, 'the third and fourth attempts were not spent'); assert.equal(entry.reasonCode, 'stalled');
   assert.ok(entry.attempts.every(attempt => attempt.failures.keys.includes('build')));
-  // policy.stallRounds 0 turns the check off: the attempts run out instead.
+  // Failures that change without shrinking (another test fails each round) are counted in rounds: policy.stallRounds, 2 by default.
+  const runs = path.join(root, '..', 'functional-runs');
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', `const fs=require('node:fs');const n=fs.existsSync(process.argv[1])?fs.readFileSync(process.argv[1],'utf8').length:0;fs.appendFileSync(process.argv[1],'x');console.log('  1) [chromium] › e2e/settings.spec.ts:'+(40+n)+':3 › case '+n);console.log('    Error: expect(locator).toBeVisible() failed');process.exit(1)`, runs] } };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await configureRunner(root, config);
+  await retryRunner(root, config);
+  const counted = await runOnce(root, config);
+  assert.equal(counted.reasonCode, 'stalled', JSON.stringify(counted));
+  assert.match(counted.reason, /^Repair made no progress: 2 rounds in a row did not reduce the failures \((\d+) → \1 → \1\).*functional/);
+  assert.equal((await sourceStatus(root)).entries[0].attempts.length, 5, 'three attempts this time, not four');
+  // policy.stallRounds 0 turns both checks off: the attempts run out instead.
   config.policy.stallRounds = 0;
   await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
   await configureRunner(root, config);
   await retryRunner(root, config);
   const exhausted = await runOnce(root, config);
-  assert.equal(exhausted.reasonCode, 'repair-limit'); assert.match(exhausted.reason, /Repair limit exhausted \(3\): VER-\S+ still fails build/);
+  assert.equal(exhausted.reasonCode, 'repair-limit'); assert.match(exhausted.reason, /Repair limit exhausted \(3\): VER-\S+ still fails functional/);
 });
 
 test('an executor that names files only the operator may change blocks the version as operator-action instead of spending the repair attempts', async t => {
@@ -2214,4 +2225,104 @@ test('a pause that arrives while a version runs takes effect once that version s
   assert.equal(later.at(-1), 'paused');
   const entries = (await sourceStatus(root)).entries;
   assert.equal(entries[1].attempts?.length ?? 0, 0, 'the next version did not start');
+});
+
+test('a Context Package the executor adapter refuses as too large blocks the version at once as context-too-large, or goes to the fallback executor', async t => {
+  const { root, config } = await fixture(t);
+  const refusal = 'Error: Context Package is 1776144 characters, above the Codex input limit of 1048576; largest fields: anchors.screens (1700000)';
+  config.adapters.codex.command.argv = [process.execPath, '-e', 'process.stdin.resume();process.stdin.on("end",()=>{console.error(process.argv[1]);process.exit(1)})', refusal];
+  config.policy = { ...config.policy, maxRepairAttempts: 3, transientRetries: 2, transientRetryDelayMs: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const result = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.deepEqual([result.status, result.reasonCode], ['BLOCKED', 'context-too-large'], JSON.stringify(result));
+  assert.match(result.reason, /^Context Package too large for the codex executor \(EXEC-\S+\): .*above the Codex input limit of 1048576[\s\S]*then runner retry$/);
+  assert.deepEqual(events.map(event => event.event).filter(event => ['execute', 'repair', 'verified', 'executor-fallback', 'blocked'].includes(event)), ['execute', 'blocked']);
+  assert.equal(events.at(-1).reasonCode, 'context-too-large');
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.equal(entry.attempts.length, 1, 'neither a transient retry nor a repair attempt was spent on the same package');
+  assert.deepEqual([entry.reasonCode, entry.attempts[0].reasonCode, entry.attempts[0].status], ['context-too-large', 'context-too-large', 'FAIL']);
+  assert.equal(entry.attempts[0].processes.filter(child => child.phase === 'execute').length, 1);
+  // An executor with a higher input limit configured as the fallback takes the same attempt instead.
+  config.adapters.claude = { command: { argv: [process.execPath, '-e', 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0))'] } };
+  config.policy.executor = { primary: 'codex', fallback: 'claude' };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await configureRunner(root, config);
+  await retryRunner(root, config);
+  const again = [];
+  const second = await runOnce(root, config, { onEvent: event => again.push(event) });
+  assert.notEqual(second.reasonCode, 'context-too-large', JSON.stringify(second));
+  const fallback = again.find(event => event.event === 'executor-fallback');
+  assert.deepEqual([fallback.from, fallback.to], ['codex', 'claude']); assert.match(fallback.reason, /above the Codex input limit of 1048576/);
+  const attempt = (await sourceStatus(root)).entries[0].attempts.at(-1);
+  assert.deepEqual([attempt.executor, attempt.executorFallback.from, attempt.executionStatus], ['claude', 'codex', 'PASS']);
+});
+
+test('FAKE CLI only: a version blocked by the environment keeps its plan when it runs again; a maintainer answer or policy.replanOnReopen plans it anew', async t => {
+  const bridge = new URL('../scripts/claude-adapter.js', import.meta.url).pathname;
+  const plan = JSON.stringify({ decision: 'implement', level: 'L1', summary: 'FAKE FIXTURE PLAN', steps: ['Change the button label'], acceptanceCriteria: [{ id: 'AC1', text: 'The button reads Save', anchors: [], evidence: 'tier' }], tests: [], risks: [], questions: [] });
+  const saved = { mode: process.env.FAKE_CLAUDE_MODE, output: process.env.FAKE_CLAUDE_OUTPUT };
+  t.after(() => { for (const [key, value] of [['FAKE_CLAUDE_MODE', saved.mode], ['FAKE_CLAUDE_OUTPUT', saved.output]]) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  process.env.FAKE_CLAUDE_MODE = 'pass'; process.env.FAKE_CLAUDE_OUTPUT = plan;
+  const { root, config } = await fixture(t);
+  const fakeClaude = path.join(root, '..', 'claude');
+  await fs.copyFile(new URL('./fixtures/fake-claude.cjs', import.meta.url), fakeClaude); await fs.chmod(fakeClaude, 0o755);
+  const received = path.join(root, '..', 'executor-input.json');
+  // The executor cannot reach its provider: the version blocks for the environment, not for its plan.
+  config.adapters.codex.command.argv = [process.execPath, '-e', `let i='';process.stdin.on('data',c=>i+=c).on('end',()=>{require('node:fs').writeFileSync(process.argv[1],i);console.error('Error: getaddrinfo ENOTFOUND api.openai.com');process.exit(1)})`, received];
+  config.adapters.planner = { command: { argv: [process.execPath, bridge, '--claude', fakeClaude], timeoutMs: 30000 } };
+  config.policy = { ...config.policy, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  const events = [];
+  const first = await runOnce(root, config, { onEvent: event => events.push(event) });
+  assert.equal(first.reasonCode, 'environment', JSON.stringify(first));
+  const planned = events.find(event => event.event === 'planned');
+  assert.equal(planned.decision, 'implement');
+  // Retried once the network is back: the plan still fits the unchanged version, so the planner is not called again.
+  await fs.unlink(received);
+  await retryRunner(root, config);
+  const again = [];
+  const second = await runOnce(root, config, { onEvent: event => again.push(event) });
+  assert.equal(second.reasonCode, 'environment', JSON.stringify(second));
+  const reused = again.find(event => event.event === 'plan-reused');
+  assert.deepEqual([reused.planId, reused.criteria, reused.reason], [planned.planId, 1, 'the version blocked for environment, not for its plan'], JSON.stringify(again));
+  assert.ok(!again.some(event => event.event === 'planned'));
+  assert.match(await fs.readFile(received, 'utf8'), new RegExp(`"id":"${planned.planId}"`));
+  assert.equal((await sourceStatus(root)).entries[0].planId, planned.planId);
+  // A maintainer's answer is new information for the planner: the version is planned again, with the answer.
+  await retryRunner(root, config, { answer: 'Use the local backend.' });
+  const third = [];
+  await runOnce(root, config, { onEvent: event => third.push(event) });
+  const replanned = third.find(event => event.event === 'planned');
+  assert.ok(replanned && replanned.planId !== planned.planId, JSON.stringify(third));
+  assert.ok(!third.some(event => event.event === 'plan-reused'));
+  const request = JSON.parse(await fs.readFile(path.join((await runnerStatus(root)).runner.worktree, `.protoflow/plans/${replanned.planId}/request.json`), 'utf8'));
+  assert.deepEqual(request.data.previous.answers.map(answer => answer.text), ['Use the local backend.']);
+  // policy.replanOnReopen true plans every rerun again, whatever blocked it.
+  config.policy.replanOnReopen = true;
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await configureRunner(root, config);
+  await retryRunner(root, config);
+  const fourth = [];
+  await runOnce(root, config, { onEvent: event => fourth.push(event) });
+  assert.ok(fourth.some(event => event.event === 'planned') && !fourth.some(event => event.event === 'plan-reused'), JSON.stringify(fourth.map(event => event.event)));
+});
+
+test('planReuseReason and rerunCause: a plan is reused only for reruns that did not question it', () => {
+  const earlier = { id: 'PLN-1', createdAt: '2026-10-27T10:00:00.000Z', plan: { decision: 'implement', acceptanceCriteria: [{ id: 'AC1' }] } };
+  const retry = reasonCode => ({ kind: 'retry', at: '2026-10-27T11:00:00.000Z', reasonCode });
+  assert.match(planReuseReason({}, earlier, retry('environment')), /blocked for environment/);
+  assert.match(planReuseReason({}, earlier, retry('base-moved')), /blocked for base-moved/);
+  assert.match(planReuseReason({}, earlier, { kind: 'reopening', at: '2026-10-27T11:00:00.000Z' }), /independent review rejected/);
+  for (const reasonCode of ['stalled', 'repair-limit', 'needs-human', 'plan-failed', 'verification-config', null]) assert.equal(planReuseReason({}, earlier, retry(reasonCode)), null, String(reasonCode));
+  assert.equal(planReuseReason({ policy: { replanOnReopen: true } }, earlier, retry('environment')), null);
+  assert.equal(planReuseReason({}, { ...earlier, plan: { ...earlier.plan, decision: 'needs-human' } }, retry('environment')), null);
+  assert.equal(planReuseReason({}, earlier, { kind: 'retry', at: '2026-10-27T09:00:00.000Z', reasonCode: 'environment' }), null, 'a retry before the plan is not a rerun of it');
+  assert.equal(planReuseReason({}, earlier, retry('environment'), [{ at: '2026-10-27T10:30:00.000Z', text: 'Use SQLite' }]), null, 'an answer given after the plan questions it');
+  assert.match(planReuseReason({}, earlier, retry('environment'), [{ at: '2026-10-27T09:30:00.000Z', text: 'old answer' }]), /blocked for environment/);
+  assert.equal(rerunCause({}), null);
+  assert.deepEqual(rerunCause({ retries: [{ at: '2026-10-27T11:00:00.000Z', reasonCode: 'stalled' }], reopenings: [{ at: '2026-10-27T12:00:00.000Z', verificationId: 'VER-9' }] }), { kind: 'reopening', at: '2026-10-27T12:00:00.000Z' });
+  assert.deepEqual(rerunCause({ retries: [{ at: '2026-10-27T13:00:00.000Z', reasonCode: 'environment' }], reopenings: [{ at: '2026-10-27T12:00:00.000Z' }] }), { kind: 'retry', at: '2026-10-27T13:00:00.000Z', reasonCode: 'environment' });
 });
