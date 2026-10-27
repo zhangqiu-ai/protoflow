@@ -12,6 +12,8 @@ const login = text => {
   return { who: 'Claude', command: 'claude', then: '在 Claude Code 裡輸入 `/login`', check: null };
 };
 const RULES = [
+  { kind: 'config-changed', test: /Runner config changed/,
+    make: () => ({ title: 'Runner 設定已改變', steps: ['原因列出改變的欄位，確認這次修改是有意的', '執行 `protoflow runner configure` 套用到 Runner 的 worktree', '服務會在下一輪自動繼續；前景 Runner 再執行 `protoflow runner start`'], command: 'protoflow runner configure' }) },
   { kind: 'auth', test: /OAuth|session expired|not logged in|log ?in again|Failed to authenticate|authentication (failed|required)|invalid (x-)?api[ -]?key|\b401\b|Unauthorized|Bad credentials/i,
     make: text => { const who = login(text); return { title: `${who.who} 登入失效`, steps: [`在終端機執行 \`${who.command}\`${who.then ? `，${who.then}` : ''}，以 Runner 服務同一個使用者重新登入`, ...(who.check ? [`以 \`${who.check}\` 確認已登入`] : []), '回到這裡重試'], command: who.command }; } },
   { kind: 'quota', test: /rate.?limit|usage limit|quota|\b429\b|Too Many Requests|credit balance|overloaded/i,

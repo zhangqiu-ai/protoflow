@@ -2035,6 +2035,38 @@ test('the heartbeat counts consecutive passes that cannot reach the source or Gi
   assert.ok(beat.failingPasses >= 2, JSON.stringify(beat)); assert.match(beat.lastFailure.error, /No such remote 'origin'/); assert.match(beat.lastPass.issuesError, /No such remote 'origin'/);
 });
 
+test('a pass that fails before any version moves (a changed config) shows in events, the heartbeat and runner status', async t => {
+  const { root, config } = await fixture(t);
+  config.runner = { pollMs: 1000 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  assert.equal((await startRunner(root, config)).status, 'BLOCKED');
+  await retryRunner(root, config);
+  // Only the evidence path moved; the runner still refuses until runner configure, and now says which field and why.
+  const changed = { ...config, runner: { ...config.runner, adr: 'docs/ADR-004.json' } };
+  const read = async name => (await fs.readFile(path.join(root, '.protoflow/runner', name), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const heartbeat = async () => JSON.parse(await fs.readFile(path.join(root, '.protoflow/runner/heartbeat.json'), 'utf8'));
+  await assert.rejects(startRunner(root, changed), /Runner config changed \(runner\.adr\); run runner configure/);
+  let beat = await heartbeat();
+  assert.equal(beat.failingPasses, 1); assert.match(beat.lastFailure.error, /Runner config changed \(runner\.adr\)/);
+  assert.ok((await read('events.jsonl')).some(event => event.event === 'pass-failed' && /runner\.adr/.test(event.error)), 'the timeline records the failure');
+  // The resident runner keeps polling and counts the failing passes, so the service reads DEGRADED with the reason.
+  const controller = new AbortController();
+  let failed = 0;
+  const result = await startRunner(root, changed, { service: true, signal: controller.signal, onEvent: event => { if (event.event === 'pass-failed' && ++failed === 3) controller.abort(); } });
+  assert.equal(result.status, 'STOPPED', 'a failing pass does not exit the service');
+  beat = await heartbeat();
+  assert.ok(beat.failingPasses >= 2, JSON.stringify(beat)); assert.equal(beat.lastPass.status, 'ERROR'); assert.match(beat.lastPass.passError, /Runner config changed/);
+  const status = await runnerStatus(root, changed);
+  assert.match(status.failing.lastFailure.error, /runner\.adr/); assert.ok(status.failing.passes >= 2);
+  // After runner configure the next pass runs the version again and the count resets.
+  await configureRunner(root, changed);
+  assert.equal((await startRunner(root, changed)).status, 'BLOCKED', 'the executor fails as before, the config no longer does');
+  beat = await heartbeat();
+  assert.equal(beat.failingPasses, 0);
+  assert.equal((await runnerStatus(root, changed)).failing, undefined);
+});
+
 test('the runner records its events and the executor trace for the dashboard, and a dashboard retry reopens a blocked version', async t => {
   const { root, config } = await fixture(t);
   // An executor that prints a trace line before failing, like a provider that started working.
