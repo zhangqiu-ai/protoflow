@@ -75,8 +75,8 @@ function position(stream) {
   if (stream.stage === 'idle') return { at: ['MERGED', 'COMMITTED'].includes(stream.deliveries?.[0]?.status ?? stream.lastDelivery?.status) || stream.versions?.[0]?.status === 'PASS' ? STAGES.length : -1, tone: 'idle' };
   return { at: STAGES.findIndex(([key]) => key === stream.stage), tone: 'now' };
 }
-const glyphOf = action => ({ say: '◆', read: '↗', edit: '✎', write: '+', run: '▸', search: '⌕', tool: '·', done: action.ok === false ? '✕' : '✓' })[action.kind] ?? '·';
-const ACT = { say: '說明', read: '讀取', edit: '編輯', write: '新增', run: '執行', search: '搜尋', tool: '工具', done: '結束' };
+const glyphOf = action => ({ say: '◆', read: '↗', edit: '✎', write: '+', run: '▸', search: '⌕', agent: '⑂', tool: '·', done: action.ok === false ? '✕' : '✓' })[action.kind] ?? '·';
+const ACT = { say: '說明', read: '讀取', edit: '編輯', write: '新增', run: '執行', search: '搜尋', agent: '子 Agent', tool: '工具', done: '結束' };
 /** A verification waiting for a simulator or emulator that another runner holds. */
 const deviceWaitLabel = stream => stream.deviceWait ? `等待模擬器（被 ${[stream.deviceWait.project ?? '另一個專案', stream.deviceWait.target].filter(Boolean).join('/')} 使用）` : null;
 /** The live strip on a project card: which version, which phase, how long, and the executor's latest action. */
@@ -93,7 +93,7 @@ function nowStrip(stream) {
         h('small', {}, [targetName(stream.target), phase, round].filter(Boolean).join(' · '))),
       h('span.timer', { 'data-since': since ?? '' }, elapsed(since))),
     last ? h('div.strip-act', { title: last.text }, h(`span.k-${last.kind}`, { 'aria-hidden': 'true' }, glyphOf(last)), h('span', {}, `${ACT[last.kind] ?? last.kind} `), h('code', {}, last.text),
-      live.totals ? h('em', {}, `✎${live.totals.edits} ▸${live.totals.commands}`) : null) : null);
+      live.totals ? h('em', {}, `✎${live.totals.edits} ▸${live.totals.commands}${live.totals.subagents ? ` ⑂${live.totals.subagents}` : ''}`) : null) : null);
 }
 function miniTrack(stream) {
   const { at, tone } = position(stream);
@@ -225,8 +225,8 @@ function consoleCard(streams) {
   requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
   return h(`div.console.rise${live ? '' : '.idle'}`, {},
     h('div.console-h', {}, h('div.lights', {}, h('i'), h('i'), h('i')),
-      live ? h(`span.who${live.executor === 'codex' ? '.codex' : ''}`, {}, h('b', {}, live.executor === 'codex' ? 'C' : /opus/i.test(live.model ?? '') ? 'O' : 'S'), `${live.model ?? live.executor} · ${targetName(stream.target)}`) : h('span', {}, 'agent'),
-      h('span', {}, live ? (live.running ? `編輯 ${live.totals.edits} · 命令 ${live.totals.commands}` : `上次 ${ago(live.updatedAt)}`) : '')),
+      live ? h(`span.who${live.executor === 'codex' ? '.codex' : ''}`, {}, h('b', {}, live.executor === 'codex' ? 'C' : /opus/i.test(live.model ?? '') ? 'O' : 'S'), `${live.model ?? live.executor}${live.subagentModel ? ` + ${live.subagentModel}` : ''} · ${targetName(stream.target)}`) : h('span', {}, 'agent'),
+      h('span', {}, live ? (live.running ? `編輯 ${live.totals.edits} · 命令 ${live.totals.commands}${live.totals.subagents ? ` · 子 Agent ${live.totals.subagents}` : ''}` : `上次 ${ago(live.updatedAt)}`) : '')),
     live ? [list, live.files?.length ? h('div.files', {}, live.files.slice(-6).map(file => h('span', { title: file }, file.split('/').pop()))) : null]
       : h('p.quiet', {}, '目前沒有代理在工作'));
 }

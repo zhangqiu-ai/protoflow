@@ -1,4 +1,4 @@
-// Shared test double for the GitHub CLI (see tests/delivery.test.js and tests/e2e/multi-target.spec.js).
+// Shared test double for the GitHub CLI (see tests/helpers/delivery-fixture.js and tests/e2e/multi-target.spec.js).
 /**
  * Local stand-in for the GitHub CLI: pull requests live in a JSON file and heads come from the real bare remote.
  * This exercises ProtoFlow's argv protocol only; real GitHub delivery is recorded separately as acceptance evidence.

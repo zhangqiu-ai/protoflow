@@ -62,6 +62,7 @@ const short = (text, max = 160) => { const value = String(text ?? '').replace(/\
 /**
  * What an executor did, from its raw trace (Claude stream-json or Codex JSONL): reads, edits, commands and its own
  * words, newest last, plus totals. Unknown events are ignored, so a newer provider format degrades to fewer actions.
+ * A Claude executor's delegations to worker subagents count as subagents; the workers' own actions are listed too.
  */
 export function traceActivity(events, { root = null } = {}) {
   const actions = [], files = new Set();
@@ -76,6 +77,7 @@ export function traceActivity(events, { root = null } = {}) {
         else if (name === 'Read') actions.push({ kind: 'read', text: rel(input.file_path) });
         else if (name === 'Bash') actions.push({ kind: 'run', text: short(input.description ? `${input.description}: ${input.command}` : input.command) });
         else if (['Grep', 'Glob'].includes(name)) actions.push({ kind: 'search', text: short(input.pattern) });
+        else if (['Agent', 'Task'].includes(name) && !event.parent_tool_use_id) actions.push({ kind: 'agent', text: short(input.description ?? input.subagent_type) });
         else actions.push({ kind: 'tool', text: name });
       }
     } else if (event.type === 'item.completed' || event.type === 'item.started') {
@@ -89,7 +91,7 @@ export function traceActivity(events, { root = null } = {}) {
     else if (event.type === 'turn.failed') actions.push({ kind: 'done', text: short(event.error?.message ?? 'failed'), ok: false });
   }
   const count = kind => actions.filter(action => action.kind === kind).length;
-  return { actions: actions.slice(-30), totals: { edits: count('edit') + count('write'), commands: count('run'), reads: count('read'), searches: count('search') }, files: [...files].filter(Boolean).slice(-20) };
+  return { actions: actions.slice(-30), totals: { edits: count('edit') + count('write'), commands: count('run'), reads: count('read'), searches: count('search'), subagents: count('agent') }, files: [...files].filter(Boolean).slice(-20) };
 }
 
 const modelOf = argv => { const at = (argv ?? []).indexOf('--model'); return at >= 0 ? argv[at + 1] : null; };

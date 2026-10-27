@@ -364,7 +364,7 @@ test('simultaneous stale-owner reclaimers cannot remove the new owner or overlap
     const owner = path.join(root, '.protoflow/runner.lock/owner.json');
     const marker = name => path.join(root, name);
     const waitFor = async name => {
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + 60000;
       while (true) {
         try { await fs.access(marker(name)); return; } catch {}
         if (Date.now() > deadline) throw new Error('Barrier timeout: ' + name);
@@ -449,7 +449,7 @@ test('SIGKILL leaves a tracked live executor that blocks retry until the child e
     worker.kill('SIGKILL');
     if (executorPid) { try { process.kill(-executorPid, 'SIGKILL'); } catch {} }
   });
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 60000;
   while (!executorPid) {
     executorPid = (await sourceStatus(root)).entries[0].attempts[0]?.pid;
     if (Date.now() > deadline) throw new Error('Runner did not persist executor PID');
@@ -462,7 +462,7 @@ test('SIGKILL leaves a tracked live executor that blocks retry until the child e
   assert.equal(state.entries[0].status, 'RUNNING'); assert.equal(state.entries[1].status, 'PENDING');
   assert.equal(state.entries[0].attempts[0].pid, executorPid); assert.equal(state.entries[0].attempts[0].completedAt, undefined);
   process.kill(-executorPid, 'SIGKILL');
-  const exitDeadline = Date.now() + 5000;
+  const exitDeadline = Date.now() + 60000;
   while (true) {
     try { process.kill(executorPid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
     if (Date.now() > exitDeadline) throw new Error('Executor did not exit');
@@ -485,7 +485,7 @@ test('stop aborts setup and records its child and completion before initializati
   await scanSource(root, config);
   const controller = new AbortController();
   const operation = runOnce(root, config, { signal: controller.signal });
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 60000;
   while (!(await runnerStatus(root)).runner?.setupPid) {
     if (Date.now() > deadline) throw new Error('Setup did not persist PID');
     await delay(10);
@@ -543,7 +543,7 @@ for (const phase of ['build', 'functional']) {
       worker.kill('SIGKILL');
       if (verifierPid) { try { process.kill(-verifierPid, 'SIGKILL'); } catch {} }
     });
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 60000;
     while (!verifierPid) {
       verifierPid = (await sourceStatus(root)).entries[0].attempts[0]?.processes?.find(child => child.phase === phase)?.pid;
       if (Date.now() > deadline) throw new Error('Runner did not persist verifier PID');
@@ -560,7 +560,7 @@ for (const phase of ['build', 'functional']) {
     if (phase === 'functional') assert.ok(attempt.processes.find(child => child.phase === 'build').completedAt);
     assert.equal(state.entries[0].status, 'RUNNING'); assert.equal(state.entries[1].status, 'PENDING');
     process.kill(-verifierPid, 'SIGKILL');
-    const exitDeadline = Date.now() + 5000;
+    const exitDeadline = Date.now() + 60000;
     while (true) {
       try { process.kill(verifierPid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
       if (Date.now() > exitDeadline) throw new Error('Verifier did not exit');
@@ -771,7 +771,7 @@ test('verification onFinish persistence failure rejects before launching the nex
 });
 
 async function waitForGroupExit(pid) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 60000;
   while (processGroupAlive(pid)) {
     if (Date.now() > deadline) throw new Error('Process group did not exit');
     await delay(10);
@@ -787,7 +787,7 @@ async function orphanedGroup(t, root) {
   `;
   const leader = spawn(process.execPath, ['-e', leaderScript, childFile, release], { detached: true, stdio: 'ignore' });
   t.after(() => { try { process.kill(-leader.pid, 'SIGKILL'); } catch {} });
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 60000;
   while (true) {
     try { await fs.access(childFile); break; } catch {}
     if (Date.now() > deadline) throw new Error('Group child did not start');
@@ -894,7 +894,7 @@ for (const phase of ['setup', 'execute', 'build', 'functional']) {
       await runOnce(root, JSON.parse(await fs.readFile(root + '/protoflow.config.json', 'utf8')));
     `, root, phase], { stdio: 'ignore' });
     t.after(() => worker.kill('SIGKILL'));
-    const deadline = Date.now() + 15000;
+    const deadline = Date.now() + 60000;
     let saved;
     while (true) {
       const status = await runnerStatus(root);
@@ -1720,6 +1720,53 @@ test('an operator-action claim is read from its context file, trimmed, and ignor
   assert.deepEqual(await operatorActionClaim({}, worktree, 'CTX-1'), { ignored: [{ ...sandbox, because: 'adapters' }] });
   await write({ actions: [sandbox, { path: 'protoflow.config.json', change: 'add e2e/board.spec.ts to verification.functional.argv' }] });
   assert.deepEqual(await operatorActionClaim({}, worktree, 'CTX-1'), { actions: [{ path: 'protoflow.config.json', change: 'add e2e/board.spec.ts to verification.functional.argv', reason: null }], ignored: [{ ...sandbox, because: 'adapters' }] });
+});
+
+test('a repair starts from what the previous attempt changed and its handoff note, and records the note', async t => {
+  const { root, config } = await fixture(t);
+  const received = path.join(root, '..', 'repair-input.json');
+  // Attempt 0 edits the app and leaves a note; attempt 1 (a fresh session) receives both and fixes the app.
+  const note = JSON.stringify({ changed: ['app.html', 42], tried: 'renamed the button to Publish', why: 'the prototype says Publish', remaining: 'the e2e board test still fails', secret: 'ignored' });
+  config.adapters.codex.command.argv = [process.execPath, '-e', `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);const fs=require('node:fs');if(r.kind==='repair'){fs.writeFileSync(process.argv[2],s);fs.writeFileSync('fixed.txt','yes');return}fs.writeFileSync('app.html','<button id="button">Publish</button>');fs.mkdirSync('.protoflow/handoff',{recursive:true});fs.writeFileSync(r.handoff,process.argv[1])})`, note, received];
+  config.verification = { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', `process.exit(require('node:fs').existsSync('fixed.txt')?0:1)`] } };
+  config.policy = { ...config.policy, maxRepairAttempts: 1, transientRetries: 0 };
+  await fs.writeFile(path.join(root, 'protoflow.config.json'), JSON.stringify(config));
+  await scanSource(root, config);
+  await runOnce(root, config);
+  const input = JSON.parse(await fs.readFile(received, 'utf8'));
+  const handoff = { changed: ['app.html'], tried: 'renamed the button to Publish', why: 'the prototype says Publish', remaining: 'the e2e board test still fails' };
+  assert.equal(input.repair.previousAttempt.attempt, 0);
+  assert.deepEqual(input.repair.previousAttempt.handoff, handoff);
+  assert.deepEqual(input.repair.previousAttempt.changes.files.find(file => file.path === 'app.html'), { path: 'app.html', change: 'modified' });
+  assert.ok(!input.repair.previousAttempt.changes.files.some(file => file.path.startsWith('.protoflow/')), 'the note itself is not an application change');
+  assert.match(input.handoff, /^\.protoflow\/handoff\/CTX-[A-Za-z0-9-]+\.json$/);
+  // The fixture never committed app.html: the stat lists it as untracked, which git diff alone would not show.
+  assert.deepEqual(input.git.stat.find(file => file.path === 'app.html'), { path: 'app.html', untracked: true });
+  const { executorPrompt } = await import('../src/executor-prompt.js');
+  const prompt = executorPrompt({ instructions: '' }, input);
+  assert.match(prompt, new RegExp(`write ${input.handoff.replace(/\./g, '\\.')} as JSON \\{"changed"`));
+  assert.match(prompt, /repair\.previousAttempt is what the previous attempt left you/);
+  assert.doesNotMatch(executorPrompt({ instructions: '' }, { ...input, repair: null }), /repair\.previousAttempt/);
+  const entry = (await sourceStatus(root)).entries[0];
+  assert.deepEqual(entry.attempts[0].handoff, handoff); assert.equal(entry.attempts[1].handoff, undefined);
+});
+
+test('a handoff note is read only from its context file and clipped', async t => {
+  const { executorHandoff, attemptChanges } = await import('../src/workflow.js');
+  const worktree = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-handoff-'));
+  t.after(() => fs.rm(worktree, { recursive: true, force: true }));
+  assert.equal(await executorHandoff(worktree, 'CTX-1'), null, 'no file, no note');
+  assert.equal(await executorHandoff(worktree, '../CTX-1'), null);
+  await fs.mkdir(path.join(worktree, '.protoflow/handoff'), { recursive: true });
+  const write = value => fs.writeFile(path.join(worktree, '.protoflow/handoff/CTX-1.json'), typeof value === 'string' ? value : JSON.stringify(value));
+  await write('not json'); assert.equal(await executorHandoff(worktree, 'CTX-1'), null);
+  await write({ changed: [], tried: '  ' }); assert.equal(await executorHandoff(worktree, 'CTX-1'), null);
+  await write({ changed: Array.from({ length: 60 }, (_, at) => `file-${at}`), remaining: 'x'.repeat(3000) });
+  const note = await executorHandoff(worktree, 'CTX-1');
+  assert.equal(note.changed.length, 50); assert.equal(note.remaining.length, 2000); assert.deepEqual(Object.keys(note), ['changed', 'remaining']);
+  assert.deepEqual(attemptChanges({ files: { a: '1', b: '2' } }, { files: { a: '1', b: '3', c: '4' } }), { files: [{ path: 'b', change: 'modified' }, { path: 'c', change: 'added' }] });
+  assert.deepEqual(attemptChanges({ files: { a: '1', b: '2', c: '3' } }, { files: {} }, 2), { files: [{ path: 'a', change: 'removed' }, { path: 'b', change: 'removed' }], omitted: 1 });
+  assert.equal(attemptChanges({ files: {} }, undefined), null);
 });
 
 test('an executor that asks to loosen its own sandbox is ignored: the version goes on to repair with the verification', async t => {

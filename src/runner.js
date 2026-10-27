@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
-import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview } from './workflow.js';
+import { createContext, executeContext, executorPlan, executorCommand, verify, loadArtifact, applicationFingerprint, createReview, decideReview, executorHandoff, attemptChanges } from './workflow.js';
 import { versionQueue, REJECTING } from './queue.js';
 import { loadVersion } from './versions.js';
 import { git, reclassifyVersion, scanSource, sourceStatus, supersedeVersions, validateSource } from './source.js';
@@ -671,7 +671,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       }
     }
     const stallRounds = config.policy?.stallRounds ?? 2, failureCounts = [];
-    let ignoredClaim = null;
+    let ignoredClaim = null, previousAttempt = null;
     for (let attempt = 0; attempt <= maximum; attempt++) {
       if (signal?.aborted) throw new Error('STOPPED: runner was interrupted');
       assertNoActiveProcesses(entry);
@@ -694,7 +694,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
       let provider = executors.primary;
       for (let retry = 0; ; retry++) {
         execution = await executeContext(runner.worktree, config, executionContext.id, {
-          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }) } : null, signal,
+          provider, execute: true, repair: attempt ? { attempt, verification: report, ...(previousAttempt && { previousAttempt }), ...(executionFailure && { execution: executionFailure }), ...(ignoredClaim && { operatorActionsIgnored: ignoredClaim }) } : null, signal,
           onBeforeSpawn: () => processStarting('execute'),
           onStart: async pid => { record.pid = pid; await processStarted('execute', pid); }
         });
@@ -735,6 +735,10 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         executionContext = await createContext(runner.worktree, config, entry.manifestId, { spec: config.runner?.spec, adr: config.runner?.adr, target, plan });
         record.contextId = executionContext.id;
       }
+      // A repair runs in a fresh session: it starts from what this attempt changed and the executor's own handoff note.
+      const handoff = await executorHandoff(runner.worktree, record.contextId);
+      if (handoff) record.handoff = handoff;
+      previousAttempt = { attempt, changes: attemptChanges(projectBefore, execution.projectAfter), ...(handoff && { handoff }) };
       const configAfter = await fs.readFile(configFile, 'utf8').catch(() => null);
       if (configBefore !== null && configAfter !== configBefore) {
         await fs.writeFile(configFile, configBefore);

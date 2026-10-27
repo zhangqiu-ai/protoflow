@@ -159,6 +159,7 @@ protoflow runner status --project /path/to/app
   - build 命令可用 `outputs` 列出必須產出的檔案或目錄（相對於執行建置的 worktree 根目錄）；exit 0 但缺少產出，或輸出含 Expo 吞掉的 `pod install` 失敗時，build 記為 FAIL。
   - 連續 `policy.stallRounds` 輪（預設 2，0 為關閉）修復後失敗項沒有減少時提前 BLOCKED，`reasonCode` 為 `stalled`，不把剩下的修復次數耗在同樣的失敗上。
   - 只有操作員能修的失敗（例如要改專案 AGENTS.md 保留給人的建置腳本或 `protoflow.config.json`）：執行代理把要改的檔案、內容與原因寫進 Context Package 的 `operatorActions` 檔案，驗收仍 FAIL 時版本立即 BLOCKED，`reasonCode` 為 `operator-action`，原因列出檔案與要改的內容，不再耗用修復次數。執行代理改了 worktree 的 `protoflow.config.json`（例如在 functional argv 加 spec）時，Runner 還原檔案、不交付這個改動；內容有變就不跑驗收，直接以 `operator-action` BLOCKED，原因列出改動的欄位，由操作員修改設定並 `runner configure` 後 retry。`stalled`、`repair-limit` 與 `operator-action` 的原因都附最後一次驗收的編號、失敗項，以及 functional 第一個失敗的測試與錯誤。驗收由 Runner 在執行代理的沙箱外執行；執行代理只因自己的沙箱跑不了測試（綁不了 loopback、啟動不了瀏覽器或 Electron）而要求修改代理 adapter（`protoflow.config.json` 的 `adapters.…`）時，Runner 忽略這項宣告（`operator-action-ignored`），帶著這次驗收結果進入下一輪修復。
+  - 每次 attempt 是新的執行代理 session：代理結束前把改了哪些檔案、做了什麼、為什麼、還剩什麼寫進 Context Package 的 `handoff` 檔案；下一輪修復請求帶 `repair.previousAttempt`（上一輪實際改動的檔案與這份筆記），`git.stat` 列出到目前為止每個檔案的增刪行數，讓修復從上一輪停下的地方開始，而不是重新探索專案。
   - `runner status` 的 `blocked` 列出卡住版本的 `reasonCode`、開始時間與原始錯誤前幾行；macOS 上版本阻塞或 Issue 需要人決定時發出桌面通知，可用 `notifications.desktop: false` 關閉。
   - 每次執行與驗證後，會終止仍留在 worktree 內的殘留程序。
   - 原型 diff 過大（單檔超過 32 KiB，或整頁產生在同一行）時，送給執行代理的 context 改為指向凍結檔（`frozenBefore`／`frozenAfter`），並附變更處摘錄；`git.diff` 不再和各檔 diff 重複。已凍結的版本直接 `runner retry` 即可套用，不需要重新凍結。見 [大型原型 diff](docs/integrations.md#codex)。
@@ -219,7 +220,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 角色分開，原型對齊與 GitHub Issues 走同一條鏈：Claude 規劃 → 執行者實作 → 引擎分層驗證 → Claude 驗收 → 交付。
 
 - **規劃者**（`adapters.planner`，`scripts/claude-adapter.js`，建議 `claude-opus-5-5`）：唯讀 session，為每個原型版本產出步驟、逐條驗收條件、需新增的測試與風險；它看得到驗收實際執行的 build 與 functional argv，`test` 條件只能由 functional 會跑的測試證明，需要其他檢查時回 `needs-human` 請操作員加進 functional；L3 版本只有在 `runner.adr` 已由真人核准並綁定該版 `manifestHash` 時才在決策範圍內規劃實作，否則交給人。
-- **執行者**（`policy.executor`）：可依工作分流（`routes`）：前端與原型交給 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），後端交給 Codex；任一邊額度不足時，同一個 attempt 改由另一邊重做。未配置時維持 Codex。
+- **執行者**（`policy.executor`）：可依工作分流（`routes`）：前端與原型交給 Claude Sonnet（`scripts/claude-exec-adapter.js`，OS 沙箱），後端交給 Codex；任一邊額度不足時，同一個 attempt 改由另一邊重做。未配置時維持 Codex。Claude 執行者加上 `--subagent-model` 時，可由 Opus 主導、分派 Sonnet 子 Agent 並行實作互不重疊的子任務，子 Agent 沿用同樣的沙箱與預算（見 [docs/integrations.md](docs/integrations.md)）。
 - **驗收者**（`adapters.independentReview.provider: "claude"`）：唯讀、全新 session，逐條檢查方案的驗收條件；條件要的檢查 verification 沒跑時回 `NOT_RUN`（配置缺口），不當成產品 FAIL；不得與規劃者或執行者是同一 session。
 - **GitHub Issues**（`issues.enabled`）：帶 `protoflow` 標籤（或設 `issues.all: true` 時所有開啟的 Issue，`protoflow:skip` 除外）、作者為 OWNER／MEMBER／COLLABORATOR 的 Issue 由規劃者分流（`planned`、`needs-info`、`needs-human`、`rejected`、`waiting-prototype`，決定以標示為 AI 的留言發布）。規劃者會讀佇列中尚未接受的原型版本；某版已經做了 Issue 要的變更時，Issue 改等那一版，該版接受並交付後自動結案。原型優先：target 閒置且原型都已交付時，`planned` 的 Issue 才在該 target 實作，並重新驗證最新已接受的原型版本，再審查、以 `Fixes #n` 的 PR 合併並結案。在 GitHub 關閉的 Issue 下一次同步記為 `closed` 並離開面板；沒回答就交回的 `needs-human` 只會再分流一次（規劃者改依自己的建議決定），之後要回答或關閉；面板可直接回答、交回或以「不處理，關閉」結案。
 

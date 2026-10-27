@@ -33,13 +33,20 @@ test('context requires mapped changes and remains dry without explicit execution
   assert.equal(dry.status, 'NOT_RUN');
   // The executor request carries the application hash and size, never one hash per file.
   assert.deepEqual(dry.request.project, { hash: context.project.hash, fileCount: Object.keys(context.project.files).length });
-  assert.deepEqual(dry.request.git, context.git);
+  const { stat, ...git } = dry.request.git;
+  assert.deepEqual(git, context.git); assert.ok(Array.isArray(stat));
+  assert.equal(dry.request.handoff, `.protoflow/handoff/${context.id}.json`);
   const status = ' D cache/entry.bin\n'.repeat(10000);
   const repairing = await executeContext(root, unordered, context.id, { repair: { attempt: 1, verification: { id: 'VER-x', status: 'FAIL', project: context.project, git: { head: 'abc', status, diff: '', available: true } } } });
-  const { git, ...rest } = repairing.request.repair.verification;
+  const { git: repaired, ...rest } = repairing.request.repair.verification;
   assert.deepEqual(rest, { id: 'VER-x', status: 'FAIL', project: dry.request.project });
-  assert.equal(git.head, 'abc'); assert.equal(git.diff, '');
-  assert.equal(git.status, `${status.slice(0, 64 * 1024)}\n[truncated: ${status.length} characters, 10001 lines]`);
+  assert.equal(repaired.head, 'abc'); assert.equal(repaired.diff, '');
+  assert.deepEqual(repaired.stat, [], 'deleted files show in the diff, not as untracked');
+  assert.equal(repaired.status, `${status.slice(0, 64 * 1024)}\n[truncated: ${status.length} characters, 10001 lines]`);
+  // The stat counts lines per file from the whole diff (a removed line starting with "--" included) and lists untracked files.
+  const diff = 'diff --git a/a.sql b/a.sql\nindex 1..2 100644\n--- a/a.sql\n+++ b/a.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++ new comment\n+select 1;\n context\ndiff --git a/b.js b/b.js\ndeleted file mode 100644\n--- a/b.js\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n';
+  const stated = await executeContext(root, unordered, context.id, { repair: { attempt: 1, verification: { id: 'VER-z', status: 'FAIL', project: context.project, git: { head: 'abc', status: ' M a.sql\n D b.js\n?? new file.txt\n', diff, available: true } } } });
+  assert.deepEqual(stated.request.repair.verification.git.stat, [{ path: 'a.sql', added: 2, removed: 1 }, { path: 'b.js', added: 0, removed: 1 }, { path: 'new file.txt', untracked: true }]);
   // Native build logs run to megabytes: the repair request keeps each stream's tail, where the failure is reported.
   const log = `${'compiling module\n'.repeat(200000)}error: Cannot find module 'expo-notifications'\n`;
   const failed = await executeContext(root, unordered, context.id, { repair: { attempt: 1, verification: { id: 'VER-y', status: 'FAIL', project: context.project, build: { status: 'FAIL', exitCode: 1, stdout: log, stderr: 'short', variants: { iphone: { status: 'FAIL', stdout: log }, android: { status: 'PASS', stdout: 'ok' } } }, functional: { status: 'NOT_RUN' }, artifactHashes: { a: 'x', b: 'y' } } } });
@@ -151,6 +158,19 @@ test('repair does not retry NOT_RUN checks and escalates to pending human review
   assert.equal(result.executions.length, 0);
   const review = JSON.parse(await readFile(path.join(root, '.protoflow/reviews', `${result.reviewId}.json`)));
   assert.equal(review.status, 'pending');
+});
+test('protoflow repair gives each attempt the files the previous one changed and its handoff note', async t => {
+  const { root, config, manifest } = await target(t);
+  const received = path.join(root, '..', 'second-attempt.json');
+  const note = JSON.stringify({ changed: ['app.html'], tried: 'first fix', remaining: 'functional still fails' });
+  config.adapters.codex.command = { argv: [process.execPath, '-e', `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s);const fs=require('node:fs');if(r.repair.attempt===2){fs.writeFileSync(process.argv[2],s);fs.writeFileSync('fixed.txt','yes');return}fs.writeFileSync('app.html','<main>first fix</main>');fs.mkdirSync('.protoflow/handoff',{recursive:true});fs.writeFileSync(r.handoff,process.argv[1])})`, note, received] };
+  const repairing = { ...config, policy: { ...config.policy, maxRepairAttempts: 2 }, verification: { build: { argv: [process.execPath, '-e', 'process.exit(0)'] }, functional: { argv: [process.execPath, '-e', `process.exit(require('node:fs').existsSync('fixed.txt')?0:1)`] } } };
+  const result = await repair(root, repairing, manifest.id, { execute: true });
+  assert.equal(result.executions.length, 2);
+  const input = JSON.parse(await readFile(received, 'utf8'));
+  assert.deepEqual(input.repair.previousAttempt.handoff, { changed: ['app.html'], tried: 'first fix', remaining: 'functional still fails' });
+  assert.equal(input.repair.previousAttempt.attempt, 1);
+  assert.deepEqual(input.repair.previousAttempt.changes.files.find(file => file.path === 'app.html'), { path: 'app.html', change: 'modified' });
 });
 test('a build that exits 0 still fails without its outputs or with a swallowed pod install failure, and is not retried', async t => {
   const { root, config, manifest } = await target(t);
