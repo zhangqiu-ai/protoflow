@@ -306,6 +306,40 @@ test('T1 structure keeps static text that repeats a dynamic field text', () => {
   assert.equal(compareStructure(page, state, shot('Password Sign in', ''), shot('Sign in', 'Password')).status, 'FAIL');
 });
 
+test('T1 structure keeps static row text that repeats a search field value when the rows have dynamic children', () => {
+  // siyue ai.history.search: the field reads "phrases", and each matching row title contains it beside a dynamic date.
+  const page = { anchors: [
+    { id: 'history', role: 'screen', parent: null },
+    { id: 'history.search', role: 'input', parent: 'history', dynamic: true },
+    { id: 'history.items', role: 'region', parent: 'history' },
+    { id: 'history.items.1', role: 'action', parent: 'history.items' },
+    { id: 'history.items.1-value', role: 'element', parent: 'history.items.1', dynamic: true },
+    { id: 'history.items.2', role: 'action', parent: 'history.items' },
+    { id: 'history.items.2-value', role: 'element', parent: 'history.items.2', dynamic: true }
+  ] };
+  const shot = (container, items, rows, dates, dom = false) => {
+    const result = { elements: {
+      history: { count: 1, visible: true, bounds: box(0, 0, 400, 300), text: container },
+      'history.search': { count: 1, visible: true, interactive: true, editable: true, bounds: box(0, 0, 400, 40), text: 'phrases' },
+      'history.items': { count: 1, visible: true, bounds: box(0, 40, 400, 100), text: items },
+      'history.items.1': { count: 1, visible: true, interactive: true, bounds: box(0, 40, 400, 50), text: rows[0] },
+      'history.items.1-value': { count: 1, visible: true, bounds: box(300, 40, 100, 50), text: dates[0] },
+      'history.items.2': { count: 1, visible: true, interactive: true, bounds: box(0, 90, 400, 50), text: rows[1] },
+      'history.items.2-value': { count: 1, visible: true, bounds: box(300, 90, 100, 50), text: dates[1] }
+    } };
+    if (dom) for (const facts of Object.values(result.elements)) facts.dynamicExcluded = true;
+    return result;
+  };
+  const prototype = shot('Back Returns phrases Ordering phrases Note', 'Returns phrases Ordering phrases', ['Returns phrases', 'Ordering phrases'], ['Today', 'Sep 18'], true);
+  // The iOS container leaves the field out and reads the rows without their dates.
+  assert.deepEqual(compareStructure(page, state, prototype, shot('Back Returns phrases Ordering phrases Note', 'Returns phrases Ordering phrases', ['Returns phrases', 'Ordering phrases'], ['Today', 'Sep 20'])).reasons, []);
+  // Rows and a container that read the dates too still compare equal.
+  assert.deepEqual(compareStructure(page, state, prototype, shot('Back Returns phrases Today Ordering phrases Sep 20 Note', 'Returns phrases Today Ordering phrases Sep 20', ['Returns phrases Today', 'Ordering phrases Sep 20'], ['Today', 'Sep 20'])).reasons, []);
+  // A row title that lost the word still fails.
+  assert.deepEqual(compareStructure(page, state, prototype, shot('Back Returns Ordering phrases Note', 'Returns Ordering phrases', ['Returns', 'Ordering phrases'], ['Today', 'Sep 20'])).reasons,
+    ['history: text "Back Returns phrases Ordering phrases Note" vs "Back Returns Ordering phrases Note"', 'history.items: text "Returns phrases Ordering phrases" vs "Returns Ordering phrases"', 'history.items.1: text "Returns phrases" vs "Returns"']);
+});
+
 test('T1 structure removes a longer dynamic text before a shorter one it contains', () => {
   const page = { anchors: [
     { id: 'tasks', role: 'screen', parent: null },
