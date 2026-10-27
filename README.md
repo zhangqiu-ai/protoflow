@@ -206,7 +206,7 @@ protoflow repair  --project /path/to/app --manifest MANIFEST_ID --execute  # 驗
 
 在 `autoApprove` 下，驗收用到維護者豁免的版本不會自動核准：交付停在 BLOCKED（`WAIVER_APPROVAL_REQUIRED`），等人在儀表板核准那份驗收。審查 FAIL 且附 findings 時，Runner 會自動記錄模型拒收並重開版本修復（每版最多 3 次）。因暫時性網路故障而 BLOCKED 的審查會自動重新審查；審查判斷本身永不重擲。GitHub 的只讀請求遇到暫時性錯誤會原地重試（`PROTOFLOW_NETWORK_RETRIES`，預設 2）。
 
-需要人工介入時，用 `delivery sync --retry-review --delivery DLV-… --review AIR-…` 明確取得新的審查。`gh` 必須已登入，且對目標 repo 有寫入權。細節見 [自動交付](docs/git-runner.md#自動交付commit--pr--合併) 與 [獨立 AI review gate](docs/independent-review.md)。
+需要人工介入時，用 `delivery sync --retry-review --delivery DLV-… --review AIR-…` 明確取得新的審查；審查 FAIL 時用 `delivery reject-review --delivery DLV-… --review AIR-…` 記錄模型拒收並讓 Runner 重開版本修復。`gh` 必須已登入，且對目標 repo 有寫入權。細節見 [自動交付](docs/git-runner.md#自動交付commit--pr--合併) 與 [獨立 AI review gate](docs/independent-review.md)。
 
 **沒有配置 `runner.delivery` 時，引擎不會 add、commit、push、合併或部署任何東西。**
 
@@ -248,7 +248,7 @@ protoflow baseline create --project /path/to/app --review REVIEW_ID
 | `runner start [--once]` / `status` / `retry [--recover-unknown-start] [--answer text]` / `supersede` / `reclassify` / `rebase` / `configure` / `gc [--apply]` | 前景 Runner、狀態、恢復、以後續版本取代、以目前引擎重新分級、在移動後的基底上重新開始、綁定新設定、回收 worktree |
 | `runner start --service` / `runner service install [--env K=V]` \| `uninstall` \| `status` | 常駐 Runner：macOS launchd 登入即啟動、異常自動重啟、心跳健康檢查（執行中每分鐘心跳；連續失敗時為 DEGRADED，心跳停止 5 分鐘以上為 STALLED） |
 | `dashboard add\|remove\|list\|snapshot` / `dashboard serve [--port] [--service]` / `dashboard service install\|uninstall\|status` | 多專案本機儀表板：即時進度、執行代理動作、驗收證據與核准；常駐服務在引擎升版後自動重新啟動（見 [docs/dashboard.md](docs/dashboard.md)） |
-| `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` | 自動交付與明確重新審查；`delivery status` 分開計數通過與附豁免通過的版本 |
+| `delivery sync [--retry-review --delivery ID --review ID]` / `delivery status` / `delivery reject-review --delivery ID --review ID` | 自動交付、明確重新審查與操作者觸發的模型拒收；`delivery status` 分開計數通過與附豁免通過的版本 |
 | `waiver request --verification ID --scene ID --tier structure\|tokens\|layout [--variant ID] --reason TEXT [--engine-issue URL] --requested-by NAME` / `waiver list` / `waiver show --waiver ID` | 申請維護者豁免（只建立「申請中」，核准只在儀表板）／列出與查看豁免 |
 | `project pause [--reason TEXT] [--by NAME]` / `project resume` / `project status` | 暫停開發（Runner 只凍結新提交，不執行版本、不分流或修復 Issue）／恢復開發（被停止的版本重新排入）／暫停狀態；面板也能暫停與恢復 |
 | `issues sync` / `issues status` | 分流帶標籤的 GitHub Issue／Issue 狀態（`issues.enabled`；實作由 Runner 進行） |

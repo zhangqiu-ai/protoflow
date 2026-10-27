@@ -261,6 +261,12 @@ export async function deliveryReport(root, config = {}, target = null) {
     const versions = entries.filter(entry => (delivery.versions ?? []).includes(entry.manifestId) && entry.deliveryId === delivery.id);
     const waived = await waivedVersions(root, versions);
     delivery.counts = { passed: versions.length - waived.length, passedWithWaivers: waived.length, waivers: waived.flatMap(item => item.waivers) };
+    // Without autoApprove a rejecting independent review waits for a person: say how to send the version back.
+    if (!config.policy?.autoApprove && ['BLOCKED', 'FAIL'].includes(delivery.status) && /^AIR-[A-Za-z0-9-]+$/.test(delivery.independentReviewId ?? '')) {
+      const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${delivery.independentReviewId}.json`), null);
+      const verdict = record ? await recordedVerdict(root, record).catch(() => null) : null;
+      if (verdict?.status === 'FAIL' && verdict.findings?.length) delivery.next = `protoflow delivery reject-review --delivery ${delivery.id} --review ${delivery.independentReviewId}${target ? ` --target ${target}` : ''}, or 退回修改 on the dashboard`;
+    }
   }
   return state;
 }

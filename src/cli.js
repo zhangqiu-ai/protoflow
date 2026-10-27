@@ -13,7 +13,7 @@ import { suggestMappings } from './mappings.js';
 import { lintAnchors, suggestAnchorsCommand, showContract, migrateCommand } from './anchor-commands.js';
 import { scanSource } from './source.js';
 import { sourceView } from './streams.js';
-import { startRunner, retryRunner, supersedeRunner, reclassifyRunner, rebaseRunner, configureRunner, runnerStatus, doctor } from './runner.js';
+import { startRunner, retryRunner, supersedeRunner, reclassifyRunner, rebaseRunner, configureRunner, runnerStatus, doctor, rejectIndependentReview } from './runner.js';
 import { collectRunnerWorktrees } from './runner-gc.js';
 import { installService, uninstallService, serviceStatus, installDashboardService, uninstallDashboardService, dashboardServiceStatus, DASHBOARD_LABEL } from './runner-service.js';
 import { dashboardSnapshot, addProject, removeProject, listProjects } from './dashboard-data.js';
@@ -72,6 +72,9 @@ Usage: protoflow <command> [action] --project <path> [options]
                                          Explicit fresh independent review of the selected current attempt:
                                          an unattested PASS after restart, a BLOCKED attempt before approval,
                                          or a transient network BLOCK after approval/push (never a FAIL verdict)
+  delivery reject-review --delivery id --review AIR-id [--target id]
+                                         Record the model rejection a FAIL independent review gets under
+                                         policy.autoApprove, so the version reopens for repair (same limit)
   waiver request --verification id --scene id --tier structure|tokens|layout [--variant id]
          --reason text [--engine-issue url] --requested-by name|ai:<agent>
                                          Ask the maintainer to waive one failing scene tier of one prototype version
@@ -181,7 +184,8 @@ try {
             return syncDeliveries(root, config, { target: values.target ?? null, retryIndependentReview: { deliveryId: requireOption('delivery'), reviewId: requireOption('review') } });
           }
           if (action === 'status') return deliveryReport(root, config, values.target ?? null);
-          throw new Error('Use delivery sync|status');
+          if (action === 'reject-review') return rejectIndependentReview(root, config, { target: values.target ?? null, deliveryId: requireOption('delivery'), reviewId: requireOption('review') });
+          throw new Error('Use delivery sync|status|reject-review');
         case 'waiver':
           if (action === 'request') {
             const requestedBy = requireOption('requested-by').trim();

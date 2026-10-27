@@ -151,7 +151,13 @@ Git manifest 以 source ordinal 排序，避免同毫秒或 Git 作者日期造�
 
 - **用到豁免的版本**：交付中只要有版本的驗收帶 `waivers`，就不建立自動核准；交付停在 `BLOCKED`，`reasonCode: "WAIVER_APPROVAL_REQUIRED"`，原因列出版本、驗收與豁免編號。人在儀表板核准那份驗收（人工審查綁定 `verificationHash`）後，下一次 `delivery sync` 繼續，交付的 `approval` 記為 `{ kind: "human", reviewId, reviewer, independentReviewId, waivers }`，並以 `waivedVersions` 列出每個附豁免的版本與核准它的審查。PR 留言與 `delivery status` 的 `counts`（`passed`、`passedWithWaivers`、`waivers`）把附豁免通過與一般通過分開計數。
 
-未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。
+未啟用 `autoApprove` 時行為不變，仍需 `review request-changes` 與 `delivery sync --retry-review`。審查 FAIL 且有 findings 時，`delivery status` 的 `next` 會提示由操作者觸發同一個模型拒收：
+
+```bash
+protoflow delivery reject-review --delivery DLV-... --review AIR-... [--target web] --project /path/to/app
+```
+
+它與自動拒收相同：同一個 `ai:codex-independent-review:<session>` 身分、`reviewerKind: "model"`、`automated-rejections/<AIR>.json` 證據、`auto-rejected` 事件（帶 `operator: true`），notes 標明由操作者觸發；同一版本已重開 3 次時拒絕執行。只接受該交付目前被這份 AIR 擋住（`BLOCKED`／`FAIL`）的情況；下一次 `runner start` 重開版本並修復。也可在儀表板以人工身分「退回修改」。
 
 交付對 GitHub 的只讀請求（`git ls-remote`、`git fetch`、`gh api` 讀取、`gh pr list/view/checks`）遇到暫時性網路錯誤時，原地重試 `PROTOFLOW_NETWORK_RETRIES` 次（預設 2，間隔 1 秒、2 秒）；推送、建立 PR、留言與合併不原地重試，因為遺失的回應可能掩蓋已完成的寫入，這些由上述的步驟層級恢復處理。實測中本機代理約有 8% 的請求失敗，一次交付需要數十個請求。
 

@@ -429,7 +429,7 @@ export function transientReviewBlock(record, verdict, attempts) {
   const transient = (record.retryable === true && record.reasonCode === 'TRANSIENT_INFRASTRUCTURE') || transientFailure(record.reason);
   return transient && attempts < MAX_REVIEW_ATTEMPTS;
 }
-async function rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent }) {
+async function rejectAutomatically(root, config, stream, runner, delivery, record, verdict, { onEvent, operator = false }) {
   const progress = await loadProgress(root, config, stream);
   const entry = progress.entries.find(item => item.manifestId === delivery.versions.at(-1));
   if (!entry?.verificationId) return null;
@@ -445,11 +445,33 @@ async function rejectAutomatically(root, config, stream, runner, delivery, recor
   const review = await createReview(runner.worktree, config, entry.manifestId, entry.verificationId);
   const decided = await decideReview(runner.worktree, config, review.id, {
     status: 'changes_requested', reviewer: `${AUTOMATED_REVIEWER}:${record.sessionId}`, reviewerKind: 'model', model: { evidence, session: record.sessionId },
-    notes: `Automated rejection of independent AI review ${record.id} under policy.autoApprove; findings are claims to check against the evidence.`
+    notes: operator
+      ? `Rejection of independent AI review ${record.id} run by an operator (delivery reject-review); findings are claims to check against the evidence.`
+      : `Automated rejection of independent AI review ${record.id} under policy.autoApprove; findings are claims to check against the evidence.`
   });
-  await onEvent({ event: 'auto-rejected', deliveryId: delivery.id, reviewId: record.id, rejection: decided.id, findings: verdict.findings.length });
+  await onEvent({ event: 'auto-rejected', deliveryId: delivery.id, reviewId: record.id, rejection: decided.id, findings: verdict.findings.length, ...(operator && { operator: true }) });
   // Progress, not a block: the next pass reopens the version, so a single-target runner must not stop here.
   return { status: 'REOPENED', reason: `Independent review ${record.id} FAIL; recorded automated rejection ${decided.id}, the version reopens for repair`, rejection: decided.id };
+}
+/**
+ * An operator records the rejection policy.autoApprove would record for a failed independent review: without autoApprove
+ * the runner leaves the FAIL to a person. Same evidence, model reviewer identity and reopening limit; the next pass
+ * reopens the version for repair.
+ */
+export async function rejectIndependentReview(root, config = {}, { target = null, deliveryId, reviewId }) {
+  if (!/^AIR-[A-Za-z0-9-]+$/.test(reviewId ?? '')) throw new Error('--review needs an AIR-… independent review id');
+  const delivery = (await deliveryStatus(root, config, target)).deliveries.find(item => item.id === deliveryId);
+  if (!delivery || !['BLOCKED', 'FAIL'].includes(delivery.status) || delivery.independentReviewId !== reviewId) throw new Error(`Delivery ${deliveryId} is not blocked by independent review ${reviewId}`);
+  const record = await readJson(await projectPath(root, `.protoflow/delivery/independent-reviews/${reviewId}.json`), null);
+  const verdict = record ? await recordedVerdict(root, record).catch(() => null) : null;
+  if (verdict?.status !== 'FAIL' || !verdict.findings?.length) throw new Error(`Independent review ${reviewId} did not reject the delivery with findings`);
+  const runner = await readJson(await projectPath(root, runnerStatePath(config, target)), null);
+  if (!runner?.worktree) throw new Error('delivery reject-review needs an initialized runner worktree');
+  const onEvent = event => recordEvent(root, { at: new Date().toISOString(), ...(target && { target }), ...event });
+  const result = await rejectAutomatically(root, config, target, runner, delivery, record, verdict, { onEvent, operator: true });
+  if (!result) throw new Error(`Version ${delivery.versions?.at(-1)} has no verification to send back; it may already be reopened`);
+  if (result.status !== 'REOPENED') throw new Error(result.reason);
+  return { status: 'PASS', deliveryId, reviewId, rejection: result.rejection, reason: result.reason, next: 'runner start reopens the version and repairs it' };
 }
 /** Durable launch intent, PID and completion of each child process of an attempt. */
 function processHooks(root, config, stream, state, record) {
