@@ -1416,6 +1416,34 @@ test('FAKE provider: without autoApprove a person sends a reviewer-rejected vers
   await assertNoPublication(f);
 });
 
+test('FAKE provider: without autoApprove an operator records the model rejection with delivery reject-review', async t => {
+  const { rejectIndependentReview } = await import('../src/runner.js');
+  const f = await fixture(t); process.env.FAKE_REVIEW_MODE = 'fail';
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'BLOCKED'); delete process.env.FAKE_REVIEW_MODE;
+  // delivery status says how to send the version back, instead of leaving the operator to rebuild the evidence.
+  const blocked = (await deliveryReport(f.root, f.config)).deliveries[0];
+  assert.equal(blocked.next, `protoflow delivery reject-review --delivery ${blocked.id} --review ${blocked.independentReviewId}, or 退回修改 on the dashboard`);
+  assert.equal((await deliveryReport(f.root, { ...f.config, policy: { ...f.config.policy, autoApprove: true } })).deliveries[0].next, undefined, 'under autoApprove the runner rejects it itself');
+  await assert.rejects(rejectIndependentReview(f.root, f.config, { deliveryId: blocked.id, reviewId: 'AIR-other' }), /is not blocked by independent review AIR-other/);
+  const result = await rejectIndependentReview(f.root, f.config, { deliveryId: blocked.id, reviewId: blocked.independentReviewId });
+  assert.equal(result.status, 'PASS'); assert.match(result.rejection, /^REV-/); assert.equal(result.next, 'runner start reopens the version and repairs it');
+  // The same rejection autoApprove records: model reviewer, evidence bound to the verification, the reviewer's findings.
+  const review = await readJson(path.join(f.worktree, `.protoflow/reviews/${result.rejection}.json`));
+  assert.deepEqual([review.status, review.reviewerKind, review.verificationId], ['changes_requested', 'model', 'VER-1']);
+  assert.match(review.reviewer, /^ai:codex-independent-review:/); assert.match(review.notes, /run by an operator \(delivery reject-review\)/);
+  assert.match(review.findings[0].description, /Synthetic fixture finding/);
+  const evidence = await readJson(path.join(f.worktree, `.protoflow/delivery/automated-rejections/${blocked.independentReviewId}.json`));
+  assert.deepEqual([evidence.kind, evidence.status, evidence.independentReviewId, evidence.verificationId], ['independent-model-review', 'FAIL', blocked.independentReviewId, 'VER-1']);
+  const events = (await fs.readFile(path.join(f.root, '.protoflow/runner/events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.filter(event => event.event === 'auto-rejected').map(event => [event.deliveryId, event.rejection, event.operator]), [[blocked.id, result.rejection, true]]);
+  // The next pass reopens the version and retires the rejected delivery; nothing was published.
+  assert.equal((await runOnce(f.root, f.config)).status, 'NOT_RUN');
+  assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'REVOKED');
+  assert.equal((await sourceStatus(f.root)).entries[0].status, 'PENDING');
+  await assert.rejects(rejectIndependentReview(f.root, f.config, { deliveryId: blocked.id, reviewId: blocked.independentReviewId }), /is not blocked by independent review/);
+  await assertNoPublication(f);
+});
+
 test('FAKE provider: a single-target runner keeps going after an automated rejection instead of stopping as stuck', async t => {
   const { startRunner } = await import('../src/runner.js');
   const f = await fixture(t); f.config.policy.autoApprove = true; process.env.FAKE_REVIEW_MODE = 'fail';

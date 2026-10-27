@@ -98,7 +98,7 @@ v1 與單一 target 的 v2 專案沿用上述路徑與分支。`targets` 有多�
 - 兄弟 target 合併後 base 會前進，使本 target HEAD 不再以 current base 為祖先。此時交付先在 commit 後檢查：base 自分叉點以來變更的檔案若只在兄弟 target root、prototype 或 runtime 目錄內，或與本 target HEAD 的內容逐位元相同（例如 `runner configure` 已同步進 worktree、並以此驗收過的配置變更），才以 `--no-ff` 將精確 base SHA merge 進本 target worktree，且合併前後本 target 的 application hash 必須相同；否則交付以 `code: "BASE_DIVERGED"` BLOCKED；若 base 以不同內容改了共享頂層檔案或本 target root，也是如此。Runner 收到後自動在新 base 上重新驗收：把該 base merge 進本 target worktree（衝突則 BLOCKED，人工解決後 `runner retry`），以 reverify 模式（允許已驗收版本）重新驗證（attempt 帶 `reverify.baseSha` 與先前的 verificationId），PASS 才以新 verification 交付並重新做獨立審查；不通過則 BLOCKED，等待修復。合併結果記錄於 delivery `integration`，PR 留言標示，review 針對包含該 base 的 HEAD 與 `base..HEAD` diff 執行。單一 target 不做此整合，base 前進仍 BLOCKED。
 - merge 後的 Runner 對齊只作用於該 target 自身的 `.protoflow/runner/<id>/state.json` 與 worktree。
 
-正常 sync 不自動重跑 BLOCKED review。確認失敗原因後，可用 CLI `protoflow delivery sync --retry-review --delivery <DLV> --review <AIR> [--target <id>]` 或明確接口啟動新 attempt：
+正常 sync 不自動重跑 BLOCKED review。reviewer 回傳 FAIL 且有 findings 時不能重試；未啟用 `autoApprove` 時可用 `protoflow delivery reject-review --delivery <DLV> --review <AIR> [--target <id>]` 以模型身分記錄拒收並讓 Runner 重開版本（見 [Git Runner](git-runner.md)）。確認失敗原因後，可用 CLI `protoflow delivery sync --retry-review --delivery <DLV> --review <AIR> [--target <id>]` 或明確接口啟動新 attempt：
 
 ```js
 await syncDeliveries(projectRoot, config, {
