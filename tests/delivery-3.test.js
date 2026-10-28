@@ -124,6 +124,19 @@ test('FAKE GitHub: a non-main base branch receives the PR and merge, and the PR 
   assert.equal((await deliveryStatus(f.root)).deliveries[0].status, 'MERGED');
 });
 
+test('FAKE GitHub: a single-target project delivers the same with --target <its target> as without, and an unknown target blocks before committing', async t => {
+  const f = await fixture(t);
+  process.env.FAKE_GH_REAL_REMOTE = f.remote; process.env.FAKE_GH_ROOT = f.root;
+  const unknown = await syncDeliveries(f.root, f.config, { target: 'web' });
+  assert.equal(unknown.status, 'BLOCKED'); assert.equal(unknown.reason, 'Unknown target: web');
+  assert.deepEqual((await deliveryStatus(f.root)).deliveries, []);
+  const { mappings, ...rest } = f.config;
+  const config = { ...rest, schemaVersion: 2, targets: [{ id: 'web', platform: 'web', root: '.' }] };
+  const result = await syncDeliveries(f.root, config, { target: 'web' }); assert.equal(result.status, 'PASS', JSON.stringify(result));
+  const [delivery] = (await deliveryStatus(f.root)).deliveries;
+  assert.equal(delivery.status, 'MERGED'); assert.equal(delivery.error ?? null, null);
+});
+
 test('FAKE GitHub: a reused open PR gets its stale trailer replaced so the body keeps exactly one', async t => {
   const f = await fixture(t);
   f.config.runner.delivery.prBodyTrailers = ['OpenSpec-Change: rewrite-mobile-ui'];

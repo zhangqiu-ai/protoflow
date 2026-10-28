@@ -595,6 +595,11 @@ export async function syncDeliveries(root, config, { worktree, retryIndependentR
     const statuses = Object.values(results).map(result => result.status);
     return { status: ['BLOCKED', 'FAIL', 'PASS'].find(item => statuses.includes(item)) ?? (statuses.every(item => item === 'NOT_RUN') ? 'NOT_RUN' : 'IDLE'), targets: results };
   }
+  // A single-target project has one stream: naming its own target is the same as naming none.
+  if (!isMultiTarget(config) && target) {
+    if (target !== config.targets?.[0]?.id) return { status: 'BLOCKED', reason: `Unknown target: ${target}` };
+    target = null;
+  }
   const branch = deliveryBranch(config, target);
   if (branch === options.baseBranch || ['main', 'master'].includes(branch)) return { status: 'BLOCKED', reason: 'Delivery requires a dedicated branch; never push the base/main branch' };
   try { for (const name of [branch, options.baseBranch]) await git(root, ['check-ref-format', '--branch', name]); }
