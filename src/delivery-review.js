@@ -145,7 +145,7 @@ async function remoteState(worktree, config, target, issue = null) {
 }
 /** The stream a review belongs to: null for single-target projects, otherwise a configured target id. */
 function reviewTarget(config, target) {
-  if (!isMultiTarget(config)) { if (target) throw blocked('Single-target delivery review takes no target'); return null; }
+  if (!isMultiTarget(config)) { if (target && target !== config.targets?.[0]?.id) throw blocked('Single-target delivery review takes no target'); return null; }
   if (!config.targets.some(item => item.id === target)) throw blocked('Independent review requires the delivering target');
   return target;
 }
