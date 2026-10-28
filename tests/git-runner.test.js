@@ -72,6 +72,40 @@ test('local Git fixture: rewrite/rewind fails explicitly and preserves cursor an
   assert.equal(state.status, 'HISTORY_REWRITTEN'); assert.equal(state.scannedSha, shas[1]); assert.equal(state.entries.length, 2);
   await assert.rejects(runOnce(root, config), /SOURCE_HISTORY_REWRITTEN/);
 });
+test('local Git fixture: a back-merge that leaves the cursor on the second parent is scanned, not taken for a rewrite', async t => {
+  const { root, source, config, shas } = await fixture(t);
+  await scanSource(root, config);
+  const commit = async (file, text, message) => { await fs.writeFile(path.join(source, file), text); await git(source, ['add', file]); await git(source, ['commit', '-m', message]); return (await git(source, ['rev-parse', 'HEAD'])).trim(); };
+  // Local work forks from the scanned tip while the branch moves on; the scan reaches the branch's new commit first.
+  await git(source, ['checkout', '-q', '-b', 'local']);
+  await commit('prototype/local.css', 'p{margin:0}', 'Local prototype work');
+  await git(source, ['checkout', '-q', 'main']);
+  const moved = await commit('prototype/styles.css', 'button{color:navy}', 'Branch moves on');
+  const [branchVersion] = (await scanSource(root, config)).added;
+  // The local side merges the branch in (local first parent) and is pushed: the cursor is now only on the second parent.
+  const backMerge = async () => {
+    await git(source, ['checkout', '-q', 'local']); await git(source, ['merge', '-q', '--no-ff', '-m', 'Back-merge', 'main']);
+    const merge = (await git(source, ['rev-parse', 'HEAD'])).trim();
+    await git(source, ['checkout', '-q', 'main']); await git(source, ['update-ref', 'refs/heads/main', merge]); await git(source, ['reset', '-q', '--hard', merge]);
+    return merge;
+  };
+  const merge = await backMerge();
+  const scanned = await scanSource(root, config);
+  assert.equal(scanned.state.status, 'READY'); assert.equal(scanned.state.scannedSha, merge);
+  assert.deepEqual(scanned.state.entries.map(entry => entry.sha), [...shas, moved, merge]);
+  const [before, after] = await Promise.all([branchVersion, scanned.added[0]].map(id => fs.readFile(path.join(root, '.protoflow/manifests', `${id}.json`), 'utf8').then(JSON.parse)));
+  assert.equal(scanned.added.length, 1); assert.equal(after.beforeHash, before.afterHash);
+  const frozen = await loadVersion(root, config, after);
+  assert.equal(await fs.readFile(path.join(root, frozen.prototypeDir, 'local.css'), 'utf8'), 'p{margin:0}');
+  assert.equal(await fs.readFile(path.join(root, frozen.prototypeDir, 'styles.css'), 'utf8'), 'button{color:navy}');
+  // A back-merge that changes no prototype file adds no version and still moves the cursor.
+  await git(source, ['checkout', '-q', 'local']); await commit('notes.txt', 'local notes', 'Local notes');
+  await git(source, ['checkout', '-q', 'main']); await commit('notes-branch.txt', 'branch notes', 'Branch notes');
+  await scanSource(root, config);
+  const quiet = await backMerge();
+  const rescanned = await scanSource(root, config);
+  assert.deepEqual(rescanned.added, []); assert.equal(rescanned.state.scannedSha, quiet);
+});
 test('local Git fixture: transport failure retains durable progress and catches up after reconnection', async t => {
   const { root, source, config, shas } = await fixture(t);
   await git(source, ['update-ref', 'refs/heads/main', shas[0]]); await scanSource(root, config);
