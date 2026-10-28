@@ -104,6 +104,32 @@ export function readClaudeTrace(trace, { executor = false } = {}) {
 }
 
 /** The headless argv: read-only tools, no prompts, no user settings, MCP or saved session; one schema-bound answer. */
+/** Text kept per string in executor trace evidence; images (`data`, `base64`) are never kept. */
+export const CLAUDE_TRACE_TEXT_LIMIT = 8 * 1024;
+const omitted = text => `[ProtoFlow omitted ${text.length} characters, sha256 ${hash(text)}]`;
+/**
+ * An executor stream-json event as evidence: stream-json echoes every image the session reads as base64 (twice, in the
+ * tool result and in tool_use_result) and every tool output in full, so a few screenshots fill the engine's 4 MiB
+ * capture. Within assistant and user events an image payload is replaced by its size and hash and a longer string
+ * keeps its head and tail; tool names, ids, inputs' short fields and error prefixes, which readClaudeTrace checks,
+ * stay as they are. Other events are returned unchanged.
+ */
+export function compactClaudeEvent(event, limit = CLAUDE_TRACE_TEXT_LIMIT) {
+  if (event?.type !== 'assistant' && event?.type !== 'user') return event;
+  const compact = (value, key) => {
+    if (typeof value === 'string') {
+      if ((key === 'data' || key === 'base64') && value.length > 256) return omitted(value);
+      if (value.length <= limit) return value;
+      const head = Math.floor(limit * 3 / 4), tail = limit - head;
+      return `${value.slice(0, head)}…${omitted(value.slice(head, value.length - tail))}…${value.slice(value.length - tail)}`;
+    }
+    if (Array.isArray(value)) return value.map(item => compact(item));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, compact(item, name)]));
+    return value;
+  };
+  return compact(event);
+}
+
 export function claudeArgv({ schema, model, maxBudgetUsd }) {
   return [
     '-p', '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(schema),

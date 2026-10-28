@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readClaudeTrace, claudeArgv, resolveClaudeExecutable, CLAUDE_READ_ONLY_TOOLS } from '../src/claude.js';
+import { readClaudeTrace, claudeArgv, resolveClaudeExecutable, CLAUDE_READ_ONLY_TOOLS, compactClaudeEvent } from '../src/claude.js';
 import { hash } from '../src/util.js';
 
 const adapter = fileURLToPath(new URL('../scripts/claude-adapter.js', import.meta.url));
@@ -210,4 +210,42 @@ test('FAKE CLI only: --subagent-model reaches the executor argv and adds the del
   assert.equal(without.args[without.args.indexOf('--tools') + 1], 'Read,Grep,Glob,Edit,Write,Bash');
   assert.ok(!without.args.includes('--agents'));
   assert.doesNotMatch(without.input, /protoflow-worker/);
+});
+
+test('executor trace evidence drops image payloads and keeps the head and tail of long text', () => {
+  const png = 'A'.repeat(4096), log = `HEAD${'x'.repeat(20000)}TAIL`;
+  const event = { type: 'user', session_id: 'fake-session-a', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: [{ type: 'image', source: { type: 'base64', data: png, media_type: 'image/png' } }, { type: 'text', text: log }] }] }, tool_use_result: { type: 'image', file: { base64: png, type: 'image/png', originalSize: 3000 } } };
+  const compacted = compactClaudeEvent(event);
+  const [image, text] = compacted.message.content[0].content;
+  assert.match(image.source.data, /^\[ProtoFlow omitted 4096 characters, sha256 [0-9a-f]{64}\]$/);
+  assert.equal(compacted.tool_use_result.file.base64, image.source.data);
+  assert.deepEqual({ ...compacted.tool_use_result.file, base64: null }, { base64: null, type: 'image/png', originalSize: 3000 });
+  assert.ok(text.text.startsWith('HEADx') && text.text.endsWith('xTAIL') && text.text.length < 8 * 1024 + 200);
+  assert.match(text.text, /omitted 11816 characters/);
+  assert.equal(compacted.message.content[0].tool_use_id, 'toolu_1');
+  assert.ok(compactClaudeEvent(event, 512).message.content[0].content[1].text.length < 700);
+  // Only assistant and user events carry tool payloads; a short value and other events are unchanged.
+  const result = { type: 'result', subtype: 'success', result: 'y'.repeat(20000) };
+  assert.equal(compactClaudeEvent(result), result);
+  assert.deepEqual(compactClaudeEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.png' } }] } }), { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.png' } }] } });
+});
+
+test('FAKE CLI only: an executor that reads screenshots stays far below the 4 MiB capture with a valid trace', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'protoflow-claude-exec-')); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const execAdapter = fileURLToPath(new URL('../scripts/claude-exec-adapter.js', import.meta.url));
+  const claude = path.join(dir, 'claude'); await fs.copyFile(fake, claude); await fs.chmod(claude, 0o755);
+  const { code, stdout } = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [execAdapter, '--claude', claude], { cwd: dir, env: { ...process.env, FAKE_CLAUDE_MODE: 'screenshots' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    let stdout = ''; child.stdout.setEncoding('utf8').on('data', chunk => stdout += chunk);
+    child.once('error', reject); child.once('close', code => resolve({ code, stdout }));
+    child.stdin.end(JSON.stringify({ kind: 'implement', instructions: 'FAKE', manifest: { id: 'MAN-1' } }));
+  });
+  assert.equal(code, 0);
+  // The CLI wrote about 11 MiB (eight 512 KiB images, each twice as base64, and a 200 KiB log).
+  assert.ok(stdout.length < 64 * 1024, `trace is ${stdout.length} characters`);
+  const events = stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(events.length, 20);
+  assert.deepEqual(readClaudeTrace(stdout, { executor: true }).toolsUsed, ['Read', 'Bash']);
+  assert.match(events[2].tool_use_result.file.base64, /^\[ProtoFlow omitted \d+ characters, sha256 /);
+  assert.match(events[18].message.content[0].content, /^FIRST LINE\n[\s\S]*\nLAST LINE$/);
 });
