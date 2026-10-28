@@ -294,7 +294,9 @@ export function executionDiagnostic(execution) {
       if (event.type === 'result' && (event.is_error || event.subtype !== 'success')) diagnostic = String(event.result ?? event.subtype);
     } catch { /* retain execution evidence */ }
   }
-  return String(diagnostic || execution.result.stderr || '');
+  const text = String(diagnostic || execution.result.stderr || '');
+  // The engine stops an executor whose output passes its 4 MiB capture; the trace then ends mid-event.
+  return execution.result.overflow ? `Executor output exceeded the engine's 4 MiB capture and the run was stopped${text ? `; ${text}` : ''}` : text;
 }
 export const MAX_AUTOMATED_REOPENINGS = 3;
 /** Proposal 0005: which maintainer waivers a verification used, and which did not apply and why. */
@@ -813,7 +815,7 @@ export async function runOnce(root, config, { signal, onEvent = () => {}, target
         if (attempt >= maximum) throw failure(reason, 'execution', diagnostic);
         // A failed or timed-out run is one bounded attempt; the next one is told why, like a failed verification.
         record.status = 'FAIL'; record.completedAt = new Date().toISOString(); record.error = reason;
-        executionFailure = { attempt, executionId: execution.id, exitCode: execution.result.exitCode, timedOut: execution.result.timedOut === true, reason };
+        executionFailure = { attempt, executionId: execution.id, exitCode: execution.result.exitCode, timedOut: execution.result.timedOut === true, ...(execution.result.overflow && { overflow: true }), reason };
         await saveProgress(root, config, stream, state);
         await onEvent({ event: 'execute-failed', sha: entry.sha, manifestId: entry.manifestId, attempt, reason: reason.slice(0, 300) });
         continue;
