@@ -85,6 +85,28 @@ test('a flattened container\'s own label is an accessible name, not text it show
   assert.equal(elementText(tree.children[0], tree), 'Settings Z Growth Me');
 });
 
+test('a flattened element\'s text leaves out a sheet drawn above it, while the screen root still reads the sheet', () => {
+  const frame = (x, y, width, height) => ({ x, y, width, height });
+  // siyue growth.goal.task-new on iPhone (React Native, flattened): the chart note in the scroll view underneath and a
+  // modal sheet whose Cancel button lies over the note, as siblings of the page in one parent.
+  const note = { type: 'other', identifier: 'goal.chart.note', label: '', frame: frame(32, 765, 338, 38) };
+  const tree = { type: 'application', frame: frame(0, 0, 402, 874), children: [
+    { type: 'other', identifier: 'goal', label: '', frame: frame(0, 62, 402, 778) },
+    { type: 'staticText', label: 'Goal', frame: frame(182, 77, 37, 20) },
+    { type: 'scrollView', frame: frame(0, 116, 402, 724), children: [
+      { type: 'staticText', label: 'Progress', frame: frame(22, 639, 80, 24) },
+      note,
+      { type: 'staticText', label: 'Records never count as done.', frame: frame(58, 765, 312, 38) }
+    ] },
+    { type: 'staticText', label: 'New task', frame: frame(20, 540, 362, 28) },
+    { type: 'button', label: 'Add', frame: frame(20, 700, 362, 52) },
+    { type: 'button', label: 'Cancel', frame: frame(20, 760, 362, 46) }
+  ] };
+  const elements = byAnchor(anchorFacts(tree, { anchors: ['goal', 'goal.chart.note'], screen: 'goal', content: frame(0, 62, 402, 778) }));
+  assert.equal(elements['goal.chart.note'].text, 'Records never count as done.');
+  assert.equal(elements.goal.text, 'Goal Progress Records never count as done. New task Add Cancel');
+});
+
 test('an overlay reads after the page it covers, in tree order like the DOM, and never as content of what it covers', () => {
   const frame = (x, y, width, height) => ({ x, y, width, height });
   // siyue nav.sidebar on iPad (React Native, flattened): the home page with a progress ring, a drawer over it and a
