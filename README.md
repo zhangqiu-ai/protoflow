@@ -147,7 +147,7 @@ protoflow runner start --project /path/to/app --once   # 省略 --once 則每 15
 protoflow runner status --project /path/to/app
 ```
 
-- **掃描**：沿 branch 的 first-parent 歷史逐筆凍結原型子目錄，包括 HTML、CSS、腳本與二進位素材。只要有外部、可變或無法靜態稽核的資源引用就報錯。快照上限為每檔 2 MiB、總計 20 MiB、1000 個檔案。歷史被改寫（rewind、force push）時記為 `HISTORY_REWRITTEN` 並停止。
+- **掃描**：沿 branch 的 first-parent 歷史逐筆凍結原型子目錄，包括 HTML、CSS、腳本與二進位素材。只要有外部、可變或無法靜態稽核的資源引用就報錯。快照上限為每檔 2 MiB、總計 20 MiB、1000 個檔案。歷史被改寫（rewind、force push，舊 cursor 不再是 tip 的祖先）時記為 `HISTORY_REWRITTEN` 並停止；回合併使 cursor 落在第二父上不算改寫，照常掃描。
 - **執行**：應用在 `.protoflow/runner/worktree-*` 的獨立本機分支上實作，不碰主 checkout、index 或 HEAD。每個版本依序執行 Codex → build → functional → 凍結版本的視覺比對，全部 PASS 才前進。
 - **重試與失敗**：
   - 供應端的暫時性故障（限流、5xx、串流中斷）會自動重試，次數與間隔由 `policy.transientRetries`、`policy.transientRetryDelayMs` 設定，不計入修復次數。

@@ -12,6 +12,8 @@ const sourceIdentity = source => hash({ repository: source.repository, branch: s
 export async function git(root, args, options = {}) {
   return (await exec('git', args, { cwd: root, maxBuffer: 32 * 1024 * 1024, timeout: 60000, ...options })).stdout;
 }
+// A missing object (exit 128) counts as not an ancestor, so an unreadable cursor still blocks the scan.
+const isAncestor = (root, ancestor, commit) => git(root, ['merge-base', '--is-ancestor', ancestor, commit]).then(() => true, () => false);
 export function validateSource(source) {
   if (!source || source.kind !== 'git') throw new Error('Configure source.kind=git and repository/branch/path first');
   const repository = source.repository;
@@ -412,7 +414,7 @@ export async function reclassifyVersion(root, config, { from, engineVersion }) {
 /** After every ordinal the stream has used: `runner supersede` removes entries, so the entry count can repeat one. */
 const nextOrdinal = state => Math.max(state.entries.length, ...state.entries.map(entry => entry.ordinal ?? 0), ...(state.superseded ?? []).flatMap(record => record.entries.map(entry => entry.ordinal ?? 0))) + 1;
 
-/** Scan the first-parent branch stream. Advance the durable cursor only after each frozen checkpoint exists. */
+/** Scan the first-parent branch stream (from the first commit that contains the cursor). Advance the durable cursor only after each frozen checkpoint exists. */
 export async function scanSource(root, config) {
   const source = config.source;
   const repository = await repositoryFor(root, source);
@@ -424,14 +426,17 @@ export async function scanSource(root, config) {
     await git(repository, ['-c', 'credential.interactive=false', 'fetch', '--no-tags', source.repository, `+refs/heads/${source.branch}:refs/protoflow/source`], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
     const tip = (await git(repository, ['rev-parse', 'refs/protoflow/source^{commit}'])).trim();
     const cursor = state.scannedSha ?? source.startSha ?? null;
-    if (cursor) {
-      const chain = (await git(repository, ['rev-list', '--first-parent', tip])).trim().split('\n');
-      if (!chain.includes(cursor)) { const error = new Error(`SOURCE_HISTORY_REWRITTEN: ${cursor} is no longer on ${source.branch}'s first-parent history (${tip}); no versions were skipped`); error.code = 'SOURCE_HISTORY_REWRITTEN'; throw error; }
-    }
+    // A cursor that is still an ancestor of the tip was not rewritten, even off the first-parent chain: a back-merge
+    // (the branch merged into local work, the local side first) leaves it on the second parent.
+    if (cursor && !await isAncestor(repository, cursor, tip)) { const error = new Error(`SOURCE_HISTORY_REWRITTEN: ${cursor} is no longer in ${source.branch}'s history (${tip}); no versions were skipped`); error.code = 'SOURCE_HISTORY_REWRITTEN'; throw error; }
     // A previous rewrite remains a durable barrier until fetch and ancestry
     // validation succeed; transport errors cannot authorize the old queue.
     state.status = 'READY'; state.error = null; state.lastScanError = null;
-    const commits = cursor ? (await git(repository, ['rev-list', '--first-parent', '--reverse', `${cursor}..${tip}`])).trim().split('\n').filter(Boolean) : [tip];
+    const lines = async args => (await git(repository, args)).trim().split('\n').filter(Boolean);
+    // The first-parent commits that contain the cursor; after a back-merge the first of them is the merge, and the
+    // local commits it brought in are part of its diff against the cursor, so nothing is skipped.
+    const descendants = cursor && new Set(await lines(['rev-list', '--ancestry-path', `${cursor}..${tip}`]));
+    const commits = cursor ? (await lines(['rev-list', '--first-parent', '--reverse', `${cursor}..${tip}`])).filter(sha => descendants.has(sha)) : [tip];
     let before = cursor ? await gitSnapshot(repository, cursor, config, { allowEmpty: true }) : { files: {}, hash: snapshotHash({}) };
     const added = [];
     for (const sha of commits) {
