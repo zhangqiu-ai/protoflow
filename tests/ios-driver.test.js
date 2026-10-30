@@ -107,6 +107,39 @@ test('a flattened element\'s text leaves out a sheet drawn above it, while the s
   assert.equal(elements.goal.text, 'Goal Progress Records never count as done. New task Add Cancel');
 });
 
+test('a flattened element outside a scroll view leaves out its content, and one inside it what lies over its clipped part', () => {
+  const frame = (x, y, width, height) => ({ x, y, width, height });
+  // siyue ai.thread on iPhone (React Native, flattened): the message list is scrolled to the end, so its first message
+  // lies under the header, and a draft card's buttons under the floating composer.
+  const tree = { type: 'application', frame: frame(0, 0, 402, 874), children: [
+    { type: 'other', identifier: 'thread', label: '', frame: frame(0, 62, 402, 812) },
+    { type: 'button', label: 'Back', frame: frame(12, 66, 44, 42) },
+    { type: 'other', identifier: 'thread.subtitle', label: '', frame: frame(136, 90, 131, 16) },
+    { type: 'staticText', label: 'Private AI', frame: frame(151, 90, 116, 16) },
+    { type: 'other', children: [{ type: 'scrollView', frame: frame(0, 116, 402, 758), children: [
+      { type: 'other', identifier: 'thread.messages', label: '', frame: frame(0, 31, 402, 795) },
+      { type: 'other', identifier: 'thread.messages.1', label: '', frame: frame(90, 49, 296, 84) },
+      { type: 'staticText', label: 'Help me prep some phrases', frame: frame(104, 58, 268, 66) },
+      { type: 'other', identifier: 'thread.draft', label: '', frame: frame(60, 521, 322, 275) },
+      { type: 'button', label: 'Remove line', frame: frame(323, 613, 44, 44) },
+      { type: 'textField', label: 'Line 1', value: 'I’d like to return this.', frame: frame(76, 665, 240, 40) },
+      { type: 'button', label: 'Remove line', frame: frame(323, 663, 44, 44) },
+      { type: 'button', label: 'Apply', frame: frame(75, 745, 67, 36) }
+    ] }] },
+    { type: 'other', identifier: 'thread.composer', label: '', frame: frame(0, 756, 402, 84) },
+    { type: 'button', label: 'Use my growth data', frame: frame(14, 764, 301, 28) },
+    { type: 'button', label: 'Send', frame: frame(352, 800, 40, 40) }
+  ] };
+  const anchors = ['thread', 'thread.subtitle', 'thread.messages', 'thread.messages.1', 'thread.draft', 'thread.composer'];
+  const elements = byAnchor(anchorFacts(tree, { anchors, screen: 'thread', content: frame(0, 62, 402, 812) }));
+  assert.equal(elements['thread.subtitle'].text, 'Private AI');
+  assert.equal(elements['thread.messages.1'].text, 'Help me prep some phrases');
+  assert.equal(elements['thread.messages'].text, 'Help me prep some phrases Remove line Remove line Apply');
+  assert.equal(elements['thread.draft'].text, 'Remove line Remove line Apply');
+  assert.equal(elements['thread.composer'].text, 'Use my growth data Send');
+  assert.equal(elements.thread.text, 'Back Private AI Help me prep some phrases Remove line Remove line Apply Use my growth data Send');
+});
+
 test('an overlay reads after the page it covers, in tree order like the DOM, and never as content of what it covers', () => {
   const frame = (x, y, width, height) => ({ x, y, width, height });
   // siyue nav.sidebar on iPad (React Native, flattened): the home page with a progress ring, a drawer over it and a

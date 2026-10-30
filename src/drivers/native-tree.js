@@ -48,10 +48,12 @@ function fieldText(node) {
  * accessible name (a switch named like the title beside it), so a control's label that matches other text in the
  * container is left out wherever it stands, and consecutive duplicates collapse.
  */
+const apart = (a, b) => area(frameOf(a)) > 0 && area(frameOf(b)) > 0 && overlap(frameOf(a), frameOf(b)) < 0.5;
 function joinText(nodes) {
   const shown = new Set(nodes.filter(item => !CONTROLS.has(item.type)).map(item => item.label));
-  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label)).map(item => item.label);
-  return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
+  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label));
+  return parts.filter((item, index) => index === 0 || item.label !== parts[index - 1].label || apart(item, parts[index - 1]))
+    .map(item => item.label).join(' ');
 }
 
 /**
@@ -100,17 +102,31 @@ export function scrolledOut(tree) {
  * as one block placed where the scroll view is, like the DOM's document order: a tab bar floating over the scroll view
  * reads after it, not between the content above and below the fold. Units that overlap are layers (see layers()): an
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
- * as text enclosed by an element of the layer underneath.
+ * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
 export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false } = {}) {
   const frame = frameOf(container);
   const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
-  const within = item => inside(frameOf(item), frame) || (scrolled.has(item) && within(scrolled.get(item)));
+  // A scroll view's content is the text of a container outside it only when the scroll view lies in the container as
+  // well: a message scrolled up under the header is not the header's text, nor are the cards under a floating composer
+  // the composer's. Content scrolled out of sight lies where its scroll view is. A container in the scroll view scrolls
+  // along with it and compares frames directly, but only within the scroll view's visible frame: the header over the
+  // part of a message list scrolled out above it is not the list's text.
+  const along = new Set();
+  const enclose = (item, scrollers) => {
+    if (item === container) { scrollers.forEach(scroller => along.add(scroller)); return true; }
+    return (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+  };
+  enclose(tree, []);
+  const scrollers = scroller => { const list = new Set(); for (let item = scroller; item; item = outer.get(item)) list.add(item); return list; };
+  const within = (item, scroller) => !scroller || along.has(scroller)
+    ? inside(frameOf(item), frame) && [...along].every(clip => scrollers(scroller).has(clip) || inside(frameOf(item), frameOf(clip)))
+    : within(scroller, outer.get(scroller)) && (scrolled.has(item) || inside(frameOf(item), frame));
   const visit = (item, scroller) => {
     order.set(item, order.size);
     if (item === container) owner.set(item, scroller);
     if (item === container || item.visible === false) return;
-    if (within(item) && !TEXT_ENTRY.has(item.type)) {
+    if (within(item, scroller) && !TEXT_ENTRY.has(item.type)) {
       const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
