@@ -196,12 +196,19 @@ test('single target: runner rebase retires a delivery built on a moved base and 
   const stale = (await deliveryStatus(f.root)).deliveries[0];
   await assert.rejects(alignWorktreeToBase(f.worktree, f.config), error => error.code === 'BASE_MOVED' && /1 commit\(s\) not in the base/.test(error.message) && /runner rebase/.test(error.message));
   await fs.writeFile(path.join(f.worktree, 'app/notes.txt'), 'uncommitted\n');
+  // A staged rename leaves the old path in neither the index nor the worktree; route-group names are literal paths.
+  await fs.mkdir(path.join(f.worktree, 'app/(tabs)'));
+  await git(f.worktree, 'mv', 'app/index.html', 'app/(tabs)/[id].html');
+  // Rewritten past rename detection, so the change lists the old path as deleted.
+  await fs.writeFile(path.join(f.worktree, 'app/(tabs)/[id].html'), '<section>moved and rewritten</section>\n');
 
   const result = await rebaseDeliveries(f.root, f.config, f.worktree);
   assert.deepEqual([result.from, result.to, result.deliveries, result.versions], [stale.commit, human, [stale.id], [`git-${f.shas[0]}`]]);
-  // Nothing is lost: the archive holds the delivery commit and the uncommitted file.
+  // Nothing is lost: the archive holds the delivery commit, the renamed file and the uncommitted file.
   assert.equal(await git(f.worktree, 'rev-parse', `${result.archive}^`), stale.commit);
   assert.equal(await git(f.worktree, 'show', `${result.archive}:app/notes.txt`), 'uncommitted');
+  assert.equal(await git(f.worktree, 'show', `${result.archive}:app/(tabs)/[id].html`), '<section>moved and rewritten</section>');
+  await assert.rejects(git(f.worktree, 'cat-file', '-e', `${result.archive}:app/index.html`));
   assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
   await assert.rejects(fs.access(path.join(f.worktree, 'app/index.html')));
   await assert.rejects(fs.access(path.join(f.worktree, 'app/notes.txt')));
@@ -287,6 +294,24 @@ test('single target: uncommitted work of an attempt in progress moves onto a bas
   const again = await humanCommit(f, 'app/index.html', '<main>the base rewrote it</main>\n');
   await assert.rejects(alignWorktreeToBase(f.worktree, f.config, f.root), error => error.code === 'BASE_MOVED' && error.baseSha === again && /uncommitted changes in app\/index\.html/.test(error.message) && /files the base also changed \(app\/index\.html\)/.test(error.message));
   assert.equal(await git(f.worktree, 'rev-parse', 'HEAD'), human);
+});
+
+test('single target: a staged rename in an attempt\'s uncommitted work moves onto a moved base', async t => {
+  const f = await fixture(t); f.config.policy.autoApprove = true;
+  assert.equal((await syncDeliveries(f.root, f.config)).status, 'PASS');
+  const landed = await git(f.worktree, 'rev-parse', 'HEAD');
+  await git(f.worktree, 'push', '-q', f.remote, 'HEAD:main');
+  const human = await humanCommit(f, 'docs/human.md', 'TASK-091\n');
+  // The executor moved the page into an Expo route group and rewrote it, past rename detection.
+  await fs.mkdir(path.join(f.worktree, 'app/(tabs)'));
+  await git(f.worktree, 'mv', 'app/index.html', 'app/(tabs)/[id].html');
+  await fs.writeFile(path.join(f.worktree, 'app/(tabs)/[id].html'), '<section>moved and rewritten</section>\n');
+  const aligned = await alignWorktreeToBase(f.worktree, f.config, f.root);
+  assert.deepEqual([aligned.from, aligned.to, aligned.carried.uncommitted], [landed, human, 2]);
+  assert.equal(await git(f.worktree, 'show', `${aligned.carried.archive}:app/(tabs)/[id].html`), '<section>moved and rewritten</section>');
+  await assert.rejects(git(f.worktree, 'cat-file', '-e', `${aligned.carried.archive}:app/index.html`));
+  assert.equal(await fs.readFile(path.join(f.worktree, 'app/(tabs)/[id].html'), 'utf8'), '<section>moved and rewritten</section>\n');
+  await assert.rejects(fs.access(path.join(f.worktree, 'app/index.html')));
 });
 
 test('single target: the runner carries a rejected delivery\'s work onto a moved base and runs the version instead of blocking', async t => {

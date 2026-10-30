@@ -87,7 +87,7 @@ async function runLocked(root, config, stream, targetId, { signal, onEvent, veri
     if (dirty.other.length) return { status: 'IDLE', reason: `Issue #${n} waits: the runner worktree has uncommitted changes (${dirty.other.slice(0, 5).join(', ')})` };
     // `runner configure` writes the new config into the worktree; the base already has those exact bytes, so the
     // change is restored to HEAD and comes back unchanged with the fast-forward to the base.
-    if (dirty.identical.length) { await git(worktree, ['checkout', '-q', 'HEAD', '--', ...dirty.identical]); await events({ event: 'issue-settled-changes', files: dirty.identical }); }
+    if (dirty.identical.length) { await git(worktree, ['checkout', '-q', 'HEAD', '--', ...dirty.identical.map(file => `:(literal)${file}`)]); await events({ event: 'issue-settled-changes', files: dirty.identical }); }
     work = entry.targets[targetId] = { status: 'RUNNING', startedAt: new Date().toISOString(), attempts: [], reviews: [] };
     await save();
   }
