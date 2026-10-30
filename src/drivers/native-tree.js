@@ -48,10 +48,12 @@ function fieldText(node) {
  * accessible name (a switch named like the title beside it), so a control's label that matches other text in the
  * container is left out wherever it stands, and consecutive duplicates collapse.
  */
+const apart = (a, b) => area(frameOf(a)) > 0 && area(frameOf(b)) > 0 && overlap(frameOf(a), frameOf(b)) < 0.5;
 function joinText(nodes) {
   const shown = new Set(nodes.filter(item => !CONTROLS.has(item.type)).map(item => item.label));
-  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label)).map(item => item.label);
-  return parts.filter((part, index) => part !== parts[index - 1]).join(' ');
+  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label));
+  return parts.filter((item, index) => index === 0 || item.label !== parts[index - 1].label || apart(item, parts[index - 1]))
+    .map(item => item.label).join(' ');
 }
 
 /**
@@ -100,16 +102,31 @@ export function scrolledOut(tree) {
  * as one block placed where the scroll view is, like the DOM's document order: a tab bar floating over the scroll view
  * reads after it, not between the content above and below the fold. Units that overlap are layers (see layers()): an
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
- * as text enclosed by an element of the layer underneath.
+ * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
-export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false } = {}) {
   const frame = frameOf(container);
   const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
-  const within = item => inside(frameOf(item), frame) || (scrolled.has(item) && within(scrolled.get(item)));
+  // A scroll view's content is the text of a container outside it only when the scroll view lies in the container as
+  // well: a message scrolled up under the header is not the header's text, nor are the cards under a floating composer
+  // the composer's. Content scrolled out of sight lies where its scroll view is. A container in the scroll view scrolls
+  // along with it and compares frames directly, but only within the scroll view's visible frame: the header over the
+  // part of a message list scrolled out above it is not the list's text.
+  const along = new Set();
+  const enclose = (item, scrollers) => {
+    if (item === container) { scrollers.forEach(scroller => along.add(scroller)); return true; }
+    return (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+  };
+  enclose(tree, []);
+  const scrollers = scroller => { const list = new Set(); for (let item = scroller; item; item = outer.get(item)) list.add(item); return list; };
+  const within = (item, scroller) => !scroller || along.has(scroller)
+    ? inside(frameOf(item), frame) && [...along].every(clip => scrollers(scroller).has(clip) || inside(frameOf(item), frameOf(clip)))
+    : within(scroller, outer.get(scroller)) && (scrolled.has(item) || inside(frameOf(item), frame));
   const visit = (item, scroller) => {
     order.set(item, order.size);
+    if (item === container) owner.set(item, scroller);
     if (item === container || item.visible === false) return;
-    if (within(item) && !TEXT_ENTRY.has(item.type)) {
+    if (within(item, scroller) && !TEXT_ENTRY.has(item.type)) {
       const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
@@ -119,6 +136,16 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree)) {
   visit(tree, null);
   const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
   const top = item => chain(item)[0] ?? item;
+  // A flattened container's own content are its siblings (and their descendants). A unit from outside its parent's
+  // subtree that is drawn above it (a sheet's button over a note in the page underneath) is not its text, though its
+  // centre lies within. The screen anchor reads every layer, as the prototype's root contains its sheets and tab bar.
+  const home = top(container), base = parent.get(container);
+  const under = node => { for (let item = node; item; item = parent.get(item)) if (item === base) return true; return false; };
+  const above = new Map(screen ? [] : [...new Set(found.map(top))].filter(unit => unit !== home && !under(unit)).map(unit => {
+    const pair = layers([home, unit], parent, order);
+    return [unit, pair.get(unit).level > pair.get(home).level];
+  }));
+  for (let index = found.length - 1; index >= 0; index--) if (above.get(top(found[index]))) found.splice(index, 1);
   const placed = layers([...new Set(found.map(top))], parent, order);
   // A labelled leaf that encloses other text of its own layer is a flattened container (a tab bar named "Main
   // navigation"): its label is an accessible name, which the DOM's innerText leaves out as well. A drawer's item over a
@@ -213,12 +240,12 @@ function stacked(units, placed) {
  * The element's own text: field value/placeholder, nothing for controls (web reports '' for checkboxes), the label of
  * text and buttons, else the visible text it contains (by hierarchy, or by geometry when the tree is flattened).
  */
-export function elementText(node, tree = null, scrolled = undefined) {
+export function elementText(node, tree = null, scrolled = undefined, { screen = false } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
   if (CONTROLS.has(node.type)) return '';
   if (LABELLED.has(node.type)) return node.label ?? '';
   if (node.children?.length) return subtreeText(node);
-  return tree && !node.label ? textWithin(tree, node, scrolled) : node.label ?? '';
+  return tree && !node.label ? textWithin(tree, node, scrolled, { screen }) : node.label ?? '';
 }
 
 function collect(node, byId = new Map()) {
@@ -256,7 +283,7 @@ export function anchorFacts(tree, { anchors, screen, content }) {
       inputType: INPUT_TYPES[node.type] ?? null,
       role: node.type,
       bounds,
-      text: elementText(node, tree, scrolled)
+      text: elementText(node, tree, scrolled, { screen: anchor === screen })
     });
   }
   return { elements, missing };
