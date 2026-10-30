@@ -19,6 +19,8 @@ function allowPath(value, config) {
   if (typeof value !== 'string' || !value || value.startsWith('/') || /[\s\\\0:*?\[\]]/.test(value) || value.split('/').some(part => !part || part === '.' || part === '..') || protectedPath.test(value) || value === config.prototypeDir || value.startsWith(`${config.prototypeDir}/`) || config.prototypeDir.startsWith(`${value}/`)) throw new Error(`Unsafe delivery allowlist path: ${value}`);
 }
 const inScope = (file, paths) => !paths || paths.some(prefix => file === prefix || file.startsWith(`${prefix}/`));
+// A file name as a pathspec that matches only itself: `app/(tabs)/[id].tsx` is no pattern.
+const literal = file => `:(literal)${file}`;
 const under = (file, prefix) => file === prefix || file.startsWith(`${prefix}/`);
 // With several targets, each target delivers only its own root and shared top-level files, never a sibling's root.
 const siblingRoots = (config, target) => isMultiTarget(config) ? config.targets.filter(item => item.id !== target).map(item => item.root.replace(/\/+$/, '')) : [];
@@ -42,7 +44,7 @@ export async function stageApplication(worktree, config, target) {
   await git(worktree, ['reset', '-q', '--', ...EXCLUDED]);
   const included = (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
   const runtime = included.filter(file => file.split('/').some(part => EXCLUDED.includes(part)));
-  if (runtime.length) await git(worktree, ['reset', '-q', '--', ...runtime]);
+  if (runtime.length) await git(worktree, ['reset', '-q', '--', ...runtime.map(literal)]);
   const siblings = siblingRoots(config, target);
   for (const file of included.filter(file => !runtime.includes(file))) if (!inScope(file, options.paths) || (options.paths && protectedPath.test(file)) || siblings.some(prefix => under(file, prefix))) throw new Error(`Staged delivery file is outside safe scope: ${file}`);
   return (await git(worktree, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(Boolean);
@@ -80,6 +82,17 @@ async function integrateBase(config, worktree, target, options, base) {
     throw diverged(`Integrating base ${base.sha} changed target ${target} application content; reverify on the current base`);
   }
   return { baseSha: base.sha, previousHead: head, commit: await git(worktree, ['rev-parse', 'HEAD']) };
+}
+
+/**
+ * Stage these changed files. A file whose deletion is already staged (the old side of a staged rename) is in neither
+ * the index nor the worktree, and naming it makes `git add` fail, so it is left out; its deletion is staged already.
+ */
+async function stageChanges(worktree, files) {
+  const indexed = new Set((await git(worktree, ['ls-files', '-z'])).split('\0'));
+  const present = [];
+  for (const file of files) if (indexed.has(file) || await fs.lstat(path.join(worktree, file)).catch(() => null)) present.push(file);
+  for (let index = 0; index < present.length; index += 200) await git(worktree, ['add', '-A', '--', ...present.slice(index, index + 200).map(literal)]);
 }
 
 /** Files `git add -A` could commit that differ from HEAD (tracked or untracked-but-not-ignored), without runtime output. */
@@ -158,7 +171,7 @@ async function carryWork(root, config, worktree, base, head) {
   let archive = head;
   if (changes.length) {
     // Staging everything is what the next delivery does anyway; here it builds the archive tree.
-    await git(worktree, ['add', '-A', '--', ...changes]);
+    await stageChanges(worktree, changes);
     archive = await git(worktree, ['commit-tree', await git(worktree, ['write-tree']), '-p', head, '-m', `ProtoFlow: uncommitted runner changes carried onto ${base.sha.slice(0, 7)}`]);
   }
   await git(worktree, ['update-ref', ref, archive]);
@@ -166,9 +179,9 @@ async function carryWork(root, config, worktree, base, head) {
   await git(worktree, ['reset', '-q', '--soft', base.sha]);
   const removed = files.filter(item => item.status === 'D').map(item => item.file);
   const updated = files.filter(item => item.status !== 'D').map(item => item.file);
-  for (let index = 0; index < updated.length; index += 200) await git(worktree, ['checkout', base.sha, '--', ...updated.slice(index, index + 200)]);
+  for (let index = 0; index < updated.length; index += 200) await git(worktree, ['checkout', base.sha, '--', ...updated.slice(index, index + 200).map(literal)]);
   for (const file of removed) {
-    await git(worktree, ['rm', '-q', '--cached', '--ignore-unmatch', '--', file]);
+    await git(worktree, ['rm', '-q', '--cached', '--ignore-unmatch', '--', literal(file)]);
     await fs.rm(path.join(worktree, file), { force: true });
   }
   return { from: head, to: base.sha, carried: { archive: ref, commits: commits.length, deliveries, files: files.length, uncommitted: changes.length } };
@@ -221,7 +234,7 @@ export async function rebaseDeliveries(root, config, worktree) {
   let archive = head;
   if (changes.length) {
     // The index is reset with the worktree right after; staging here only builds the archive tree.
-    await git(worktree, ['add', '-A', '--', ...changes]);
+    await stageChanges(worktree, changes);
     archive = await git(worktree, ['commit-tree', await git(worktree, ['write-tree']), '-p', head, '-m', `ProtoFlow: uncommitted runner changes before rebasing onto ${base.sha.slice(0, 7)}`]);
   }
   await git(worktree, ['update-ref', ref, archive]);
