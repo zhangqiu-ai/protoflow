@@ -1,4 +1,5 @@
 import { PNG } from 'pngjs';
+import { orientedPng, PngOrientationError } from './png-orientation.js';
 
 /*
  * Platform-neutral interpretation of a native accessibility snapshot as driver-protocol facts. Each platform driver
@@ -308,7 +309,7 @@ export function anchorFacts(tree, { anchors, screen, content }) {
 
 /** Crop a device screenshot (PNG buffer) to a frame in points; returns { png, scale }. */
 export function cropScreenshot(buffer, frame, screenWidthPoints) {
-  const image = PNG.sync.read(buffer);
+  const image = orientedPng(buffer);
   const scale = image.width / screenWidthPoints;
   const left = Math.round(frame.x * scale), top = Math.round(frame.y * scale);
   const width = Math.min(Math.round(frame.width * scale), image.width - left), height = Math.min(Math.round(frame.height * scale), image.height - top);
@@ -358,7 +359,13 @@ export function nativeResponse(raw, deviceScreenshot, { anchors, screen, frame =
   const measured = frame === 'device' ? { x: 0, y: 0, width: device.width, height: device.height } : area;
   // Whole points, so the viewport and the cropped screenshot always agree (a 136 px status bar is 45.33 dp at 3×).
   const content = { ...measured, width: Math.floor(measured.width + 1e-6), height: Math.floor(measured.height + 1e-6) };
-  const { png, scale } = cropScreenshot(deviceScreenshot, content, device.width);
+  let png, scale;
+  try {
+    ({ png, scale } = cropScreenshot(deviceScreenshot, content, device.width));
+  } catch (error) {
+    if (!(error instanceof PngOrientationError)) throw error;
+    return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: error.message } };
+  }
   const { elements, missing } = anchorFacts(withoutKeyboard(raw.tree), { anchors, screen, content });
   const keyboard = keyboardUp ? clipTo(raw.keyboardFrame, content) : null;
   return {
