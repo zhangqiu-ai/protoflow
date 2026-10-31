@@ -16,7 +16,7 @@
 import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir, readdir, rm, stat, mkdtemp } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, rm, stat, mkdtemp, lstat, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,11 +32,27 @@ export const driverOptions = args => parseArgs({
   options: {
     'bundle-id': { type: 'string' }, app: { type: 'string' }, device: { type: 'string' },
     'uikit-probe-context': { type: 'string' },
+    'launch-preparation-dir': { type: 'string' }, 'launch-preparation-token': { type: 'string' },
     frame: { type: 'string', default: 'safe-area' }, 'launch-url': { type: 'string' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' },
     orientation: { type: 'string' }, 'rotate-after-steps': { type: 'string' },
     'preserve-known-synthetic-inputs': { type: 'string' }, 'hittable-anchors': { type: 'string' }, appearance: { type: 'string' }
   }
 }).values;
+
+/** A host may prepare a short-lived deep link at the native open boundary; no issuer credential enters this job. */
+export async function launchPreparationOptions(values) {
+  const directory = values['launch-preparation-dir'], token = values['launch-preparation-token'];
+  if (directory === undefined && token === undefined) return null;
+  if (directory === undefined || token === undefined || token.length !== 64 || !/^[a-f0-9]{64}$/.test(token)) throw new Error('launch preparation needs a directory and a 64-character lowercase hexadecimal token');
+  if (!values['launch-url']) throw new Error('launch preparation needs --launch-url');
+  try {
+    if (!path.isAbsolute(directory) || path.resolve(directory) !== directory) throw new Error();
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.getuid() ||
+      (metadata.mode & 0o777) !== 0o700 || await realpath(directory) !== directory) throw new Error();
+  } catch { throw new Error('launch preparation needs an existing canonical owned mode-0700 directory without symlinks'); }
+  return { directory, token, timeoutMs: 15000 };
+}
 
 const orientations = ['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right'];
 export function responsiveOptionsError(values, request) {
@@ -160,6 +176,9 @@ async function main() {
   if (optionError) return notRun(optionError);
   const urlError = values['launch-url'] !== undefined && launchUrlTemplateError(values['launch-url']);
   if (urlError) return notRun(urlError);
+  let launchPreparation;
+  try { launchPreparation = await launchPreparationOptions(values); }
+  catch (error) { return notRun(error.message); }
   const probeContext = values['uikit-probe-context'];
   if (probeContext !== undefined && !/^CTX-[A-Za-z0-9_-]{1,124}$/.test(probeContext)) return notRun('invalid --uikit-probe-context');
   const timeoutMs = Number(values['timeout-ms'] ?? 10000);
@@ -201,6 +220,7 @@ async function main() {
     ...(values['rotate-after-steps'] && { rotateAfterSteps: values['rotate-after-steps'] }),
     ...(values['preserve-known-synthetic-inputs'] && { preserveSyntheticInputs: values['preserve-known-synthetic-inputs'].split(',') }),
     ...(values['hittable-anchors'] && { hittableAnchors: values['hittable-anchors'].split(',') }),
+    ...(launchPreparation && { launchPreparation }),
     ...(values['launch-url'] && { launchUrl: launchUrl(values['launch-url'], request) })
   };
   const jobFile = path.join(outputDir, 'job.json');

@@ -1,5 +1,107 @@
 import XCTest
 import UIKit
+import Darwin
+import CoreFoundation
+
+// BEGIN HOST LAUNCH PREPARATION: Foundation-only channel, also exercised without a Simulator.
+struct NativeLaunchPreparation: Decodable {
+    let directory: String
+    let token: String
+    let timeoutMs: Int
+}
+
+private func privateLaunchDirectory(_ directory: String) throws {
+    guard directory.hasPrefix("/"), let canonical = Darwin.realpath(directory, nil) else { throw CocoaError(.fileReadNoPermission) }
+    defer { free(canonical) }
+    guard String(cString: canonical) == directory else { throw CocoaError(.fileReadNoPermission) }
+    let descriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else { throw CocoaError(.fileReadNoPermission) }
+    defer { close(descriptor) }
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0, metadata.st_uid == getuid(),
+          metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR), metadata.st_mode & 0o777 == 0o700 else {
+        throw CocoaError(.fileReadNoPermission)
+    }
+}
+
+private func privateLaunchData(_ file: String) throws -> Data? {
+    let descriptor = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    if descriptor < 0 && errno == ENOENT { return nil }
+    guard descriptor >= 0 else { throw CocoaError(.fileReadNoPermission) }
+    defer { close(descriptor) }
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0, metadata.st_uid == getuid(), metadata.st_nlink == 1,
+          metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), metadata.st_mode & 0o777 == 0o600,
+          metadata.st_size >= 0, metadata.st_size <= 65536 else { throw CocoaError(.fileReadNoPermission) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    let bytes = try handle.read(upToCount: 65537) ?? Data()
+    guard bytes.count <= 65536 else { throw CocoaError(.fileReadTooLarge) }
+    return bytes
+}
+
+private func writePrivateLaunchRequest(_ bytes: Data, folder: String, requestId: String) throws {
+    let temporary = folder + "/.request-\(requestId).json"
+    let descriptor = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+    defer { close(descriptor); unlink(temporary) }
+    guard fchmod(descriptor, 0o600) == 0 else { throw CocoaError(.fileWriteNoPermission) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    try handle.write(contentsOf: bytes)
+    guard Darwin.rename(temporary, folder + "/request.json") == 0 else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+}
+
+func preparedLaunchURL(_ channel: NativeLaunchPreparation, original: URL, bundleId: String)
+    -> (url: URL?, reason: String?, observation: [String: Any]) {
+    let requestId = UUID().uuidString.lowercased()
+    var observation: [String: Any] = ["requestId": requestId, "requestedAt": Date().timeIntervalSince1970]
+    func unavailable(_ reason: String) -> (url: URL?, reason: String?, observation: [String: Any]) {
+        observation["completedAt"] = Date().timeIntervalSince1970
+        return (nil, reason, observation)
+    }
+    guard channel.timeoutMs == 15000, channel.token.utf8.count == 64,
+          channel.token.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+        return unavailable("launch_preparation_invalid_channel")
+    }
+    do {
+        try privateLaunchDirectory(channel.directory)
+        let folder = channel.directory
+        let requestFile = folder + "/request.json"
+        _ = try privateLaunchData(requestFile)
+        let request: [String: Any] = ["schemaVersion": 1, "token": channel.token, "requestId": requestId, "bundleId": bundleId]
+        try writePrivateLaunchRequest(JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]), folder: folder, requestId: requestId)
+        let deadline = ProcessInfo.processInfo.systemUptime + Double(channel.timeoutMs) / 1000
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            try privateLaunchDirectory(channel.directory)
+            if let bytes = try privateLaunchData(folder + "/response.json") {
+                guard let response = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+                    return unavailable("launch_preparation_invalid_response")
+                }
+                // An earlier cold launch may have left its response; it cannot authorize this new open.
+                if response["token"] as? String == channel.token, response["requestId"] as? String == requestId {
+                    guard let version = response["schemaVersion"] as? NSNumber,
+                          CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1 else {
+                        return unavailable("launch_preparation_invalid_response")
+                    }
+                    if response["status"] as? String == "error" { return unavailable("launch_preparation_failed") }
+                    guard response["status"] as? String == "ready", let value = response["launchUrl"] as? String,
+                          let url = URL(string: value), let source = URLComponents(url: original, resolvingAgainstBaseURL: false),
+                          let target = URLComponents(url: url, resolvingAgainstBaseURL: false), target.scheme != nil,
+                          target.scheme?.lowercased() == source.scheme?.lowercased(), target.host?.lowercased() == source.host?.lowercased(),
+                          target.port == source.port, target.user == source.user, target.password == source.password else {
+                        return unavailable("launch_preparation_invalid_url")
+                    }
+                    observation["responseAcceptedAt"] = Date().timeIntervalSince1970
+                    return (url, nil, observation)
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return unavailable("launch_preparation_timed_out")
+    } catch { return unavailable("launch_preparation_io_failed") }
+}
+// END HOST LAUNCH PREPARATION
 
 /*
  * ProtoFlow iOS capture. One run = one scene: launch the target app on a screen, replay the anchor steps, then
@@ -23,6 +125,7 @@ final class CaptureTests: XCTestCase {
         let screen: String
         let launchArguments: [String]
         let launchUrl: String?
+        let launchPreparation: NativeLaunchPreparation?
         let steps: [Step]
         let outputDir: String
         let timeoutMs: Int?
@@ -44,8 +147,10 @@ final class CaptureTests: XCTestCase {
         let previousOrientation = XCUIDevice.shared.orientation
         var result: [String: Any] = [:]
         var safeArea: [String: Double]? = nil
+        var launchPreparationObservation: [String: Any]? = nil
         defer {
             if let safeArea { result["safeArea"] = safeArea }
+            if let launchPreparationObservation { result["launchPreparation"] = launchPreparationObservation }
             if let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) {
                 try? data.write(to: output.appendingPathComponent("raw.json"))
             }
@@ -55,6 +160,10 @@ final class CaptureTests: XCTestCase {
         let timeout = Double(job.timeoutMs ?? 10000) / 1000
         // Cold launches (React Native loads its JS bundle) take longer than a step.
         let launchTimeout = Double(job.launchTimeoutMs ?? 60000) / 1000
+        if job.launchPreparation != nil && job.launchUrl == nil {
+            result = ["status": "NOT_RUN", "reason": "launch_preparation_requires_url"]
+            return
+        }
         if let orientation = job.orientation { XCUIDevice.shared.orientation = try deviceOrientation(orientation) }
         if job.probeSafeArea == true {
             // The host app fills exactly the safe area; its frame is the device's content frame.
@@ -79,7 +188,18 @@ final class CaptureTests: XCTestCase {
                 return
             }
             if job.captureProbe != nil { app.launch() }
-            app.open(url)
+            var urlToOpen = url
+            if let channel = job.launchPreparation {
+                let prepared = preparedLaunchURL(channel, original: url, bundleId: job.bundleId)
+                launchPreparationObservation = prepared.observation
+                guard let preparedURL = prepared.url else {
+                    result = ["status": "NOT_RUN", "reason": prepared.reason ?? "launch_preparation_failed"]
+                    return
+                }
+                urlToOpen = preparedURL
+                launchPreparationObservation?["openStartedAt"] = Date().timeIntervalSince1970
+            }
+            app.open(urlToOpen)
         } else {
             app.launchArguments = job.launchArguments
             app.launch()
