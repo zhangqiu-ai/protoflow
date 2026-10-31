@@ -193,12 +193,12 @@ Compose 與 Flutter 注意事項：
 
 `fill` 會叫出軟體鍵盤（Android AVD 設硬體鍵盤時不會）。鍵盤會遮住畫面，原型中也不存在，因此一般狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL。失焦後鍵盤是非同步收起的（Flutter 需要數個影格），Android 驅動器最多等 3 秒，只有仍在螢幕上（範圍非空）的輸入法視窗才算可見。
 
-例外：狀態的**最後一步是 `fill` 或 `clear`** 時，這個狀態描述的就是「正在輸入」，原型也保留焦點，應用不必為了擷取而失焦（例如原型的 `input` 事件只隱藏錯誤訊息，應用若在第一個按鍵就結束編輯會打斷輸入）。此時鍵盤可以留在畫面上：
+例外：略過尾端 `scroll-to`／`wait-for` 後，**最後一個其他動作是 `fill` 或 `clear`** 時，這個狀態描述的就是「正在輸入」，原型也保留焦點，應用不必為了擷取而失焦（例如原型的 `input` 事件只隱藏錯誤訊息，應用若在第一個按鍵就結束編輯會打斷輸入）。此時鍵盤可以留在畫面上：
 
 - 驅動器回報鍵盤範圍（iOS：`app.keyboards.firstMatch.frame`；Android：輸入法視窗的 `boundsInScreen` ÷ density），裁到內容區域後以 `occluded: [{x, y, width, height}]`（內容區域座標）放進回應。
 - 鍵盤自己的節點（iOS 的 `keyboard` 子樹）不屬於應用畫面，不參與錨點比對；被鍵盤蓋住的應用元素仍在無障礙樹中，視為已渲染，與捲出畫面的內容相同，T1 結構與 T3 版面照常比對。
 - T2 取樣跳過與遮蔽區域相交的元素，T4 在原型與應用兩側同一區域都遮罩後再比較，結果與鍵盤無關。
-- 量不到鍵盤範圍時記為 `NOT_RUN`。最後一步是其他動作（例如 `tap`）時鍵盤仍在，規則不變，仍然 FAIL。
+- 量不到鍵盤範圍時記為 `NOT_RUN`。`tap`／`toggle`／`select`／`back`／未知動作會中斷先前輸入狀態；沒有先前輸入或只有定位／等待也不建立編輯狀態，鍵盤仍在時仍為 FAIL。相關實際 PNG／範圍回歸見 [鍵盤步驟驗證](native-keyboard-step-verification-2026-10-31.md)。
 
 「鍵盤在畫面上」以鍵盤範圍是否與螢幕相交判斷。輸入框保有焦點時，XCUITest 即使在模擬器接著硬體鍵盤、畫面上沒有軟體鍵盤的情況下，也會列出一個停在螢幕下方的鍵盤元素（iPhone 17 上 y = 918，螢幕高 874 pt）；這種鍵盤不遮住任何內容，不論最後一步為何都不算可見。
 
@@ -426,7 +426,11 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 
 兩份完整原生樹必須相同，且 nonce、不同 sample ID、實際建置、主執行緒、時間順序與最長 10 秒 bracket 都通過。來源缺失、建置不符、不穩定或逾時均為 `NOT_RUN`，不回退成無探針成功。每次保留獨立 `uikit-probe-*` 目錄中的 raw native JSON、bridge receipt、驗證雜湊、xcodebuild log 與 xcresult；原本 `raw.json` 的 AX tree 與 `device.png` 仍保持獨立。
 
-補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；僅在當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。
+補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。
+
+同一 opt-in 路徑也可校正已存在 AX 的非輸入 button/link 文字：只有 AX 與 UIKit identifier 唯一、公開 role 相符、原始螢幕 frame 完全相同、公開語意來源完整且控制項不含輸入 subtree 時，才使用同一公開文字 interpreter 取得實際 text parts。無障礙名稱仍保留於原 AX 與 `provenance.originalAX.label`／`correctedControls.originalAXLabel`，不是可見文字來源。文字與 provenance 以外的 count、geometry、visible、enabled、role 等 AX 事實不改。
+
+受影響 parent 由原 `elementText` 的實際 `onTextParts` 節點參照判定，包含 flattened 幾何容器；使用獨立 derived AX tree，只替換已驗證控制項的文字貢獻，再沿用 `elementText` 重導。其他 AX contributors（包含無 identifier 的控制項）保持原樣，不整個改採 UIKit scope，也不搜尋刪除特定字串。每個 derived part 明記原 AX path 或 UIKit public text path 與其控制項 AX path；任何受影響 requested scope 的重複、缺失或來源無法對應均使整組文字校正維持原值，舊 missing-anchor 路徑也不能間接改寫該組。沒有 probe 的預設 native-tree 行為不變。這不是通用自繪文字 OCR；未知來源不能取得校正資格。離線回歸命令與範圍見 [control text 驗證記錄](uikit-control-text-verification-2026-10-31.md)。
 
 `visible` 在此延續原生與 DOM 的 rendered 語意：已附掛且通過 hidden、alpha、clip 檢查；每個補充事實明示 `renderEligible` 與 `occlusion: notComputed`，不宣稱未被遮擋，也不新增遮罩。輸入文字刻意不擷取，因此兩份樹相同不證明輸入內容未變；輸入仍由原始 AX、截圖及對應功能測試驗證。
 

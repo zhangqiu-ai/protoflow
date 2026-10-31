@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { interpretUIKitCapture } from './uikit-probe-text.js';
+import { elementText, scrolledOut } from './native-tree.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const TEXT_SOURCES = new Set(['UILabel.text', 'UIButton.currentTitle', 'RCTParagraphComponentView.attributedText']);
@@ -109,7 +110,97 @@ export function validateProbePair({ before, after, timing, expectedBuild, sessio
 }
 
 const allNodes = tree => [tree, ...(tree.children ?? []).flatMap(allNodes)];
-/** Supplement missing facts without mutating AX evidence or inventing interaction semantics. */
+const NONINPUT_ACTIONS = new Set(['button', 'link']);
+const INPUT_ROLES = new Set(['textField', 'secureTextField', 'searchField', 'textView', 'switch', 'toggle', 'checkBox', 'radioButton', 'slider', 'stepper', 'picker', 'pickerWheel', 'datePicker', 'segmentedControl']);
+const sameFrame = (a, b) => a && b && ['x', 'y', 'width', 'height'].every(key => finite(a[key]) && a[key] === b[key]);
+
+/** Text-only reinterpretation within the opt-in, validated current UIKit path. Raw AX stays immutable. */
+function controlTextCorrections(response, rawAX, interpretation, screen) {
+  const none = () => ({ corrections: new Map(), blocked: new Set() });
+  if (!rawAX) return none();
+  const currentById = new Map(), responseById = new Map();
+  for (const node of interpretation.paths.keys()) if (node.identifier) currentById.set(node.identifier, [...(currentById.get(node.identifier) ?? []), node]);
+  for (const item of response.elements ?? []) responseById.set(item.anchor, [...(responseById.get(item.anchor) ?? []), item]);
+  const axNodes = allNodes(rawAX), axById = new Map(), axPaths = new Map();
+  const locate = (node, at) => { axPaths.set(node, at); (node.children ?? []).forEach((child, index) => locate(child, [...at, index])); };
+  locate(rawAX, []);
+  for (const node of axNodes) if (node.identifier) axById.set(node.identifier, [...(axById.get(node.identifier) ?? []), node]);
+  const actions = new Map();
+  for (const ax of axNodes) {
+    if (!NONINPUT_ACTIONS.has(ax.type) || !ax.identifier || axById.get(ax.identifier)?.length !== 1) continue;
+    const found = currentById.get(ax.identifier);
+    if (found?.length !== 1) continue;
+    const node = found[0], observed = node.observedSemantics, semantic = semanticFacts(node);
+    if (!observed || typeof observed.buttonTrait !== 'boolean' || typeof observed.linkTrait !== 'boolean'
+      || !NONINPUT_ACTIONS.has(semantic.role) || semantic.role !== ax.type || observed.inputKind || observed.editable !== undefined
+      || allNodes(node).some(child => child.inputRedacted || child.textSource === 'redactedInput' || child.observedSemantics?.inputKind)
+      || !sameFrame(ax.frame, node.frameInScreen)) continue;
+    const facts = interpretation.facts(node);
+    actions.set(ax, { node, facts });
+  }
+  const changed = new Set([...actions].filter(([ax, value]) => (ax.label ?? '') !== value.facts.text).map(([ax]) => ax));
+  if (!changed.size) return none();
+  // Build a separate interpretation tree: only verified control text contributions change.
+  // Input nodes are retained by reference and never spread/read for their value fields.
+  const publicByPath = new Map([...interpretation.paths].map(([node, path]) => [JSON.stringify(path), node]));
+  const derivedFor = new Map(), origins = new Map(axNodes.map(node => [node, { source: 'nativeAccessibilitySnapshot', nativeNodePath: axPaths.get(node) }]));
+  const publicParts = ax => actions.get(ax).facts.textNodePaths.map(path => {
+    const node = publicByPath.get(JSON.stringify(path));
+    const part = { type: 'staticText', label: node.text, frame: node.frameInScreen, visible: true, children: [] };
+    origins.set(part, { source: 'currentUIKitViewTree', nativeNodePath: path, controlAXNodePath: axPaths.get(ax) });
+    return part;
+  });
+  const derive = ax => {
+    if (INPUT_ROLES.has(ax.type)) { derivedFor.set(ax, ax); return ax; }
+    const derived = changed.has(ax) ? { ...ax, type: 'other', label: '', children: publicParts(ax) }
+      : { ...ax, children: (ax.children ?? []).map(derive) };
+    derivedFor.set(ax, derived);
+    origins.set(derived, { source: 'nativeAccessibilitySnapshot', nativeNodePath: axPaths.get(ax) });
+    return derived;
+  };
+  const derivedRoot = derive(rawAX), derivedScrolled = scrolledOut(derivedRoot);
+  const corrections = new Map(), scrolled = scrolledOut(rawAX), scopes = [];
+  for (const item of response.elements ?? []) {
+    const axFound = axById.get(item.anchor);
+    if (!axFound?.length || INPUT_ROLES.has(axFound[0].type)) continue;
+    const ax = axFound[0], parts = [];
+    const originalText = elementText(ax, rawAX, scrolled, { screen: item.anchor === screen, onTextParts: selected => parts.push(...selected) });
+    if (!parts.some(part => changed.has(part))) continue;
+    scopes.push({ item, axFound, ax, parts, originalText });
+  }
+  const blocked = new Set(scopes.map(scope => scope.item.anchor));
+  const failClosed = () => ({ corrections: new Map(), blocked });
+  for (const { item, axFound, ax, parts, originalText } of scopes) {
+    // All contributors and every affected requested scope must correlate. Never apply half a correction group.
+    const found = currentById.get(item.anchor);
+    if (responseById.get(item.anchor).length !== 1 || item.count !== 1 || axFound.length !== 1 || found?.length !== 1 || originalText !== item.text
+      || item.editable === true || INPUT_ROLES.has(item.role)
+      || (NONINPUT_ACTIONS.has(ax.type) && (item.role !== ax.type || item.inputType != null))) return failClosed();
+    const node = found[0];
+    if (node.inputRedacted || node.observedSemantics?.inputKind) return failClosed();
+    const selected = [];
+    const derived = derivedFor.get(ax);
+    if (!derived) return failClosed();
+    const text = changed.has(ax) ? actions.get(ax).facts.text
+      : elementText(derived, derivedRoot, derivedScrolled, { screen: item.anchor === screen, onTextParts: values => selected.push(...values) });
+    if (changed.has(ax)) selected.push(...derived.children);
+    if (selected.some(part => !origins.has(part))) return failClosed();
+    corrections.set(item.anchor, { ...item, text, provenance: {
+      ...(item.provenance && { previousProvenance: item.provenance }), source: changed.has(ax) ? 'currentUIKitViewTree' : 'derivedAXWithCurrentUIKitControlText', fields: ['text'],
+      occlusion: 'notComputed', class: node.class, nativeNodePath: interpretation.paths.get(node),
+      textScope: changed.has(ax) ? actions.get(ax).facts.textScope : 'derivedAXScope',
+      textParts: selected.map(part => origins.get(part)),
+      textCorrection: 'publicNoninputControlText',
+      originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) },
+      correctedControls: parts.filter(part => changed.has(part)).map(part => ({ identifier: part.identifier,
+        originalAXLabel: part.label ?? '', axNodePath: axPaths.get(part), nativeNodePath: interpretation.paths.get(actions.get(part).node),
+        semanticSources: actions.get(part).node.observedSemantics.sources }))
+    } });
+  }
+  return { corrections, blocked: new Set() };
+}
+
+/** Opt-in current UIKit supplementation and text-only correction; never invent AX interaction semantics. */
 export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen, content }) {
   if (response.status !== 'PASS') return response;
   const window = capture.windows[0], nodes = allNodes(window.tree);
@@ -123,7 +214,9 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
   const locate = (node, at) => { paths.set(node, at); (node.children ?? []).forEach((child, index) => locate(child, [...at, index])); };
   locate(window.tree, [0]);
   const observedMissing = missing.filter(id => byId.has(id) && !axIds.has(id));
-  if (!observedMissing.length) return response;
+  const { corrections, blocked } = controlTextCorrections(response, rawAX, interpretation, screen);
+  if (!observedMissing.length) return corrections.size
+    ? { ...response, elements: response.elements.map(item => corrections.get(item.anchor) ?? item) } : response;
   const additions = [];
   const provenance = (fields, node, scope) => ({ source: 'currentUIKitViewTree', fields, occlusion: 'notComputed', textScope: scope,
     frameSource: 'frameInScreen', renderEligible: node.renderEligible, class: node.class, nativeNodePath: paths.get(node) });
@@ -140,6 +233,8 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
       provenance: { ...provenance(['count', 'visible', 'bounds', 'text', ...Object.keys(semantic)], node, id === screen ? 'ownedWindow' : 'subtree'), ...textEvidence, ...(node.observedSemantics && { semanticSources: node.observedSemantics.sources }) } });
   }
   const elements = (response.elements ?? []).map(item => {
+    if (corrections.has(item.anchor)) return corrections.get(item.anchor);
+    if (blocked.has(item.anchor)) return item;
     const found = byId.get(item.anchor);
     if (!found || found.length !== 1) return item;
     const node = found[0], scope = item.anchor === screen ? window.tree : node;
