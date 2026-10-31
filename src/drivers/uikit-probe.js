@@ -111,6 +111,7 @@ export function validateProbePair({ before, after, timing, expectedBuild, sessio
 
 const allNodes = tree => [tree, ...(tree.children ?? []).flatMap(allNodes)];
 const NONINPUT_ACTIONS = new Set(['button', 'link']);
+const CURRENT_TEXT_KINDS = new Set(['button', 'link', 'image', 'other']);
 const INPUT_ROLES = new Set(['textField', 'secureTextField', 'searchField', 'textView', 'switch', 'toggle', 'checkBox', 'radioButton', 'slider', 'stepper', 'picker', 'pickerWheel', 'datePicker', 'segmentedControl']);
 const sameFrame = (a, b) => a && b && ['x', 'y', 'width', 'height'].every(key => finite(a[key]) && a[key] === b[key]);
 
@@ -121,21 +122,42 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
   const currentById = new Map(), responseById = new Map();
   for (const node of interpretation.paths.keys()) if (node.identifier) currentById.set(node.identifier, [...(currentById.get(node.identifier) ?? []), node]);
   for (const item of response.elements ?? []) responseById.set(item.anchor, [...(responseById.get(item.anchor) ?? []), item]);
-  const axNodes = allNodes(rawAX), axById = new Map(), axPaths = new Map();
-  const locate = (node, at) => { axPaths.set(node, at); (node.children ?? []).forEach((child, index) => locate(child, [...at, index])); };
+  const axNodes = allNodes(rawAX), axById = new Map(), axPaths = new Map(), axParents = new Map();
+  const locate = (node, at, parent) => { axPaths.set(node, at); if (parent) axParents.set(node, parent); (node.children ?? []).forEach((child, index) => locate(child, [...at, index], node)); };
   locate(rawAX, []);
   for (const node of axNodes) if (node.identifier) axById.set(node.identifier, [...(axById.get(node.identifier) ?? []), node]);
   const actions = new Map();
   for (const ax of axNodes) {
-    if (!NONINPUT_ACTIONS.has(ax.type) || !ax.identifier || axById.get(ax.identifier)?.length !== 1) continue;
+    if (!CURRENT_TEXT_KINDS.has(ax.type) || !ax.identifier || axById.get(ax.identifier)?.length !== 1) continue;
+    // AX descendants already contribute their own text to ancestors; image/other correction requires a leaf.
+    if ((ax.type === 'image' || ax.type === 'other') && ax.children?.length) continue;
+    if (ax.type === 'other') {
+      let parent = axParents.get(ax);
+      while (parent && parent.type !== 'image') parent = axParents.get(parent);
+      if (parent) continue;
+    }
     const found = currentById.get(ax.identifier);
     if (found?.length !== 1) continue;
     const node = found[0], observed = node.observedSemantics, semantic = semanticFacts(node);
     if (!observed || typeof observed.buttonTrait !== 'boolean' || typeof observed.linkTrait !== 'boolean'
-      || !NONINPUT_ACTIONS.has(semantic.role) || semantic.role !== ax.type || observed.inputKind || observed.editable !== undefined
+      || (ax.type === 'image' || ax.type === 'other'
+        ? semantic.role !== 'other' || observed.buttonTrait !== false || observed.linkTrait !== false
+        : !NONINPUT_ACTIONS.has(semantic.role) || semantic.role !== ax.type)
+      || observed.inputKind || observed.editable !== undefined
       || allNodes(node).some(child => child.inputRedacted || child.textSource === 'redactedInput' || child.observedSemantics?.inputKind)
       || !sameFrame(ax.frame, node.frameInScreen)) continue;
     const facts = interpretation.facts(node);
+    // An unconfirmed subtree is not evidence of empty text. Image/other leaves own only their real subtree text.
+    if (facts.visible !== true || (ax.type === 'image' || ax.type === 'other') && facts.textScope !== 'subtree') continue;
+    if (ax.type === 'other') {
+      const ownPath = interpretation.paths.get(node);
+      const sources = new Map([...interpretation.paths].map(([view, at]) => [JSON.stringify(at), view]));
+      if (!facts.text.trim() || !facts.textNodePaths.length || !facts.textNodePaths.every(at => {
+        const part = sources.get(JSON.stringify(at));
+        return at.length >= ownPath.length && ownPath.every((index, depth) => at[depth] === index)
+          && part && TEXT_SOURCES.has(part.textSource) && part.text.trim();
+      })) continue;
+    }
     actions.set(ax, { node, facts });
   }
   const changed = new Set([...actions].filter(([ax, value]) => (ax.label ?? '') !== value.facts.text).map(([ax]) => ax));
@@ -165,7 +187,7 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
     if (!axFound?.length || INPUT_ROLES.has(axFound[0].type)) continue;
     const ax = axFound[0], parts = [];
     const originalText = elementText(ax, rawAX, scrolled, { screen: item.anchor === screen, onTextParts: selected => parts.push(...selected) });
-    if (!parts.some(part => changed.has(part))) continue;
+    if (!changed.has(ax) && !parts.some(part => changed.has(part))) continue;
     scopes.push({ item, axFound, ax, parts, originalText });
   }
   const blocked = new Set(scopes.map(scope => scope.item.anchor));
@@ -175,15 +197,18 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
     const found = currentById.get(item.anchor);
     if (responseById.get(item.anchor).length !== 1 || item.count !== 1 || axFound.length !== 1 || found?.length !== 1 || originalText !== item.text
       || item.editable === true || INPUT_ROLES.has(item.role)
-      || (NONINPUT_ACTIONS.has(ax.type) && (item.role !== ax.type || item.inputType != null))) return failClosed();
+      || (CURRENT_TEXT_KINDS.has(ax.type) && (item.role !== ax.type || item.inputType != null))) return failClosed();
     const node = found[0];
     if (node.inputRedacted || node.observedSemantics?.inputKind) return failClosed();
     const selected = [];
     const derived = derivedFor.get(ax);
-    if (!derived) return failClosed();
+    // Only the new, fully correlated other leaf has direct nonempty public text independent of an AX parent rewrite.
+    const directOther = ax.type === 'other' && changed.has(ax);
+    if (!derived && !directOther) return failClosed();
     const text = changed.has(ax) ? actions.get(ax).facts.text
       : elementText(derived, derivedRoot, derivedScrolled, { screen: item.anchor === screen, onTextParts: values => selected.push(...values) });
-    if (changed.has(ax)) selected.push(...derived.children);
+    if (directOther) selected.push(...publicParts(ax));
+    else if (changed.has(ax)) selected.push(...derived.children);
     if (selected.some(part => !origins.has(part))) return failClosed();
     corrections.set(item.anchor, { ...item, text, provenance: {
       ...(item.provenance && { previousProvenance: item.provenance }), source: changed.has(ax) ? 'currentUIKitViewTree' : 'derivedAXWithCurrentUIKitControlText', fields: ['text'],

@@ -430,6 +430,12 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 
 同一 opt-in 路徑也可校正已存在 AX 的非輸入 button/link 文字：只有 AX 與 UIKit identifier 唯一、公開 role 相符、原始螢幕 frame 完全相同、公開語意來源完整且控制項不含輸入 subtree 時，才使用同一公開文字 interpreter 取得實際 text parts。無障礙名稱仍保留於原 AX 與 `provenance.originalAX.label`／`correctedControls.originalAXLabel`，不是可見文字來源。文字與 provenance 以外的 count、geometry、visible、enabled、role 等 AX 事實不改。
 
+明確 AX `image` leaf（沒有 AX children）也可在此 opt-in 路徑校正可見文字，但 current UIKit 公開語意必須是 `role=other`、button/link trait 均為 false，且沒有 input 證據；與 button、link、switch 等語意衝突時不校正。只採用當前實際 subtree 的 UILabel／UIButton／RN 文字部分，不採用 flattened sibling 幾何推斷；圖片的 alt／無障礙名稱保留，圖內真實 UILabel 文字也保留。有 AX children 的 image 不參與這項 image 校正，避免 image 自身換用 UIKit caption、祖先卻仍採 AX child caption；保留原始 image facts/text/provenance。這是受限的文字校正，不推導 image 的互動性或改寫 AX role，既有 control function／provenance 名稱維持相容。原生 `image` 的預設處理不變。
+
+所有文字校正候選都必須有 interpreter 的肯定可見性證據（`visible=true`，可包含已證實的 scroll content）；未支援 nested scroll 等情況的空文字不能當作「實際沒有文字」。這只限制候選資格，不改原 visibility、捲動幾何或 atomic scope 檢查。非 UIControl 的 RN View 仍依公開 button/link traits 與 role 判定，沒有以 class 名稱或原型預期文字補造事實。圖片、icon-only 控制項、真實字元與衝突負例見 [image text 驗證記錄](uikit-image-text-verification-2026-10-31.md)。
+
+明確非輸入 `other` AX leaf 可另校正自身的非空公開文字：除上述唯一 ID／exact frame 等條件，current role 必須是 other、button/link traits 均為 false，且不在 AX image 後代中。文字 scope 必須為 subtree；每個非空 public Text part 的原生 path 都須實際屬於該 UIView 的 own subtree。空白、空容器、未知語意、input／editable 證據或 flattened sibling 推斷都不校正，不能用未知的空文字刪除 AX 名稱。即使 parent button 的文字替換不再保留該 AX 後代的 derived node，這個已完整對應的 other leaf 也只能從已確認的自身非空 public parts 記錄 own fact；button/image 的 derived-node 檢查及所有 affected scope 的 atomic 驗證維持原樣。AX 名稱與先前 provenance 保留；原 role、count、geometry、visible 等事實不變。這不是 role 推導、動態文字排除或原型預期值替換；既有 control provenance 名稱只為相容。見 [other own-text 驗證記錄](uikit-other-text-verification-2026-10-31.md)。
+
 受影響 parent 由原 `elementText` 的實際 `onTextParts` 節點參照判定，包含 flattened 幾何容器；使用獨立 derived AX tree，只替換已驗證控制項的文字貢獻，再沿用 `elementText` 重導。其他 AX contributors（包含無 identifier 的控制項）保持原樣，不整個改採 UIKit scope，也不搜尋刪除特定字串。每個 derived part 明記原 AX path 或 UIKit public text path 與其控制項 AX path；任何受影響 requested scope 的重複、缺失或來源無法對應均使整組文字校正維持原值，舊 missing-anchor 路徑也不能間接改寫該組。沒有 probe 的預設 native-tree 行為不變。這不是通用自繪文字 OCR；未知來源不能取得校正資格。離線回歸命令與範圍見 [control text 驗證記錄](uikit-control-text-verification-2026-10-31.md)。
 
 `visible` 在此延續原生與 DOM 的 rendered 語意：已附掛且通過 hidden、alpha、clip 檢查；每個補充事實明示 `renderEligible` 與 `occlusion: notComputed`，不宣稱未被遮擋，也不新增遮罩。輸入文字刻意不擷取，因此兩份樹相同不證明輸入內容未變；輸入仍由原始 AX、截圖及對應功能測試驗證。

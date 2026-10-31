@@ -1,0 +1,943 @@
+{
+  "kind": "recorded-avatar-branches-redacted-name-synthetic-parent-envelope",
+  "observations": [
+    {
+      "sourceScene": "nav.me.initial",
+      "sourceProbeSha256": "93aeeffadfec1ebcd8ec59be5626ee5902536eeaa83ff45248b7b196f50be69b",
+      "sourceRawSha256": "7914d8ec100bade14657877ea47a65f4c19d0ce020b01bd6a68fdd41eb69d46c",
+      "redactions": [
+        "ax.label: account name redacted"
+      ],
+      "ax": {
+        "enabled": true,
+        "frame": {
+          "height": 62,
+          "width": 62,
+          "x": 32,
+          "y": 138
+        },
+        "identifier": "nav.me.avatar",
+        "label": "[account name redacted]",
+        "selected": false,
+        "type": "other"
+      },
+      "uikit": {
+        "accessibilityElementsHidden": false,
+        "accessibilityLabelRedacted": true,
+        "accessibilityViewIsModal": false,
+        "alpha": 1,
+        "ancestorOrSelfHidden": false,
+        "attachedToWindow": true,
+        "bounds": {
+          "height": 62,
+          "width": 62,
+          "x": 0,
+          "y": 0
+        },
+        "children": [
+          {
+            "accessibilityElementsHidden": false,
+            "accessibilityLabel": "",
+            "accessibilityViewIsModal": false,
+            "alpha": 1,
+            "ancestorOrSelfHidden": false,
+            "attachedToWindow": true,
+            "bounds": {
+              "height": 62,
+              "width": 62,
+              "x": 0,
+              "y": 0
+            },
+            "children": [
+              {
+                "accessibilityElementsHidden": false,
+                "accessibilityLabel": "",
+                "accessibilityViewIsModal": false,
+                "alpha": 1,
+                "ancestorOrSelfHidden": false,
+                "attachedToWindow": true,
+                "bounds": {
+                  "height": 62,
+                  "width": 62,
+                  "x": 0,
+                  "y": 0
+                },
+                "children": [
+                  {
+                    "accessibilityElementsHidden": false,
+                    "accessibilityLabel": "",
+                    "accessibilityViewIsModal": false,
+                    "alpha": 1,
+                    "ancestorOrSelfHidden": false,
+                    "attachedToWindow": true,
+                    "bounds": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "children": [
+                      {
+                        "accessibilityElementsHidden": false,
+                        "accessibilityLabel": "",
+                        "accessibilityViewIsModal": false,
+                        "alpha": 1,
+                        "ancestorOrSelfHidden": false,
+                        "attachedToWindow": true,
+                        "bounds": {
+                          "height": 62,
+                          "width": 62,
+                          "x": 0,
+                          "y": 0
+                        },
+                        "children": [],
+                        "class": "RNSVGLinearGradient",
+                        "clipIntersection": {
+                          "height": 62,
+                          "width": 62,
+                          "x": 32,
+                          "y": 138
+                        },
+                        "clipMethod": "axisAlignedBoundsIntersection",
+                        "clipsToBounds": false,
+                        "effectiveAlpha": 1,
+                        "frameInScreen": {
+                          "height": 62,
+                          "width": 62,
+                          "x": 32,
+                          "y": 138
+                        },
+                        "frameInWindow": {
+                          "height": 62,
+                          "width": 62,
+                          "x": 32,
+                          "y": 138
+                        },
+                        "hidden": false,
+                        "identifier": "",
+                        "isSelectedOwnedWindow": false,
+                        "observedSemantics": {
+                          "buttonTrait": false,
+                          "effectiveUserInteractionEnabled": false,
+                          "linkTrait": false,
+                          "sources": {
+                            "buttonTrait": "UIAccessibilityTraitsButton",
+                            "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                            "linkTrait": "UIAccessibilityTraitsLink",
+                            "userInteractionEnabled": "UIView.userInteractionEnabled"
+                          },
+                          "userInteractionEnabled": true
+                        },
+                        "occlusion": "notComputed",
+                        "order": 0,
+                        "owningWindowClass": "UIWindow",
+                        "renderEligible": true,
+                        "text": "",
+                        "textSource": "none",
+                        "transformed": false,
+                        "windowSceneActivationState": 0,
+                        "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                      }
+                    ],
+                    "class": "RNSVGDefs",
+                    "clipIntersection": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "clipMethod": "axisAlignedBoundsIntersection",
+                    "clipsToBounds": false,
+                    "effectiveAlpha": 1,
+                    "frameInScreen": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "frameInWindow": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "hidden": false,
+                    "identifier": "",
+                    "isSelectedOwnedWindow": false,
+                    "observedSemantics": {
+                      "buttonTrait": false,
+                      "effectiveUserInteractionEnabled": false,
+                      "linkTrait": false,
+                      "sources": {
+                        "buttonTrait": "UIAccessibilityTraitsButton",
+                        "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                        "linkTrait": "UIAccessibilityTraitsLink",
+                        "userInteractionEnabled": "UIView.userInteractionEnabled"
+                      },
+                      "userInteractionEnabled": true
+                    },
+                    "occlusion": "notComputed",
+                    "order": 0,
+                    "owningWindowClass": "UIWindow",
+                    "renderEligible": true,
+                    "text": "",
+                    "textSource": "none",
+                    "transformed": false,
+                    "windowSceneActivationState": 0,
+                    "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                  },
+                  {
+                    "accessibilityElementsHidden": false,
+                    "accessibilityLabel": "",
+                    "accessibilityViewIsModal": false,
+                    "alpha": 1,
+                    "ancestorOrSelfHidden": false,
+                    "attachedToWindow": true,
+                    "bounds": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "children": [],
+                    "class": "RNSVGRect",
+                    "clipIntersection": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "clipMethod": "axisAlignedBoundsIntersection",
+                    "clipsToBounds": false,
+                    "effectiveAlpha": 1,
+                    "frameInScreen": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "frameInWindow": {
+                      "height": 62,
+                      "width": 62,
+                      "x": 32,
+                      "y": 138
+                    },
+                    "hidden": false,
+                    "identifier": "",
+                    "isSelectedOwnedWindow": false,
+                    "observedSemantics": {
+                      "buttonTrait": false,
+                      "effectiveUserInteractionEnabled": false,
+                      "linkTrait": false,
+                      "sources": {
+                        "buttonTrait": "UIAccessibilityTraitsButton",
+                        "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                        "linkTrait": "UIAccessibilityTraitsLink",
+                        "userInteractionEnabled": "UIView.userInteractionEnabled"
+                      },
+                      "userInteractionEnabled": false
+                    },
+                    "occlusion": "notComputed",
+                    "order": 1,
+                    "owningWindowClass": "UIWindow",
+                    "renderEligible": true,
+                    "text": "",
+                    "textSource": "none",
+                    "transformed": false,
+                    "windowSceneActivationState": 0,
+                    "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                  }
+                ],
+                "class": "RNSVGGroup",
+                "clipIntersection": {
+                  "height": 62,
+                  "width": 62,
+                  "x": 32,
+                  "y": 138
+                },
+                "clipMethod": "axisAlignedBoundsIntersection",
+                "clipsToBounds": false,
+                "effectiveAlpha": 1,
+                "frameInScreen": {
+                  "height": 62,
+                  "width": 62,
+                  "x": 32,
+                  "y": 138
+                },
+                "frameInWindow": {
+                  "height": 62,
+                  "width": 62,
+                  "x": 32,
+                  "y": 138
+                },
+                "hidden": false,
+                "identifier": "",
+                "isSelectedOwnedWindow": false,
+                "observedSemantics": {
+                  "buttonTrait": false,
+                  "effectiveUserInteractionEnabled": false,
+                  "linkTrait": false,
+                  "sources": {
+                    "buttonTrait": "UIAccessibilityTraitsButton",
+                    "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                    "linkTrait": "UIAccessibilityTraitsLink",
+                    "userInteractionEnabled": "UIView.userInteractionEnabled"
+                  },
+                  "userInteractionEnabled": false
+                },
+                "occlusion": "notComputed",
+                "order": 0,
+                "owningWindowClass": "UIWindow",
+                "renderEligible": true,
+                "text": "",
+                "textSource": "none",
+                "transformed": false,
+                "windowSceneActivationState": 0,
+                "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+              }
+            ],
+            "class": "RNSVGSvgView",
+            "clipIntersection": {
+              "height": 62,
+              "width": 62,
+              "x": 32,
+              "y": 138
+            },
+            "clipMethod": "axisAlignedBoundsIntersection",
+            "clipsToBounds": false,
+            "effectiveAlpha": 1,
+            "frameInScreen": {
+              "height": 62,
+              "width": 62,
+              "x": 32,
+              "y": 138
+            },
+            "frameInWindow": {
+              "height": 62,
+              "width": 62,
+              "x": 32,
+              "y": 138
+            },
+            "hidden": false,
+            "identifier": "",
+            "isSelectedOwnedWindow": false,
+            "observedSemantics": {
+              "buttonTrait": false,
+              "effectiveUserInteractionEnabled": true,
+              "linkTrait": false,
+              "sources": {
+                "buttonTrait": "UIAccessibilityTraitsButton",
+                "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                "linkTrait": "UIAccessibilityTraitsLink",
+                "userInteractionEnabled": "UIView.userInteractionEnabled"
+              },
+              "userInteractionEnabled": true
+            },
+            "occlusion": "notComputed",
+            "order": 0,
+            "owningWindowClass": "UIWindow",
+            "renderEligible": true,
+            "text": "",
+            "textSource": "none",
+            "transformed": false,
+            "windowSceneActivationState": 0,
+            "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+          },
+          {
+            "accessibilityElementsHidden": false,
+            "accessibilityLabelRedacted": true,
+            "accessibilityViewIsModal": false,
+            "alpha": 1,
+            "ancestorOrSelfHidden": false,
+            "attachedToWindow": true,
+            "bounds": {
+              "height": 31.333343505859375,
+              "width": 16.666667938232422,
+              "x": 0,
+              "y": 0
+            },
+            "children": [],
+            "class": "RCTParagraphComponentView",
+            "clipIntersection": {
+              "height": 31.333343505859375,
+              "width": 16.666667938232422,
+              "x": 54.66666603088379,
+              "y": 153.3333330154419
+            },
+            "clipMethod": "axisAlignedBoundsIntersection",
+            "clipsToBounds": true,
+            "effectiveAlpha": 1,
+            "frameInScreen": {
+              "height": 31.333343505859375,
+              "width": 16.666667938232422,
+              "x": 54.66666603088379,
+              "y": 153.3333330154419
+            },
+            "frameInWindow": {
+              "height": 31.333343505859375,
+              "width": 16.666667938232422,
+              "x": 54.66666603088379,
+              "y": 153.3333330154419
+            },
+            "hidden": false,
+            "identifier": "",
+            "isSelectedOwnedWindow": false,
+            "observedSemantics": {
+              "buttonTrait": false,
+              "effectiveUserInteractionEnabled": true,
+              "linkTrait": false,
+              "sources": {
+                "buttonTrait": "UIAccessibilityTraitsButton",
+                "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                "linkTrait": "UIAccessibilityTraitsLink",
+                "userInteractionEnabled": "UIView.userInteractionEnabled"
+              },
+              "userInteractionEnabled": true
+            },
+            "occlusion": "notComputed",
+            "order": 1,
+            "owningWindowClass": "UIWindow",
+            "renderEligible": true,
+            "text": "Z",
+            "textSource": "RCTParagraphComponentView.attributedText",
+            "transformed": false,
+            "windowSceneActivationState": 0,
+            "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+          }
+        ],
+        "class": "RCTViewComponentView",
+        "clipIntersection": {
+          "height": 62,
+          "width": 62,
+          "x": 32,
+          "y": 138
+        },
+        "clipMethod": "axisAlignedBoundsIntersection",
+        "clipsToBounds": true,
+        "effectiveAlpha": 1,
+        "frameInScreen": {
+          "height": 62,
+          "width": 62,
+          "x": 32,
+          "y": 138
+        },
+        "frameInWindow": {
+          "height": 62,
+          "width": 62,
+          "x": 32,
+          "y": 138
+        },
+        "hidden": false,
+        "identifier": "nav.me.avatar",
+        "isSelectedOwnedWindow": false,
+        "observedSemantics": {
+          "buttonTrait": false,
+          "effectiveUserInteractionEnabled": true,
+          "linkTrait": false,
+          "sources": {
+            "buttonTrait": "UIAccessibilityTraitsButton",
+            "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+            "linkTrait": "UIAccessibilityTraitsLink",
+            "userInteractionEnabled": "UIView.userInteractionEnabled"
+          },
+          "userInteractionEnabled": true
+        },
+        "occlusion": "notComputed",
+        "order": 0,
+        "owningWindowClass": "UIWindow",
+        "renderEligible": true,
+        "text": "",
+        "textSource": "none",
+        "transformed": false,
+        "windowSceneActivationState": 0,
+        "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+      },
+      "parentSemantics": {
+        "buttonTrait": true,
+        "effectiveUserInteractionEnabled": true,
+        "linkTrait": false,
+        "rnDisabled": false,
+        "rnRole": "button",
+        "sources": {
+          "buttonTrait": "UIAccessibilityTraitsButton",
+          "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+          "linkTrait": "UIAccessibilityTraitsLink",
+          "rnDisabled": "RCTComponentViewProtocol.props.ViewProps.accessibilityState.disabled",
+          "rnRole": "RCTComponentViewProtocol.props.ViewProps.accessibilityRole",
+          "userInteractionEnabled": "UIView.userInteractionEnabled"
+        },
+        "userInteractionEnabled": true
+      },
+      "observedPublicText": "Z"
+    },
+    {
+      "sourceScene": "settings.home.managed",
+      "sourceProbeSha256": "a32cf5bc3d36f075d19206341a94dd010cd09979711b10d78cf08b3d19a13f9a",
+      "sourceRawSha256": "186161f0d5f53da130cefbbeef979b5e165a495c75697d3b0424cd0e2e6fea3c",
+      "redactions": [
+        "ax.label: account name redacted"
+      ],
+      "ax": {
+        "enabled": true,
+        "frame": {
+          "height": 56,
+          "width": 56,
+          "x": 30,
+          "y": 136
+        },
+        "identifier": "settings.home.avatar",
+        "label": "[account name redacted]",
+        "selected": false,
+        "type": "other"
+      },
+      "uikit": {
+        "accessibilityElementsHidden": false,
+        "accessibilityLabelRedacted": true,
+        "accessibilityViewIsModal": false,
+        "alpha": 1,
+        "ancestorOrSelfHidden": false,
+        "attachedToWindow": true,
+        "bounds": {
+          "height": 56,
+          "width": 56,
+          "x": 0,
+          "y": 0
+        },
+        "children": [
+          {
+            "accessibilityElementsHidden": false,
+            "accessibilityLabel": "",
+            "accessibilityViewIsModal": false,
+            "alpha": 1,
+            "ancestorOrSelfHidden": false,
+            "attachedToWindow": true,
+            "bounds": {
+              "height": 56,
+              "width": 56,
+              "x": 0,
+              "y": 0
+            },
+            "children": [
+              {
+                "accessibilityElementsHidden": false,
+                "accessibilityLabel": "",
+                "accessibilityViewIsModal": false,
+                "alpha": 1,
+                "ancestorOrSelfHidden": false,
+                "attachedToWindow": true,
+                "bounds": {
+                  "height": 56,
+                  "width": 56,
+                  "x": 0,
+                  "y": 0
+                },
+                "children": [
+                  {
+                    "accessibilityElementsHidden": false,
+                    "accessibilityLabel": "",
+                    "accessibilityViewIsModal": false,
+                    "alpha": 1,
+                    "ancestorOrSelfHidden": false,
+                    "attachedToWindow": true,
+                    "bounds": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "children": [
+                      {
+                        "accessibilityElementsHidden": false,
+                        "accessibilityLabel": "",
+                        "accessibilityViewIsModal": false,
+                        "alpha": 1,
+                        "ancestorOrSelfHidden": false,
+                        "attachedToWindow": true,
+                        "bounds": {
+                          "height": 56,
+                          "width": 56,
+                          "x": 0,
+                          "y": 0
+                        },
+                        "children": [],
+                        "class": "RNSVGLinearGradient",
+                        "clipIntersection": {
+                          "height": 56,
+                          "width": 56,
+                          "x": 30,
+                          "y": 136
+                        },
+                        "clipMethod": "axisAlignedBoundsIntersection",
+                        "clipsToBounds": false,
+                        "effectiveAlpha": 1,
+                        "frameInScreen": {
+                          "height": 56,
+                          "width": 56,
+                          "x": 30,
+                          "y": 136
+                        },
+                        "frameInWindow": {
+                          "height": 56,
+                          "width": 56,
+                          "x": 30,
+                          "y": 136
+                        },
+                        "hidden": false,
+                        "identifier": "",
+                        "isSelectedOwnedWindow": false,
+                        "observedSemantics": {
+                          "buttonTrait": false,
+                          "effectiveUserInteractionEnabled": false,
+                          "linkTrait": false,
+                          "sources": {
+                            "buttonTrait": "UIAccessibilityTraitsButton",
+                            "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                            "linkTrait": "UIAccessibilityTraitsLink",
+                            "userInteractionEnabled": "UIView.userInteractionEnabled"
+                          },
+                          "userInteractionEnabled": true
+                        },
+                        "occlusion": "notComputed",
+                        "order": 0,
+                        "owningWindowClass": "UIWindow",
+                        "renderEligible": true,
+                        "text": "",
+                        "textSource": "none",
+                        "transformed": false,
+                        "windowSceneActivationState": 0,
+                        "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                      }
+                    ],
+                    "class": "RNSVGDefs",
+                    "clipIntersection": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "clipMethod": "axisAlignedBoundsIntersection",
+                    "clipsToBounds": false,
+                    "effectiveAlpha": 1,
+                    "frameInScreen": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "frameInWindow": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "hidden": false,
+                    "identifier": "",
+                    "isSelectedOwnedWindow": false,
+                    "observedSemantics": {
+                      "buttonTrait": false,
+                      "effectiveUserInteractionEnabled": false,
+                      "linkTrait": false,
+                      "sources": {
+                        "buttonTrait": "UIAccessibilityTraitsButton",
+                        "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                        "linkTrait": "UIAccessibilityTraitsLink",
+                        "userInteractionEnabled": "UIView.userInteractionEnabled"
+                      },
+                      "userInteractionEnabled": true
+                    },
+                    "occlusion": "notComputed",
+                    "order": 0,
+                    "owningWindowClass": "UIWindow",
+                    "renderEligible": true,
+                    "text": "",
+                    "textSource": "none",
+                    "transformed": false,
+                    "windowSceneActivationState": 0,
+                    "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                  },
+                  {
+                    "accessibilityElementsHidden": false,
+                    "accessibilityLabel": "",
+                    "accessibilityViewIsModal": false,
+                    "alpha": 1,
+                    "ancestorOrSelfHidden": false,
+                    "attachedToWindow": true,
+                    "bounds": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 0,
+                      "y": 0
+                    },
+                    "children": [],
+                    "class": "RNSVGRect",
+                    "clipIntersection": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "clipMethod": "axisAlignedBoundsIntersection",
+                    "clipsToBounds": false,
+                    "effectiveAlpha": 1,
+                    "frameInScreen": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "frameInWindow": {
+                      "height": 56,
+                      "width": 56,
+                      "x": 30,
+                      "y": 136
+                    },
+                    "hidden": false,
+                    "identifier": "",
+                    "isSelectedOwnedWindow": false,
+                    "observedSemantics": {
+                      "buttonTrait": false,
+                      "effectiveUserInteractionEnabled": false,
+                      "linkTrait": false,
+                      "sources": {
+                        "buttonTrait": "UIAccessibilityTraitsButton",
+                        "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                        "linkTrait": "UIAccessibilityTraitsLink",
+                        "userInteractionEnabled": "UIView.userInteractionEnabled"
+                      },
+                      "userInteractionEnabled": false
+                    },
+                    "occlusion": "notComputed",
+                    "order": 1,
+                    "owningWindowClass": "UIWindow",
+                    "renderEligible": true,
+                    "text": "",
+                    "textSource": "none",
+                    "transformed": false,
+                    "windowSceneActivationState": 0,
+                    "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+                  }
+                ],
+                "class": "RNSVGGroup",
+                "clipIntersection": {
+                  "height": 56,
+                  "width": 56,
+                  "x": 30,
+                  "y": 136
+                },
+                "clipMethod": "axisAlignedBoundsIntersection",
+                "clipsToBounds": false,
+                "effectiveAlpha": 1,
+                "frameInScreen": {
+                  "height": 56,
+                  "width": 56,
+                  "x": 30,
+                  "y": 136
+                },
+                "frameInWindow": {
+                  "height": 56,
+                  "width": 56,
+                  "x": 30,
+                  "y": 136
+                },
+                "hidden": false,
+                "identifier": "",
+                "isSelectedOwnedWindow": false,
+                "observedSemantics": {
+                  "buttonTrait": false,
+                  "effectiveUserInteractionEnabled": false,
+                  "linkTrait": false,
+                  "sources": {
+                    "buttonTrait": "UIAccessibilityTraitsButton",
+                    "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                    "linkTrait": "UIAccessibilityTraitsLink",
+                    "userInteractionEnabled": "UIView.userInteractionEnabled"
+                  },
+                  "userInteractionEnabled": false
+                },
+                "occlusion": "notComputed",
+                "order": 0,
+                "owningWindowClass": "UIWindow",
+                "renderEligible": true,
+                "text": "",
+                "textSource": "none",
+                "transformed": false,
+                "windowSceneActivationState": 0,
+                "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+              }
+            ],
+            "class": "RNSVGSvgView",
+            "clipIntersection": {
+              "height": 56,
+              "width": 56,
+              "x": 30,
+              "y": 136
+            },
+            "clipMethod": "axisAlignedBoundsIntersection",
+            "clipsToBounds": false,
+            "effectiveAlpha": 1,
+            "frameInScreen": {
+              "height": 56,
+              "width": 56,
+              "x": 30,
+              "y": 136
+            },
+            "frameInWindow": {
+              "height": 56,
+              "width": 56,
+              "x": 30,
+              "y": 136
+            },
+            "hidden": false,
+            "identifier": "",
+            "isSelectedOwnedWindow": false,
+            "observedSemantics": {
+              "buttonTrait": false,
+              "effectiveUserInteractionEnabled": true,
+              "linkTrait": false,
+              "sources": {
+                "buttonTrait": "UIAccessibilityTraitsButton",
+                "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                "linkTrait": "UIAccessibilityTraitsLink",
+                "userInteractionEnabled": "UIView.userInteractionEnabled"
+              },
+              "userInteractionEnabled": true
+            },
+            "occlusion": "notComputed",
+            "order": 0,
+            "owningWindowClass": "UIWindow",
+            "renderEligible": true,
+            "text": "",
+            "textSource": "none",
+            "transformed": false,
+            "windowSceneActivationState": 0,
+            "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+          },
+          {
+            "accessibilityElementsHidden": false,
+            "accessibilityLabelRedacted": true,
+            "accessibilityViewIsModal": false,
+            "alpha": 1,
+            "ancestorOrSelfHidden": false,
+            "attachedToWindow": true,
+            "bounds": {
+              "height": 28.666656494140625,
+              "width": 15.333332061767578,
+              "x": 0,
+              "y": 0
+            },
+            "children": [],
+            "class": "RCTParagraphComponentView",
+            "clipIntersection": {
+              "height": 28.666656494140625,
+              "width": 15.333332061767578,
+              "x": 50.33333396911621,
+              "y": 149.6666669845581
+            },
+            "clipMethod": "axisAlignedBoundsIntersection",
+            "clipsToBounds": true,
+            "effectiveAlpha": 1,
+            "frameInScreen": {
+              "height": 28.666656494140625,
+              "width": 15.333332061767578,
+              "x": 50.33333396911621,
+              "y": 149.6666669845581
+            },
+            "frameInWindow": {
+              "height": 28.666656494140625,
+              "width": 15.333332061767578,
+              "x": 50.33333396911621,
+              "y": 149.6666669845581
+            },
+            "hidden": false,
+            "identifier": "",
+            "isSelectedOwnedWindow": false,
+            "observedSemantics": {
+              "buttonTrait": false,
+              "effectiveUserInteractionEnabled": true,
+              "linkTrait": false,
+              "sources": {
+                "buttonTrait": "UIAccessibilityTraitsButton",
+                "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+                "linkTrait": "UIAccessibilityTraitsLink",
+                "userInteractionEnabled": "UIView.userInteractionEnabled"
+              },
+              "userInteractionEnabled": true
+            },
+            "occlusion": "notComputed",
+            "order": 1,
+            "owningWindowClass": "UIWindow",
+            "renderEligible": true,
+            "text": "Z",
+            "textSource": "RCTParagraphComponentView.attributedText",
+            "transformed": false,
+            "windowSceneActivationState": 0,
+            "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+          }
+        ],
+        "class": "RCTViewComponentView",
+        "clipIntersection": {
+          "height": 56,
+          "width": 56,
+          "x": 30,
+          "y": 136
+        },
+        "clipMethod": "axisAlignedBoundsIntersection",
+        "clipsToBounds": true,
+        "effectiveAlpha": 1,
+        "frameInScreen": {
+          "height": 56,
+          "width": 56,
+          "x": 30,
+          "y": 136
+        },
+        "frameInWindow": {
+          "height": 56,
+          "width": 56,
+          "x": 30,
+          "y": 136
+        },
+        "hidden": false,
+        "identifier": "settings.home.avatar",
+        "isSelectedOwnedWindow": false,
+        "observedSemantics": {
+          "buttonTrait": false,
+          "effectiveUserInteractionEnabled": true,
+          "linkTrait": false,
+          "sources": {
+            "buttonTrait": "UIAccessibilityTraitsButton",
+            "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+            "linkTrait": "UIAccessibilityTraitsLink",
+            "userInteractionEnabled": "UIView.userInteractionEnabled"
+          },
+          "userInteractionEnabled": true
+        },
+        "occlusion": "notComputed",
+        "order": 0,
+        "owningWindowClass": "UIWindow",
+        "renderEligible": true,
+        "text": "",
+        "textSource": "none",
+        "transformed": false,
+        "windowSceneActivationState": 0,
+        "windowSceneSession": "0D8D0843-3775-49D0-976C-085CA0730E0D"
+      },
+      "parentSemantics": {
+        "buttonTrait": true,
+        "effectiveUserInteractionEnabled": true,
+        "linkTrait": false,
+        "rnDisabled": false,
+        "rnRole": "button",
+        "sources": {
+          "buttonTrait": "UIAccessibilityTraitsButton",
+          "effectiveUserInteractionEnabled": "currentUIKitAncestorInteraction",
+          "linkTrait": "UIAccessibilityTraitsLink",
+          "rnDisabled": "RCTComponentViewProtocol.props.ViewProps.accessibilityState.disabled",
+          "rnRole": "RCTComponentViewProtocol.props.ViewProps.accessibilityRole",
+          "userInteractionEnabled": "UIView.userInteractionEnabled"
+        },
+        "userInteractionEnabled": true
+      },
+      "observedPublicText": "Z"
+    }
+  ]
+}
