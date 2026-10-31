@@ -23,6 +23,10 @@
 
 Select All 必須真實存在且 `isHittable`；不存在、不可達或刪除後仍非空都回報 FAIL，不設定欄位值、不私有操作、不以座標強制點擊。密碼欄維持既有處理，不能讀回的密碼不增加值驗證。本次原生回歸使用既有英文系統編輯菜單；其他系統菜單語言未驗證時不得視為通過。
 
+系統可能將 Select All 放在編輯選單的下一頁。非空欄位必須 enabled 且 `isHittable`，之後最多檢查四頁（含起始頁）；每頁先尋找可操作的 Select All。只有唯一、enabled、`isHittable` 的公開 Forward 按鈕，與真實可見 menuItem 共用小型 AX 容器、同列且水平相鄰時才會翻頁，避免誤按頁面導覽。選單項目文字沒有進展、沒有合法 Forward 或四頁內仍找不到，都停止並回報 FAIL。Select All 後仍只刪除一次，再驗證整個欄位已空；不退回逐字刪除。
+
+幾何策略的持久 Playwright 測試使用實際 Swift 函式與原生 RED 的 menuItem／Forward frame，並拒絕背景導覽、不同列、遠距、巨大祖先及裁切容器：`npx playwright test --config tests/launch-preparation-playwright.config.js --grep 'edit menu row geometry'`。這不取代使用端的真實編輯選單操作驗收。
+
 Focused guards：`node --test tests/ios-public-input-replacement.test.js`；實際原生回歸仍使用同一 immutable App／同一 compact-en-large-note，保留獨立重跑目錄，不能覆寫原始 RED。
 
 ## 短效 deep link 的啟動準備

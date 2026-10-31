@@ -428,21 +428,67 @@ final class CaptureTests: XCTestCase {
         if !current.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count)) }
     }
 
+    // BEGIN PUBLIC EDIT MENU GEOMETRY: actual menu row and common-container bounds only.
+    private func publicEditMenuForwardRow(_ menu: CGRect, _ forward: CGRect, _ container: CGRect) -> Bool {
+        guard [menu, forward, container].allSatisfy({ rect in
+            [rect.minX, rect.minY, rect.width, rect.height].allSatisfy { $0.isFinite } && rect.width > 0 && rect.height > 0
+        }) else { return false }
+        let height = max(menu.height, forward.height)
+        let overlap = min(menu.maxY, forward.maxY) - max(menu.minY, forward.minY)
+        let gap = forward.minX - menu.maxX
+        return container.contains(menu) && container.contains(forward) && container.height <= height * 2 &&
+            overlap >= min(menu.height, forward.height) * 0.75 && abs(menu.midY - forward.midY) <= height * 0.25 &&
+            forward.midX > menu.midX && gap >= -min(menu.width, forward.width) * 0.25 && gap <= height
+    }
+    // END PUBLIC EDIT MENU GEOMETRY
+
+    /// A page-navigation Forward is unrelated: require the actual menu item and button in one small AX container.
+    private func publicEditMenuContainsForward(_ root: XCUIElementSnapshot, menu: XCUIElement, forward: XCUIElement) -> Bool {
+        func contains(_ node: XCUIElementSnapshot, type: XCUIElement.ElementType, label: String, frame: CGRect) -> Bool {
+            (node.elementType == type && node.label == label && node.frame == frame) ||
+                node.children.contains { contains($0, type: type, label: label, frame: frame) }
+        }
+        if publicEditMenuForwardRow(menu.frame, forward.frame, root.frame),
+           contains(root, type: .menuItem, label: menu.label, frame: menu.frame),
+           contains(root, type: .button, label: "Forward", frame: forward.frame) { return true }
+        return root.children.contains { publicEditMenuContainsForward($0, menu: menu, forward: forward) }
+    }
+
+    private func publicEditMenuForward(_ app: XCUIApplication, items: [XCUIElement]) -> XCUIElement? {
+        guard !items.isEmpty, let snapshot = try? app.snapshot() else { return nil }
+        let candidates = app.buttons.matching(NSPredicate(format: "label == %@", "Forward")).allElementsBoundByIndex.filter { button in
+            button.exists && button.label == "Forward" && button.isEnabled && button.isHittable &&
+                items.contains { publicEditMenuContainsForward(snapshot, menu: $0, forward: button) }
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
     /// A tap can position the caret in the middle. Select All proves the entire nonsecure value is replaced.
-    /// Only the public, reachable edit menu is used; an unavailable menu is a real driver failure.
+    /// Inspect at most four public menu pages; no progress, ambiguity or an unavailable action fails closed.
     private func clearPublicly(_ field: XCUIElement, app: XCUIApplication) -> String? {
         guard [.textField, .textView, .searchField].contains(field.elementType) else { return "public replacement requires a nonsecure text input" }
         if fieldValue(field).isEmpty { return nil }
+        guard field.exists && field.isEnabled && field.isHittable else { return "public replacement input is not reachable" }
         field.press(forDuration: 1.0)
-        let menu = app.menuItems["Select All"].firstMatch
-        let button = app.buttons["Select All"].firstMatch
-        if menu.waitForExistence(timeout: 4) {
-            guard menu.isHittable else { return "public Select All menu item is not reachable" }
-            menu.tap()
-        } else if button.waitForExistence(timeout: 2) {
-            guard button.isHittable else { return "public Select All button is not reachable" }
-            button.tap()
-        } else { return "public Select All action is unavailable" }
+        var selectedAll = false
+        var pages = Set<String>()
+        for page in 0..<4 {
+            let menu = app.menuItems["Select All"].firstMatch
+            let button = app.buttons["Select All"].firstMatch
+            if menu.waitForExistence(timeout: 4), menu.isEnabled && menu.isHittable {
+                menu.tap(); selectedAll = true; break
+            }
+            if button.waitForExistence(timeout: 2), button.isEnabled && button.isHittable {
+                button.tap(); selectedAll = true; break
+            }
+            let items = app.menuItems.allElementsBoundByIndex.filter { $0.exists && $0.isEnabled && $0.isHittable }
+            guard !items.isEmpty else { return "public edit menu is unavailable" }
+            let signature = items.map { $0.label }.sorted().joined(separator: "\u{001f}")
+            guard pages.insert(signature).inserted else { return "public edit menu did not advance" }
+            guard page < 3, let forward = publicEditMenuForward(app, items: items) else { return "public Select All action is unavailable" }
+            forward.tap()
+        }
+        guard selectedAll else { return "public Select All action is unavailable" }
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         return fieldValue(field).isEmpty ? nil : "public Select All did not clear the complete input"
     }
