@@ -416,3 +416,21 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 2. 重新啟動 Runner 一次後，規劃、修復、verify PASS、獨立審查 PASS，交付 [protoflow-test#47](https://github.com/zhangqiu-ai/protoflow-test/pull/47) 自動合併（變更 `expo/app/tasks.tsx`、`expo/src/ui.tsx` 與功能測試）。
 
 從推送原型到合併 49 分鐘，人工介入 1（上述重啟），Claude 費用約 1.40 美元（規劃 0.47、執行 0.25、審查 0.68）。T4 為 advisory：場景整體相似度 0.947–0.992，低於門檻的元素是標題列字型渲染。證據摘要：驗收專案的 `evidence/expo-p35-20261018.json`。
+
+
+## Capture-only UIKit 補充觀測試驗
+
+隔離候選驅動器提供明確 opt-in 參數 `--uikit-probe-context CTX-…`。此功能需要目標 App 另行授權、只在 capture 組態編入的 `SiyueCaptureProbe`，目前限定已核對公開 `RCTParagraphComponentView.attributedText` 的 RN 0.86.3；並非一般 iOS App 的預設能力。不得自動替專案加入探針或修改 target 設定。已完成指定 iPhone 17 模擬器的單一 RN modal 觀測試驗，見[證據與限制](uikit-probe-verification-2026-10-31.md)；編譯、合成測試與單場景觀測都不代表產品驗收。
+
+啟用後，XCTest 先帶入本輪 nonce/context/scene/screen 的 launch environment 啟動 App，再打開指定 deep link；未啟用時維持原本冷啟動流程。原步驟完成後，以兩個 fresh sample 夾住原始 AX snapshot 與完整裝置截圖，第二次觀測完成才終止 App。Node bridge 逐次解析指定 simulator/bundle 的當前容器，只使用 App 自有 `Library/Caches/SiyueCaptureProbe` 固定通道；預期身分來自已安裝 `.app` 的 Info.plist、可執行檔及 main.jsbundle 真實位元組，不來自原型預期文字。
+
+兩份完整原生樹必須相同，且 nonce、不同 sample ID、實際建置、主執行緒、時間順序與最長 10 秒 bracket 都通過。來源缺失、建置不符、不穩定或逾時均為 `NOT_RUN`，不回退成無探針成功。每次保留獨立 `uikit-probe-*` 目錄中的 raw native JSON、bridge receipt、驗證雜湊、xcodebuild log 與 xcresult；原本 `raw.json` 的 AX tree 與 `device.png` 仍保持獨立。
+
+補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；僅在當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。
+
+`visible` 在此延續原生與 DOM 的 rendered 語意：已附掛且通過 hidden、alpha、clip 檢查；每個補充事實明示 `renderEligible` 與 `occlusion: notComputed`，不宣稱未被遮擋，也不新增遮罩。輸入文字刻意不擷取，因此兩份樹相同不證明輸入內容未變；輸入仍由原始 AX、截圖及對應功能測試驗證。
+
+隔離回歸入口：`node --test tests/uikit-probe.test.js tests/uikit-probe-bridge.test.js tests/ios-driver.test.js tests/native-control-text.test.js`。瀏覽器無法執行 UIKit/XCTest 或 simulator cache 通道，這些路徑以 Node runner、原生編譯及另行協調的實際 RN 單場景驗證。其他 Web 覆蓋仍由既有 Node Playwright runner 執行。
+
+
+補充語意只使用公開 UIKit traits／enabled／editable 與 RN 0.86.3 的公開 `RCTComponentViewProtocol.props`，限定 ViewProps 的 role/accessibilityRole/disabled，逐欄記錄來源；unknown 不推定。非 input UIScrollView 只觀測公開幾何。捲出 viewport 的內容另記 `scrollContentEligible`、原因及 scroll 祖先路徑，保留原 `renderEligible`／clip；隱藏、零 alpha、detached、真正 local clip、零尺寸及未支援 nested/transform 不提升。空的實際 subtree 只有在既有同層幾何規則能明確解釋時才取得 sibling 文字，明記 `flattenedSiblingGeometry` 及原始 Text paths；不改原樹或宣稱後代，歧義拒絕。

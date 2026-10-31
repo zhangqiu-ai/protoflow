@@ -14,19 +14,22 @@
  */
 import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir, readdir, rm, stat, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { iosResponse } from '../src/drivers/ios-tree.js';
 import { launchUrl, launchUrlTemplateError } from '../src/drivers/launch-url.js';
+import { startProbeBridge } from '../src/drivers/uikit-probe-bridge.js';
+import { validateProbePair, supplementUIKitFacts } from '../src/drivers/uikit-probe.js';
 
 const engine = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runnerSource = path.join(engine, 'drivers/ios');
 const { values } = parseArgs({
   options: {
     'bundle-id': { type: 'string' }, app: { type: 'string' }, device: { type: 'string' },
+    'uikit-probe-context': { type: 'string' },
     frame: { type: 'string', default: 'safe-area' }, 'launch-url': { type: 'string' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' }
   }
 });
@@ -110,6 +113,8 @@ async function main() {
   if (!['safe-area', 'device'].includes(values.frame)) return notRun(`unknown --frame ${values.frame}`);
   const urlError = values['launch-url'] !== undefined && launchUrlTemplateError(values['launch-url']);
   if (urlError) return notRun(urlError);
+  const probeContext = values['uikit-probe-context'];
+  if (probeContext !== undefined && !/^CTX-[A-Za-z0-9_-]{1,124}$/.test(probeContext)) return notRun('invalid --uikit-probe-context');
   const timeoutMs = Number(values['timeout-ms'] ?? 10000);
   const launchTimeoutMs = Number(values['launch-timeout-ms'] ?? 60000);
   const cache = path.resolve(values.cache ?? '.protoflow/cache/ios-driver');
@@ -136,27 +141,52 @@ async function main() {
   // Measured by this runner build: a changed probe invalidates the cached safe area with the runner.
   const safeAreaFile = path.join(built.directory, `safe-area-${device.udid}.json`);
   const safeArea = JSON.parse(await readFile(safeAreaFile, 'utf8').catch(() => 'null'));
+  const probeDir = probeContext ? await mkdtemp(path.join(outputDir, 'uikit-probe-')) : null;
+  const probeSession = probeContext ? { nonce: randomUUID(), contextId: probeContext, sceneId: `${request.screen}.${request.state}`, screenAnchor: request.screen } : null;
+  if (probeSession && (probeSession.sceneId.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(probeSession.sceneId))) return notRun('invalid capture probe scene label');
   const job = {
     bundleId: values['bundle-id'], screen: request.screen, steps: request.steps, outputDir, timeoutMs, launchTimeoutMs,
     probeSafeArea: values.frame === 'safe-area' && !safeArea,
     launchArguments: ['-PROTOFLOW_SCREEN', request.screen, '-PROTOFLOW_STATE', request.state, '-PROTOFLOW_FIXTURE', JSON.stringify(request.fixture?.data ?? {}),
       '-AppleLanguages', '(en)', '-AppleLocale', 'en_US'],
+    ...(probeSession && { captureProbe: { ...probeSession, outputDir: probeDir } }),
     ...(values['launch-url'] && { launchUrl: launchUrl(values['launch-url'], request) })
   };
   const jobFile = path.join(outputDir, 'job.json');
   await writeFile(jobFile, `${JSON.stringify(job, null, 2)}\n`);
-  const results = await mkdtemp(path.join(tmpdir(), 'protoflow-ios-'));
+  const results = await mkdtemp(path.join(probeDir ?? tmpdir(), 'protoflow-ios-'));
+  const bridge = probeSession ? startProbeBridge({ device: device.udid, bundleId: values['bundle-id'], outputDir: probeDir, session: probeSession, run }) : null;
   let test;
   try {
     test = await run(['xcodebuild', 'test-without-building', '-xctestrun', built.xctestrun, '-destination', `id=${device.udid}`,
-      '-only-testing:ProtoFlowDriverUITests/CaptureTests/testCapture', '-resultBundlePath', path.join(results, 'capture.xcresult')],
+      '-only-testing:ProtoFlowDriverUITests/CaptureTests/testCapture', ...(probeSession ? ['-parallel-testing-enabled', 'NO', '-collect-test-diagnostics', 'never', '-maximum-concurrent-test-simulator-destinations', '1'] : []), '-resultBundlePath', path.join(results, 'capture.xcresult')],
     { env: { TEST_RUNNER_PROTOFLOW_DRIVER_JOB: jobFile }, timeoutMs: 600000 });
-  } finally { await rm(results, { recursive: true, force: true }); }
+  } finally {
+    await bridge?.stop();
+    if (!probeDir) await rm(results, { recursive: true, force: true });
+  }
+  if (probeDir) await writeFile(path.join(probeDir, 'xcodebuild.log'), test.stdout + test.stderr);
   const raw = JSON.parse(await readFile(path.join(outputDir, 'raw.json'), 'utf8').catch(() => 'null'));
   if (!raw) return notRun(`the XCUITest capture produced no result (xcodebuild exit ${test.code}): ${tail(test.stdout + test.stderr)}`);
   if (raw.safeArea) await writeFile(safeAreaFile, `${JSON.stringify(raw.safeArea)}\n`);
   const screenshot = raw.status === 'PASS' ? await readFile(path.join(outputDir, raw.screenshot)) : null;
-  const { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, safeArea, steps: request.steps });
+  let { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, safeArea, steps: request.steps });
+  if (probeSession && response.status === 'PASS') {
+    try {
+      if (bridge.error) throw bridge.error;
+      const before = JSON.parse(await readFile(path.join(probeDir, 'probe-before.json'), 'utf8'));
+      const after = JSON.parse(await readFile(path.join(probeDir, 'probe-after.json'), 'utf8'));
+      const verified = validateProbePair({ before, after, timing: raw.probeTiming, expectedBuild: bridge.expectedBuild, session: probeSession });
+      const area = values.frame === 'device' ? { x: 0, y: 0 } : raw.safeArea ?? safeArea;
+      response = supplementUIKitFacts(response, raw.tree, verified.capture, { anchors: request.anchors, screen: request.screen,
+        content: { x: area.x, y: area.y, width: response.viewport.width, height: response.viewport.height } });
+      await writeFile(path.join(probeDir, 'probe-validation.json'), JSON.stringify({ status: 'PASS', currentTreeSha256: verified.hash,
+        session: probeSession, actualInstalledBuild: bridge.expectedBuild, timing: raw.probeTiming }, null, 2));
+    } catch (error) {
+      await writeFile(path.join(probeDir, 'probe-validation-error.json'), JSON.stringify({ status: 'NOT_RUN', reason: error.message, session: probeSession }, null, 2));
+      return notRun(error.message);
+    }
+  }
   if (png) await writeFile(path.join(outputDir, 'screen.png'), png);
   respond({ ...response, log: `device ${device.name} (${device.udid}), runtime ${device.runtime.split('.').pop()}` });
 }

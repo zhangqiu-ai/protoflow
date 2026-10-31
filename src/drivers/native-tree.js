@@ -57,7 +57,7 @@ function joinText(nodes) {
  * Visible text of a subtree, like the DOM's innerText: text and button labels in reading order, never a control's
  * accessible name or typed field values.
  */
-export function subtreeText(node) {
+export function subtreeText(node, { onTextParts } = {}) {
   const parts = [];
   const visit = item => {
     if (TEXT_ENTRY.has(item.type) || item.visible === false) return;
@@ -67,6 +67,7 @@ export function subtreeText(node) {
     for (const child of readingOrder(item.children)) visit(child);
   };
   visit(node);
+  onTextParts?.(parts);
   return joinText(parts);
 }
 
@@ -115,7 +116,7 @@ export function scrolledOut(tree) {
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
  * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
-export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false } = {}) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts } = {}) {
   const frame = frameOf(container);
   const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
   // A scroll view's content is the text of a container outside it only when the scroll view lies in the container as
@@ -172,7 +173,9 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
     return stacked([...units.keys()], depth ? layers([...units.keys()], parent, order) : placed)
       .flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
   };
-  return joinText(ordered(text, 0));
+  const parts = ordered(text, 0);
+  onTextParts?.(parts);
+  return joinText(parts);
 }
 
 const area = frame => Math.max(0, frame.width) * Math.max(0, frame.height);
@@ -254,12 +257,12 @@ function stacked(units, placed) {
  * The element's own text: field value/placeholder, only visible Text descendants for controls (leaf checkboxes have
  * none), the label of text and buttons, else its visible text (by hierarchy, or by geometry in a flattened tree).
  */
-export function elementText(node, tree = null, scrolled = undefined, { screen = false } = {}) {
+export function elementText(node, tree = null, scrolled = undefined, { screen = false, onTextParts } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
-  if (CONTROLS.has(node.type)) return joinText(controlTextParts(node));
-  if (LABELLED.has(node.type)) return node.label ?? '';
-  if (node.children?.length) return subtreeText(node);
-  return tree && !node.label ? textWithin(tree, node, scrolled, { screen }) : node.label ?? '';
+  if (CONTROLS.has(node.type)) { const parts = controlTextParts(node); onTextParts?.(parts); return joinText(parts); }
+  if (LABELLED.has(node.type)) { onTextParts?.(node.label ? [node] : []); return node.label ?? ''; }
+  if (node.children?.length) return subtreeText(node, { onTextParts });
+  return tree && !node.label ? textWithin(tree, node, scrolled, { screen, onTextParts }) : node.label ?? '';
 }
 
 function collect(node, byId = new Map()) {

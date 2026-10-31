@@ -10,6 +10,13 @@ import XCTest
  */
 final class CaptureTests: XCTestCase {
     struct Step: Decodable { let action: String; let anchor: String?; let value: String?; let timeoutMs: Int? }
+    struct CaptureProbe: Decodable {
+        let nonce: String
+        let contextId: String
+        let sceneId: String
+        let screenAnchor: String
+        let outputDir: String
+    }
     struct Job: Decodable {
         let bundleId: String
         let screen: String
@@ -20,6 +27,7 @@ final class CaptureTests: XCTestCase {
         let timeoutMs: Int?
         let launchTimeoutMs: Int?
         let probeSafeArea: Bool?
+        let captureProbe: CaptureProbe?
     }
 
     func testCapture() throws {
@@ -52,12 +60,17 @@ final class CaptureTests: XCTestCase {
             host.terminate()
         }
         app.terminate()
+        if let probe = job.captureProbe {
+            app.launchEnvironment = ["SIYUE_CAPTURE_PROBE_SESSION": probe.nonce, "SIYUE_CAPTURE_PROBE_CONTEXT": probe.contextId,
+                "SIYUE_CAPTURE_PROBE_SCENE": probe.sceneId, "SIYUE_CAPTURE_PROBE_SCREEN": probe.screenAnchor]
+        }
         if let launchUrl = job.launchUrl {
             // Deep-link apps (Expo Router) cold-start on the route the URL names; launch arguments do not apply.
             guard let url = URL(string: launchUrl) else {
                 result = ["status": "FAIL", "reason": "launch URL \(launchUrl) is not a valid URL"]
                 return
             }
+            if job.captureProbe != nil { app.launch() }
             app.open(url)
         } else {
             app.launchArguments = job.launchArguments
@@ -79,8 +92,17 @@ final class CaptureTests: XCTestCase {
         }
         // Let layout settle after the last step; XCUITest already waits for the app to be idle on each query.
         Thread.sleep(forTimeInterval: 0.3)
+        if let probe = job.captureProbe, let reason = requestProbe(probe, phase: "before") {
+            result = failure(app, output, reason)
+            result["status"] = "NOT_RUN"
+            return
+        }
+        let axStarted = Date().timeIntervalSince1970
         let snapshot = try app.snapshot()
+        let axFinished = Date().timeIntervalSince1970
+        let screenshotStarted = Date().timeIntervalSince1970
         let screenshot = XCUIScreen.main.screenshot()
+        let screenshotFinished = Date().timeIntervalSince1970
         try screenshot.pngRepresentation.write(to: output.appendingPathComponent("device.png"))
         let keyboard = app.keyboards.firstMatch
         result = [
@@ -89,11 +111,43 @@ final class CaptureTests: XCTestCase {
             "tree": serialize(snapshot),
             "screenshot": "device.png"
         ]
+        if let probe = job.captureProbe {
+            result["probeTiming"] = ["axStartedAt": axStarted, "axFinishedAt": axFinished,
+                "screenshotStartedAt": screenshotStarted, "screenshotFinishedAt": screenshotFinished]
+            if let reason = requestProbe(probe, phase: "after") {
+                result["status"] = "NOT_RUN"
+                result["reason"] = reason
+                return
+            }
+        }
         // A state that ends while typing may keep the keyboard up; the engine leaves its frame out of the comparison.
         if keyboard.exists {
             let frame = keyboard.frame
             result["keyboardFrame"] = ["x": frame.origin.x, "y": frame.origin.y, "width": frame.size.width, "height": frame.size.height]
         }
+    }
+
+    /// Host bridge writes only the fixed owned App cache channel; XCTest never opens another App's container.
+    private func requestProbe(_ probe: CaptureProbe, phase: String) -> String? {
+        let folder = URL(fileURLWithPath: probe.outputDir)
+        let sampleId = UUID().uuidString.lowercased()
+        let marker: [String: Any] = ["nonce": probe.nonce, "sampleId": sampleId, "phase": phase]
+        do {
+            let bytes = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+            let request = folder.appendingPathComponent("probe-request.json")
+            try bytes.write(to: request, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: request.path)
+            let deadline = Date().addingTimeInterval(12)
+            while Date() < deadline {
+                if let bytes = try? Data(contentsOf: folder.appendingPathComponent("probe-ack-\(phase).json")),
+                   let ack = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                   ack["nonce"] as? String == probe.nonce, ack["sampleId"] as? String == sampleId {
+                    return ack["status"] as? String == "OK" ? nil : "UIKit probe: \(ack["reason"] as? String ?? "bridge failed")"
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return "UIKit probe: \(phase) sample timed out"
+        } catch { return "UIKit probe: \(error.localizedDescription)" }
     }
 
     /// A failed capture still keeps what the screen showed: the screenshot and tree are evidence, never compared.
