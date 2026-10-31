@@ -442,10 +442,23 @@ final class CaptureTests: XCTestCase {
     }
     // END PUBLIC EDIT MENU GEOMETRY
 
+    // BEGIN PUBLIC EDIT MENU FRAME IDENTITY: floating-point representation only, never a point or pixel tolerance.
+    private func publicEditMenuSameFrame(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        let left = [lhs.origin.x, lhs.origin.y, lhs.size.width, lhs.size.height]
+        let right = [rhs.origin.x, rhs.origin.y, rhs.size.width, rhs.size.height]
+        return zip(left, right).allSatisfy { first, second in
+            guard first.isFinite && second.isFinite else { return false }
+            var lower = first, upper = first
+            for _ in 0..<4 { lower = lower.nextDown; upper = upper.nextUp }
+            return second >= lower && second <= upper
+        }
+    }
+    // END PUBLIC EDIT MENU FRAME IDENTITY
+
     /// A page-navigation Forward is unrelated: require the actual menu item and button in one small AX container.
     private func publicEditMenuContainsForward(_ root: XCUIElementSnapshot, menu: XCUIElement, forward: XCUIElement) -> Bool {
         func contains(_ node: XCUIElementSnapshot, type: XCUIElement.ElementType, label: String, frame: CGRect) -> Bool {
-            (node.elementType == type && node.label == label && node.frame == frame) ||
+            (node.elementType == type && node.label == label && publicEditMenuSameFrame(node.frame, frame)) ||
                 node.children.contains { contains($0, type: type, label: label, frame: frame) }
         }
         if publicEditMenuForwardRow(menu.frame, forward.frame, root.frame),
