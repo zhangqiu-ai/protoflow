@@ -225,6 +225,42 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
   return { corrections, blocked: new Set() };
 }
 
+/** A nested native screen anchor still represents the complete captured content, not just its main pane. */
+function ownedWindowScreenText(response, rawAX, capture, interpretation, { screen, content }, corrections, blocked) {
+  if (!rawAX || blocked.has(screen) || !rectangle(content) || content.width <= 0 || content.height <= 0) return;
+  const axNodes = allNodes(rawAX), axFound = axNodes.filter(node => node.identifier === screen);
+  const contains = (outer, inner) => rectangle(outer) && rectangle(inner) && inner.width > 0 && inner.height > 0
+    && inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
+  // Existing whole-content anchors keep their original interpretation. Only a genuine main-pane scope mismatch
+  // enters this correction; no expected text, screen name or application layout is configured here.
+  if (!axFound.length || !contains(content, axFound[0].frame) || sameFrame(content, axFound[0].frame)) return;
+  const reject = () => { blocked.add(screen); };
+  const items = (response.elements ?? []).filter(item => item.anchor === screen);
+  const current = [...interpretation.paths.keys()].filter(node => node.identifier === screen);
+  if (items.length !== 1 || axFound.length !== 1 || current.length !== 1 || capture.windows.length !== 1) return reject();
+  const item = items[0], ax = axFound[0], node = current[0], window = capture.windows[0];
+  const semantic = semanticFacts(node);
+  if (item.count !== 1 || ax.type !== 'other' || item.role !== ax.type || item.inputType != null
+    || item.editable !== false || item.interactive !== false || item.visible !== true || ax.visible === false
+    || node.inputRedacted || node.observedSemantics?.inputKind || node.observedSemantics?.editable !== undefined
+    || semantic.role !== 'other' || semantic.interactive !== false || semantic.editable !== false
+    || !sameFrame(ax.frame, node.frameInScreen) || !sameFrame(item.bounds, { x: 0, y: 0, width: content.width, height: content.height })
+    || window.screenAnchor !== screen || !contains(window.windowFrame, content)
+    || elementText(ax, rawAX, scrolledOut(rawAX), { screen: true }) !== item.text) return reject();
+  const facts = interpretation.facts(node, { screen: true });
+  if (facts.visible !== true || facts.textScope !== 'ownedWindow' || !facts.text.trim() || !facts.textNodePaths.length) return reject();
+  const axPaths = new Map();
+  const locate = (node, at) => { axPaths.set(node, at); (node.children ?? []).forEach((child, index) => locate(child, [...at, index])); };
+  locate(rawAX, []);
+  const previous = corrections.get(screen) ?? item;
+  corrections.set(screen, { ...previous, text: facts.text, provenance: {
+    ...(previous.provenance && { previousProvenance: previous.provenance }), source: 'currentUIKitViewTree', fields: ['text'],
+    occlusion: 'notComputed', textScope: 'ownedWindow', textCorrection: 'publicOwnedWindowScreenText',
+    class: node.class, nativeNodePath: interpretation.paths.get(node), scopeNativeNodePath: [0], textNodePaths: facts.textNodePaths,
+    originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) }
+  } });
+}
+
 /** Opt-in current UIKit supplementation and text-only correction; never invent AX interaction semantics. */
 export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen, content }) {
   if (response.status !== 'PASS') return response;
@@ -240,6 +276,7 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
   locate(window.tree, [0]);
   const observedMissing = missing.filter(id => byId.has(id) && !axIds.has(id));
   const { corrections, blocked } = controlTextCorrections(response, rawAX, interpretation, screen);
+  ownedWindowScreenText(response, rawAX, capture, interpretation, { screen, content }, corrections, blocked);
   if (!observedMissing.length) return corrections.size
     ? { ...response, elements: response.elements.map(item => corrections.get(item.anchor) ?? item) } : response;
   const additions = [];

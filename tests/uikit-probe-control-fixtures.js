@@ -36,7 +36,7 @@ export function controlFixture(change = () => {}) {
     axControl: rawAX.children[0].children[1], axContainer: rawAX.children[0], anchors, rect, uikit, ax };
   change(fixture);
   const capture = { source: 'currentUIKitViewTree', occlusion: 'notComputed', nodeCount: count(tree), windows: [{
-    sceneSession: 'synthetic-control-window', bounds: rect(), windowFrame: rect(), screenBounds: rect(), screenScale: 3,
+    sceneSession: 'synthetic-control-window', bounds: fixture.windowFrame ?? rect(), windowFrame: fixture.windowFrame ?? rect(), screenBounds: fixture.windowFrame ?? rect(), screenScale: 3,
     screenAnchor: 'test.screen', tree
   }] };
   const session = { nonce: '11111111-1111-4111-8111-111111111111', contextId: 'CTX-control-text', sceneId: 'test.screen.initial', screenAnchor: 'test.screen' };
@@ -47,7 +47,7 @@ export function controlFixture(change = () => {}) {
     before: sample('22222222-2222-4222-8222-222222222222', 1, 1.01), after: sample('33333333-3333-4333-8333-333333333333', 1.3, 1.31),
     timing: { axStartedAt: 1.05, axFinishedAt: 1.1, screenshotStartedAt: 1.15, screenshotFinishedAt: 1.2 }, session, expectedBuild
   });
-  const options = { anchors, screen: 'test.screen', content: rect() };
+  const options = { anchors, screen: 'test.screen', content: fixture.content ?? rect() };
   const response = { schemaVersion: 1, status: 'PASS', ...anchorFacts(rawAX, options) };
   fixture.changeResponse?.(response);
   const before = { response: clone(response), rawAX: clone(rawAX), capture: clone(verified.capture) };
