@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /*
  * ProtoFlow iOS capture. One run = one scene: launch the target app on a screen, replay the anchor steps, then
@@ -28,6 +29,10 @@ final class CaptureTests: XCTestCase {
         let launchTimeoutMs: Int?
         let probeSafeArea: Bool?
         let captureProbe: CaptureProbe?
+        let orientation: String?
+        let rotateAfterSteps: String?
+        let preserveSyntheticInputs: [String]?
+        let hittableAnchors: [String]?
     }
 
     func testCapture() throws {
@@ -36,6 +41,7 @@ final class CaptureTests: XCTestCase {
         let output = URL(fileURLWithPath: job.outputDir)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let app = XCUIApplication(bundleIdentifier: job.bundleId)
+        let previousOrientation = XCUIDevice.shared.orientation
         var result: [String: Any] = [:]
         var safeArea: [String: Double]? = nil
         defer {
@@ -44,10 +50,12 @@ final class CaptureTests: XCTestCase {
                 try? data.write(to: output.appendingPathComponent("raw.json"))
             }
             app.terminate()
+            if job.orientation != nil || job.rotateAfterSteps != nil { XCUIDevice.shared.orientation = previousOrientation }
         }
         let timeout = Double(job.timeoutMs ?? 10000) / 1000
         // Cold launches (React Native loads its JS bundle) take longer than a step.
         let launchTimeout = Double(job.launchTimeoutMs ?? 60000) / 1000
+        if let orientation = job.orientation { XCUIDevice.shared.orientation = try deviceOrientation(orientation) }
         if job.probeSafeArea == true {
             // The host app fills exactly the safe area; its frame is the device's content frame.
             let host = XCUIApplication()
@@ -90,6 +98,29 @@ final class CaptureTests: XCTestCase {
                 return
             }
         }
+        var responsive: [String: Any]? = nil
+        if job.orientation != nil || job.rotateAfterSteps != nil {
+            let before = app.windows.firstMatch.frame
+            var fields: [(String, String)] = []
+            for anchor in job.preserveSyntheticInputs ?? [] {
+                let field = element(app, anchor)
+                guard field.exists && [.textField, .textView, .searchField].contains(field.elementType) else {
+                    result = failure(app, output, "synthetic input is absent or is not a nonsecure text field: \(anchor)")
+                    return
+                }
+                fields.append((anchor, fieldValue(field)))
+            }
+            if let orientation = job.rotateAfterSteps { XCUIDevice.shared.orientation = try deviceOrientation(orientation) }
+            Thread.sleep(forTimeInterval: 0.5)
+            let after = app.windows.firstMatch.frame
+            let observations: [[String: Any]] = fields.map { anchor, value in
+                let field = element(app, anchor)
+                return ["anchor": anchor, "beforeLength": value.count, "afterLength": field.exists ? fieldValue(field).count : 0,
+                    "preserved": field.exists && fieldValue(field) == value]
+            }
+            responsive = ["orientation": XCUIDevice.shared.orientation.rawValue, "windowBefore": rect(before), "windowAfter": rect(after),
+                "windowSizeChanged": before.size != after.size, "syntheticInputs": observations]
+        }
         // Let layout settle after the last step; XCUITest already waits for the app to be idle on each query.
         Thread.sleep(forTimeInterval: 0.3)
         if let probe = job.captureProbe, let reason = requestProbe(probe, phase: "before") {
@@ -111,6 +142,14 @@ final class CaptureTests: XCTestCase {
             "tree": serialize(snapshot),
             "screenshot": "device.png"
         ]
+        if let responsive { result["responsiveObservations"] = responsive }
+        if let anchors = job.hittableAnchors {
+            result["nativeReachability"] = anchors.map { anchor -> [String: Any] in
+                let target = element(app, anchor)
+                return ["anchor": anchor, "exists": target.exists, "enabled": target.exists && target.isEnabled,
+                    "hittable": target.exists && target.isHittable]
+            }
+        }
         if let probe = job.captureProbe {
             result["probeTiming"] = ["axStartedAt": axStarted, "axFinishedAt": axFinished,
                 "screenshotStartedAt": screenshotStarted, "screenshotFinishedAt": screenshotFinished]
@@ -125,6 +164,20 @@ final class CaptureTests: XCTestCase {
             let frame = keyboard.frame
             result["keyboardFrame"] = ["x": frame.origin.x, "y": frame.origin.y, "width": frame.size.width, "height": frame.size.height]
         }
+    }
+
+    private func deviceOrientation(_ name: String) throws -> UIDeviceOrientation {
+        switch name {
+        case "portrait": return .portrait
+        case "portrait-upside-down": return .portraitUpsideDown
+        case "landscape-left": return .landscapeLeft
+        case "landscape-right": return .landscapeRight
+        default: throw NSError(domain: "ProtoFlowDriver", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid capture orientation"])
+        }
+    }
+
+    private func rect(_ frame: CGRect) -> [String: Double] {
+        ["x": frame.origin.x, "y": frame.origin.y, "width": frame.width, "height": frame.height]
     }
 
     /// Host bridge writes only the fixed owned App cache channel; XCTest never opens another App's container.

@@ -6,6 +6,7 @@
  *
  *   argv: node scripts/ios-driver.js --bundle-id ID --device NAME|UDID [--app PATH.app] [--frame safe-area|device]
  *         [--launch-url TEMPLATE] [--timeout-ms N] [--launch-timeout-ms N] [--cache DIR]
+ *         Optional responsive capture flags: see docs/ios-responsive-capture.md (default behavior is unchanged).
  *
  * Launch convention: the app receives `-PROTOFLOW_SCREEN <screen> -PROTOFLOW_STATE <state> -PROTOFLOW_FIXTURE <json>`
  * as launch arguments (readable through UserDefaults / NSArgumentDomain) and must open that screen directly. With
@@ -26,13 +27,56 @@ import { validateProbePair, supplementUIKitFacts } from '../src/drivers/uikit-pr
 
 const engine = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runnerSource = path.join(engine, 'drivers/ios');
-const { values } = parseArgs({
+export const driverOptions = args => parseArgs({
+  args,
   options: {
     'bundle-id': { type: 'string' }, app: { type: 'string' }, device: { type: 'string' },
     'uikit-probe-context': { type: 'string' },
-    frame: { type: 'string', default: 'safe-area' }, 'launch-url': { type: 'string' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' }
+    frame: { type: 'string', default: 'safe-area' }, 'launch-url': { type: 'string' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' },
+    orientation: { type: 'string' }, 'rotate-after-steps': { type: 'string' },
+    'preserve-known-synthetic-inputs': { type: 'string' }, 'hittable-anchors': { type: 'string' }, appearance: { type: 'string' }
   }
-});
+}).values;
+
+const orientations = ['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right'];
+export function responsiveOptionsError(values, request) {
+  if (!['safe-area', 'device', 'app-window'].includes(values.frame)) return `unknown --frame ${values.frame}`;
+  if (values.frame === 'app-window' && !values['uikit-probe-context']) return '--frame app-window needs --uikit-probe-context';
+  if (values['rotate-after-steps'] && values.frame === 'safe-area') return '--rotate-after-steps needs --frame device or app-window';
+  for (const key of ['orientation', 'rotate-after-steps']) {
+    if (values[key] !== undefined && !orientations.includes(values[key])) return `invalid --${key}`;
+  }
+  if (values.appearance !== undefined && !['light', 'dark'].includes(values.appearance)) return 'invalid --appearance';
+  if (values['hittable-anchors'] !== undefined) {
+    const anchors = values['hittable-anchors'].split(',');
+    if (anchors.length > 16 || new Set(anchors).size !== anchors.length || anchors.some(anchor => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(anchor))) return 'invalid --hittable-anchors';
+  }
+  if (values['preserve-known-synthetic-inputs'] !== undefined) {
+    const anchors = values['preserve-known-synthetic-inputs'].split(',');
+    if (!values['rotate-after-steps'] || request.fixture?.data?.session !== 'qa' || anchors.length > 8 ||
+      new Set(anchors).size !== anchors.length || anchors.some(anchor => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(anchor) ||
+        !request.steps?.some(step => step.action === 'fill' && step.anchor === anchor && typeof step.value === 'string' && step.value.length > 0 && step.value.length <= 4096))) {
+      return '--preserve-known-synthetic-inputs needs qa fixture, rotation, and up to eight unique filled anchors';
+    }
+  }
+  return null;
+}
+
+/** Only validated, unchanged probe samples may supply an app-window crop. No target viewport is involved. */
+export function measuredAppContent(capture) {
+  const reject = () => { throw new Error('UIKit probe: app-window crop has invalid or transformed measured geometry'); };
+  const window = capture?.windows?.length === 1 ? capture.windows[0] : null;
+  const rect = value => value && ['x', 'y', 'width', 'height'].every(key => typeof value[key] === 'number' && Number.isFinite(value[key])) && value.width > 0 && value.height > 0;
+  const { bounds, windowFrame: frame, screenBounds: screen, safeAreaInsets: insets, tree } = window ?? {};
+  if (!rect(bounds) || !rect(frame) || !rect(screen) || !rect(tree?.frameInScreen) || tree.transformed !== false ||
+    bounds.x !== 0 || bounds.y !== 0 || bounds.width !== frame.width || bounds.height !== frame.height ||
+    ['x', 'y', 'width', 'height'].some(key => frame[key] !== tree.frameInScreen[key]) ||
+    !insets || !['top', 'left', 'bottom', 'right'].every(key => typeof insets[key] === 'number' && Number.isFinite(insets[key]) && insets[key] >= 0) ||
+    frame.x < screen.x || frame.y < screen.y || frame.x + frame.width > screen.x + screen.width || frame.y + frame.height > screen.y + screen.height) reject();
+  const result = { x: frame.x + insets.left, y: frame.y + insets.top, width: bounds.width - insets.left - insets.right, height: bounds.height - insets.top - insets.bottom };
+  if (!rect(result)) reject();
+  return result;
+}
 
 const respond = response => process.stdout.write(`${JSON.stringify(response)}\n`);
 const notRun = reason => respond({ schemaVersion: 1, status: 'NOT_RUN', reason });
@@ -75,14 +119,15 @@ async function findDevice(wanted) {
   return { device };
 }
 
-async function prepareDevice(device) {
+async function prepareDevice(device, appearance) {
   if (device.state !== 'Booted') {
     const boot = await run(['xcrun', 'simctl', 'boot', device.udid], { timeoutMs: 180000 });
     if (boot.code !== 0 && !/current state: Booted/.test(boot.stderr)) return `simulator ${device.name} did not boot: ${tail(boot.stderr)}`;
   }
   const ready = await run(['xcrun', 'simctl', 'bootstatus', device.udid, '-b'], { timeoutMs: 300000 });
   if (ready.code !== 0) return `simulator ${device.name} did not finish booting: ${tail(ready.stderr)}`;
-  await run(['xcrun', 'simctl', 'ui', device.udid, 'appearance', 'light'], { timeoutMs: 300000 });
+  const appearanceResult = await run(['xcrun', 'simctl', 'ui', device.udid, 'appearance', appearance ?? 'light'], { timeoutMs: 300000 });
+  if (appearance !== undefined && appearanceResult.code !== 0) return `simulator ${device.name} did not set its appearance: ${tail(appearanceResult.stderr)}`;
   return null;
 }
 
@@ -105,12 +150,14 @@ async function runner(cache) {
 }
 
 async function main() {
+  const values = driverOptions(process.argv.slice(2));
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const request = JSON.parse(input);
   if (process.platform !== 'darwin') return notRun('the iOS driver needs macOS with Xcode');
   if (!values['bundle-id'] || !values.device) return notRun('the iOS driver needs --bundle-id and --device');
-  if (!['safe-area', 'device'].includes(values.frame)) return notRun(`unknown --frame ${values.frame}`);
+  const optionError = responsiveOptionsError(values, request);
+  if (optionError) return notRun(optionError);
   const urlError = values['launch-url'] !== undefined && launchUrlTemplateError(values['launch-url']);
   if (urlError) return notRun(urlError);
   const probeContext = values['uikit-probe-context'];
@@ -122,7 +169,7 @@ async function main() {
 
   const { device, error } = await findDevice(values.device);
   if (error) return notRun(error);
-  const bootError = await prepareDevice(device);
+  const bootError = await prepareDevice(device, values.appearance);
   if (bootError) return notRun(bootError);
   if (values.app) {
     const app = path.resolve(values.app);
@@ -139,7 +186,7 @@ async function main() {
   await mkdir(outputDir, { recursive: true });
   await rm(path.join(outputDir, 'raw.json'), { force: true });
   // Measured by this runner build: a changed probe invalidates the cached safe area with the runner.
-  const safeAreaFile = path.join(built.directory, `safe-area-${device.udid}.json`);
+  const safeAreaFile = path.join(built.directory, `safe-area-${device.udid}${values.orientation ? `-${values.orientation}` : ''}.json`);
   const safeArea = JSON.parse(await readFile(safeAreaFile, 'utf8').catch(() => 'null'));
   const probeDir = probeContext ? await mkdtemp(path.join(outputDir, 'uikit-probe-')) : null;
   const probeSession = probeContext ? { nonce: randomUUID(), contextId: probeContext, sceneId: `${request.screen}.${request.state}`, screenAnchor: request.screen } : null;
@@ -150,6 +197,10 @@ async function main() {
     launchArguments: ['-PROTOFLOW_SCREEN', request.screen, '-PROTOFLOW_STATE', request.state, '-PROTOFLOW_FIXTURE', JSON.stringify(request.fixture?.data ?? {}),
       '-AppleLanguages', '(en)', '-AppleLocale', 'en_US'],
     ...(probeSession && { captureProbe: { ...probeSession, outputDir: probeDir } }),
+    ...(values.orientation && { orientation: values.orientation }),
+    ...(values['rotate-after-steps'] && { rotateAfterSteps: values['rotate-after-steps'] }),
+    ...(values['preserve-known-synthetic-inputs'] && { preserveSyntheticInputs: values['preserve-known-synthetic-inputs'].split(',') }),
+    ...(values['hittable-anchors'] && { hittableAnchors: values['hittable-anchors'].split(',') }),
     ...(values['launch-url'] && { launchUrl: launchUrl(values['launch-url'], request) })
   };
   const jobFile = path.join(outputDir, 'job.json');
@@ -170,13 +221,26 @@ async function main() {
   if (!raw) return notRun(`the XCUITest capture produced no result (xcodebuild exit ${test.code}): ${tail(test.stdout + test.stderr)}`);
   if (raw.safeArea) await writeFile(safeAreaFile, `${JSON.stringify(raw.safeArea)}\n`);
   const screenshot = raw.status === 'PASS' ? await readFile(path.join(outputDir, raw.screenshot)) : null;
-  let { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame, safeArea, steps: request.steps });
+  let verifiedProbe;
+  if (values.frame === 'app-window' && raw.status === 'PASS') {
+    try {
+      if (bridge.error) throw bridge.error;
+      const before = JSON.parse(await readFile(path.join(probeDir, 'probe-before.json'), 'utf8'));
+      const after = JSON.parse(await readFile(path.join(probeDir, 'probe-after.json'), 'utf8'));
+      verifiedProbe = validateProbePair({ before, after, timing: raw.probeTiming, expectedBuild: bridge.expectedBuild, session: probeSession });
+      raw.safeArea = measuredAppContent(verifiedProbe.capture);
+      await writeFile(path.join(outputDir, 'app-window-frame.json'), JSON.stringify({ source: 'stableCurrentUIKitWindow',
+        currentTreeSha256: verifiedProbe.hash, window: verifiedProbe.capture.windows[0].windowFrame,
+        bounds: verifiedProbe.capture.windows[0].bounds, safeAreaInsets: verifiedProbe.capture.windows[0].safeAreaInsets, content: raw.safeArea }, null, 2));
+    } catch (error) { return notRun(error.message); }
+  }
+  let { response, png } = iosResponse(raw, screenshot, { anchors: request.anchors, screen: request.screen, frame: values.frame === 'app-window' ? 'safe-area' : values.frame, safeArea, steps: request.steps });
   if (probeSession && response.status === 'PASS') {
     try {
       if (bridge.error) throw bridge.error;
       const before = JSON.parse(await readFile(path.join(probeDir, 'probe-before.json'), 'utf8'));
       const after = JSON.parse(await readFile(path.join(probeDir, 'probe-after.json'), 'utf8'));
-      const verified = validateProbePair({ before, after, timing: raw.probeTiming, expectedBuild: bridge.expectedBuild, session: probeSession });
+      const verified = verifiedProbe ?? validateProbePair({ before, after, timing: raw.probeTiming, expectedBuild: bridge.expectedBuild, session: probeSession });
       const area = values.frame === 'device' ? { x: 0, y: 0 } : raw.safeArea ?? safeArea;
       response = supplementUIKitFacts(response, raw.tree, verified.capture, { anchors: request.anchors, screen: request.screen,
         content: { x: area.x, y: area.y, width: response.viewport.width, height: response.viewport.height } });
@@ -191,4 +255,4 @@ async function main() {
   respond({ ...response, log: `device ${device.name} (${device.udid}), runtime ${device.runtime.split('.').pop()}` });
 }
 
-main().catch(error => notRun(`ios driver error: ${error.message}`));
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => notRun(`ios driver error: ${error.message}`));
