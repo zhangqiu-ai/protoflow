@@ -44,32 +44,43 @@ function fieldText(node) {
 }
 
 /**
- * Join a container's text parts (nodes in reading order). Native controls often repeat a visible label as their
- * accessible name (a switch named like the title beside it), so a control's label that matches other text in the
- * container is left out wherever it stands, and consecutive duplicates collapse.
+ * Join visible text parts in reading order. Consecutive duplicates from overlapping native nodes collapse;
+ * a control's accessible name never enters these parts, whether or not another visible label matches it.
  */
 const apart = (a, b) => area(frameOf(a)) > 0 && area(frameOf(b)) > 0 && overlap(frameOf(a), frameOf(b)) < 0.5;
 function joinText(nodes) {
-  const shown = new Set(nodes.filter(item => !CONTROLS.has(item.type)).map(item => item.label));
-  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label));
-  return parts.filter((item, index) => index === 0 || item.label !== parts[index - 1].label || apart(item, parts[index - 1]))
+  return nodes.filter((item, index) => index === 0 || item.label !== nodes[index - 1].label || apart(item, nodes[index - 1]))
     .map(item => item.label).join(' ');
 }
 
 /**
- * Visible text of a subtree, like the DOM's innerText: labels of text, buttons and controls in reading order, never
- * typed field values.
+ * Visible text of a subtree, like the DOM's innerText: text and button labels in reading order, never a control's
+ * accessible name or typed field values.
  */
 export function subtreeText(node) {
   const parts = [];
   const visit = item => {
     if (TEXT_ENTRY.has(item.type) || item.visible === false) return;
+    if (CONTROLS.has(item.type)) { parts.push(...controlTextParts(item)); return; }
     if (LABELLED.has(item.type) && item.label) { parts.push(item); return; }
     if (!item.children?.length) { if (item.label) parts.push(item); return; }
     for (const child of readingOrder(item.children)) visit(child);
   };
   visit(node);
   return joinText(parts);
+}
+
+// A composite control may render Text children, unlike a leaf UISwitch. Its own label is an accessible name,
+// never evidence of visible text. Dynamic descendant anchors are excluded later by compareStructure as usual.
+function controlTextParts(node) {
+  const parts = [];
+  const visit = item => {
+    if (item.visible === false || TEXT_ENTRY.has(item.type)) return;
+    if (item.type === 'staticText' && item.label) { parts.push(item); return; }
+    for (const child of item.children ?? []) visit(child);
+  };
+  visit(node);
+  return readingOrder(parts);
 }
 
 const inside = (inner, outer) => {
@@ -122,16 +133,19 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
   const within = (item, scroller) => !scroller || along.has(scroller)
     ? inside(frameOf(item), frame) && [...along].every(clip => scrollers(scroller).has(clip) || inside(frameOf(item), frameOf(clip)))
     : within(scroller, outer.get(scroller)) && (scrolled.has(item) || inside(frameOf(item), frame));
-  const visit = (item, scroller) => {
+  const visit = (item, scroller, textOnly = false) => {
     order.set(item, order.size);
     if (item === container) owner.set(item, scroller);
     if (item === container || item.visible === false) return;
+    if (textOnly && TEXT_ENTRY.has(item.type)) return;
+    const controlTextOnly = textOnly || CONTROLS.has(item.type);
     if (within(item, scroller) && !TEXT_ENTRY.has(item.type)) {
-      const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
+      const leaf = controlTextOnly ? item.type === 'staticText' && item.label
+        : (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
     if (SCROLLERS.has(item.type)) outer.set(item, scroller);
-    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller); }
+    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller, controlTextOnly); }
   };
   visit(tree, null);
   const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
@@ -237,12 +251,12 @@ function stacked(units, placed) {
 }
 
 /**
- * The element's own text: field value/placeholder, nothing for controls (web reports '' for checkboxes), the label of
- * text and buttons, else the visible text it contains (by hierarchy, or by geometry when the tree is flattened).
+ * The element's own text: field value/placeholder, only visible Text descendants for controls (leaf checkboxes have
+ * none), the label of text and buttons, else its visible text (by hierarchy, or by geometry in a flattened tree).
  */
 export function elementText(node, tree = null, scrolled = undefined, { screen = false } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
-  if (CONTROLS.has(node.type)) return '';
+  if (CONTROLS.has(node.type)) return joinText(controlTextParts(node));
   if (LABELLED.has(node.type)) return node.label ?? '';
   if (node.children?.length) return subtreeText(node);
   return tree && !node.label ? textWithin(tree, node, scrolled, { screen }) : node.label ?? '';

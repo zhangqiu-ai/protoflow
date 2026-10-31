@@ -208,9 +208,13 @@ Compose 與 Flutter 注意事項：
 |---|---|---|
 | `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density。捲動區外的節點被裁切時，以 `boundsInParent` 的尺寸還原（見下） |
 | `visible` | frame 與內容區域相交且尺寸大於 0，或是捲動區已捲出畫面的內容 | `isVisibleToUser` 且與內容區域相交，或是捲動區已捲出畫面的內容 |
-| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
+| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項只取可見 `staticText` 後代，葉節點沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
 | `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型；可勾選的 `Button`（`ToggleButton`、帶 checked 狀態的 React Native 按鈕）視為按鈕，文字取其標籤 |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
+
+**複合控制項的可見文字**：帶文字的自訂開關須在原生快照保留實際可見的 `staticText` 後代（例如帶 `testID` 的 React Native `Text`）。控制項自己的 `text` 與父容器文字均不納入控制項無障礙 label 或 value，也不因寬度或附近文字推測主標籤；標示不可見的節點及其後代、輸入框的文字均不納入。原型的動態文字須有對應錨點，既有 T1 會依合約從控制項及父容器文字排除它；只有動態摘要而沒有主標籤後代時，不能宣稱已擷取主標籤。例如葉節點開關的無障礙名稱是 `Session reminder`，旁置可見標題是 `Before shared sessions`，父容器只保留可見標題與副標題；階層快照與 React Native 攤平快照採相同規則，旁置文字不受影響。這與 Web checkbox 的 `aria-label` 不進入自身或父容器 `innerText` 的行為一致。快照缺少 modal 背景節點時，也不能用前一張快照補造當前節點。
+
+**純視覺圖形的無障礙摘要**：`data-pf-visual-only`／`visualOnly` 圖形在 T1 不比對自己的文字。原生快照仍保留圖形的無障礙 label，但 T1 比對父容器時，使用該子錨點實際擷取的文字排除摘要，每個圖形最多扣除一次；同文的靜態葉錨點仍保留並比對。未擷取到圖形文字時不推測摘要，父容器的差異仍會報錯。Web 的 `aria-label` 原本不進入 `innerText`，此規則不改寫 DOM 文字。這是 T1 文字處理，沒有把圖形設為動態、沒有遮罩圖形像素，也沒有變更 T2／T3／T4 或門檻；柱圖的實際像素仍參與 T4 比對。靜態文字應有自己的錨點，才能在摘要同文時提供保留依據。
 
 **捲出畫面的內容**：網頁原型在 Playwright 中把折線以下的元素算作可見，文字也算進容器；原生平台只回報螢幕上的部分。為使兩邊一致，位於捲動區（iOS 的 `scrollView`／`table`／`collectionView`，Android 的 `isScrollable` 節點或 `ScrollView`、`HorizontalScrollView`、`RecyclerView`、`ListView`）內、中心落在捲動區之外的元素（或其所在的捲動區本身已捲出，例如折線以下的橫向列表）視為已渲染：`visible` 為 true，文字算進包含該捲動區的容器。不在任何捲動區內的畫面外元素（例如停在螢幕外的抽屜）仍不可見。Android 的 UiAutomator 還會把捲出節點的螢幕邊界裁到捲動區邊緣並回報 `isVisibleToUser` 為 false；驅動器另外回報節點的 `boundsInParent` 尺寸與 `isScrollable`，正規化時被夾住的那一側依尺寸往外還原並恢復可見。夾住的線可能是捲動區的外框，也可能是它的內距邊緣（React Native 裁到內距，siyue 實測在外框內 18 px），所以以離捲動區邊緣較近的一側為被夾住的一側（在下方的保留真實上緣，在上方或被上內距裁掉一截的保留真實下緣），兩側一樣近時保持原樣；本身被外層裁切的捲動區（例如折線以下的橫向列表），其內容沿該方向沿用外層的邊緣。捲動區內未被裁切卻不可見的節點（例如透明度為 0）仍不可見。容器文字依閱讀順序串接時，同一個捲動區的內容視為一整塊、放在捲動區的位置，和 DOM 的文件順序一致：疊在捲動區上方的固定分頁列排在捲動內容之後，不會插在折線上下之間。
 

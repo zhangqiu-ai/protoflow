@@ -43,7 +43,8 @@ const NATIVE_TEXT_INPUTS = new Set(['email', 'tel', 'url', 'number']);
 export function compareStructure(screen, state, prototype, application, { native = false } = {}) {
   const reasons = [];
   let checked = 0;
-  const anchors = uniqueAnchors(screen).filter(anchor => !anchor.visualOnly);
+  const allAnchors = uniqueAnchors(screen);
+  const anchors = allAnchors.filter(anchor => !anchor.visualOnly);
   // A container's text includes its descendants'. Text an anchor marks dynamic (a clock, a countdown, a receipt id)
   // is left out at every level, so it is checked only for presence, never compared through an ancestor. The same
   // words can also be static text nearby (a field labelled "Password" whose placeholder is "Password"), and whether a
@@ -68,12 +69,15 @@ export function compareStructure(screen, state, prototype, application, { native
   const occurrences = (text, part) => [...` ${text} `.matchAll(new RegExp(`(?<= )${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= )`, 'g'))].map(match => match.index - 1);
   const textOf = (capture, id) => {
     let text = words(normalizeText(element(capture, id).text));
-    // A DOM capture (web, Electron) already left dynamic anchors out where they are.
-    if (element(capture, id).dynamicExcluded) return text;
-    const parts = anchors.filter(other => other.dynamic && isUnder(other, id)).map(item => words(normalizeText(element(capture, item.id).text))).filter(Boolean);
-    for (const part of parts.sort((a, b) => b.split(' ').length - a.split(' ').length || b.length - a.length)) {
+    // DOM captures already remove dynamic text in place. A native visual-only graphic can additionally expose an
+    // accessible description in its ancestors: use its captured text, preserving static leaves with the same words.
+    // Do not infer missing descriptions or change DOM text. One graphic capture authorizes at most one removal.
+    const parts = allAnchors.filter(other => isUnder(other, id) && (
+      (other.dynamic && !other.visualOnly && !element(capture, id).dynamicExcluded) || (native && capture === application && other.visualOnly)
+    )).map(item => ({ text: words(normalizeText(element(capture, item.id).text)), limit: item.visualOnly ? 1 : Infinity })).filter(part => part.text);
+    for (const { text: part, limit } of parts.sort((a, b) => b.text.split(' ').length - a.text.split(' ').length || b.text.length - a.text.length)) {
       const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(textOf(capture, leaf.id), part).length, 0);
-      for (const index of occurrences(text, part).slice(accounted).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
+      for (const index of occurrences(text, part).slice(accounted).slice(-limit).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
     }
     return text;
   };

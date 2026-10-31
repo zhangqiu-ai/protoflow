@@ -199,7 +199,7 @@ test('native controls: no text of their own, labels deduplicated inside containe
   assert.equal(subtreeText(row), 'Daily reminder');
   assert.equal(elementText(row.children[1]), '');
   // With a subtitle the switch reads after both lines (siyue growth.reminders); its repeated label is still left out,
-  // in a hierarchy and in a flattened (React Native) tree. A switch whose label is the only text keeps it.
+  // in a hierarchy and in a flattened (React Native) tree. An accessibility-only switch label is never visible text.
   const subtitled = { ...row, children: [
     { type: 'staticText', label: 'Daily reminder', frame: { x: 74, y: 128, width: 235, height: 21 } },
     { type: 'switch', label: 'Daily reminder', value: '1', frame: { x: 321, y: 132.7, width: 51, height: 31 } },
@@ -208,7 +208,8 @@ test('native controls: no text of their own, labels deduplicated inside containe
   assert.equal(subtreeText(subtitled), 'Daily reminder Today’s tasks');
   const flat = { type: 'other', frame: { x: 0, y: 0, width: 402, height: 874 }, children: [{ ...subtitled, children: undefined, frame: { x: 16, y: 116, width: 370, height: 64 } }, ...subtitled.children] };
   assert.equal(elementText(flat.children[0], flat), 'Daily reminder Today’s tasks');
-  assert.equal(subtreeText({ type: 'other', children: [{ type: 'switch', label: 'Wi-Fi', frame: { x: 0, y: 0, width: 300, height: 44 } }] }), 'Wi-Fi');
+  // The real Web checkbox counterexample is exercised in e2e/native-controls.spec.js, including this wide control.
+  assert.equal(subtreeText({ type: 'other', children: [{ type: 'switch', label: 'Wi-Fi', frame: { x: 0, y: 0, width: 300, height: 44 } }] }), '');
   assert.equal(elementText({ type: 'textField', value: 'Draft', placeholder: 'New task' }), 'Draft');
   assert.equal(elementText({ type: 'textField', value: 'New task', placeholder: 'New task' }), 'New task');
   assert.equal(elementText({ type: 'textField', placeholder: 'New task' }), 'New task');
