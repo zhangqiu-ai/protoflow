@@ -235,8 +235,11 @@ final class CaptureTests: XCTestCase {
             (control.exists ? control : target).tap()
         case "fill", "clear":
             target.tap()
-            clear(target)
-            if step.action == "fill" { return type(step.value ?? "", into: target) }
+            if target.elementType == .secureTextField {
+                // Secure values cannot be read back; preserve the existing secure-field behavior.
+                clear(target)
+            } else if let reason = clearPublicly(target, app: app) { return reason }
+            if step.action == "fill" { return type(step.value ?? "", into: target, app: app) }
         case "select":
             let wheel = target.pickerWheels.firstMatch
             if wheel.exists { wheel.adjust(toPickerWheelValue: step.value ?? "") } else {
@@ -305,14 +308,33 @@ final class CaptureTests: XCTestCase {
         if !current.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count)) }
     }
 
+    /// A tap can position the caret in the middle. Select All proves the entire nonsecure value is replaced.
+    /// Only the public, reachable edit menu is used; an unavailable menu is a real driver failure.
+    private func clearPublicly(_ field: XCUIElement, app: XCUIApplication) -> String? {
+        guard [.textField, .textView, .searchField].contains(field.elementType) else { return "public replacement requires a nonsecure text input" }
+        if fieldValue(field).isEmpty { return nil }
+        field.press(forDuration: 1.0)
+        let menu = app.menuItems["Select All"].firstMatch
+        let button = app.buttons["Select All"].firstMatch
+        if menu.waitForExistence(timeout: 4) {
+            guard menu.isHittable else { return "public Select All menu item is not reachable" }
+            menu.tap()
+        } else if button.waitForExistence(timeout: 2) {
+            guard button.isHittable else { return "public Select All button is not reachable" }
+            button.tap()
+        } else { return "public Select All action is unavailable" }
+        field.typeText(XCUIKeyboardKey.delete.rawValue)
+        return fieldValue(field).isEmpty ? nil : "public Select All did not clear the complete input"
+    }
+
     /// Typing can drop keystrokes on a busy simulator (notably into React Native controlled inputs): read the field
     /// back and retype, character by character, before reporting a failure. Secure fields cannot be read back.
-    private func type(_ text: String, into field: XCUIElement) -> String? {
+    private func type(_ text: String, into field: XCUIElement, app: XCUIApplication) -> String? {
         field.typeText(text)
         if field.elementType == .secureTextField { return nil }
         for _ in 0..<3 {
             if fieldValue(field) == text { return nil }
-            clear(field)
+            if let reason = clearPublicly(field, app: app) { return reason }
             for character in text {
                 field.typeText(String(character))
                 Thread.sleep(forTimeInterval: 0.05)

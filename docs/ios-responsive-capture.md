@@ -16,3 +16,11 @@
 旋轉另於 `raw.json.responsiveObservations` 保存實際 window 前後 frame、尺寸是否改變、裝置 orientation 與已限定輸入的保留布林。設定 orientation 並不代表 App window 已轉向；驗收方必須檢查 `windowSizeChanged`。窄視窗必須來自 iPadOS 真實 App window 變化；縮放 macOS Simulator 外框不能作證。本擴充沒有私有 API 或模擬 window frame。
 
 驗證：`node --test tests/ios-responsive-driver.test.js tests/ios-driver.test.js tests/uikit-probe.test.js tests/uikit-probe-text.test.js`。XCTest 另以 generic iOS Simulator `build-for-testing` 編譯。實際裝置與畫面驗證屬使用端驗收，本文件不代表已通過。
+
+## 非密碼文字的完整替換
+
+`fill`／`clear` 對 text field、text view 與 search field 使用公開 Select All 菜單，再刪除已選的完整內容，確認實際值為空才輸入。所有逐字重試沿用同一完整替換路徑。原本按目前字數 backspace 的方法會在游標落在中間時留下後綴；2026-10-31 compact 大字筆記原生場景已保留該真實失敗證據於使用端 `matrix-current-3e2f915ef607/compact-en-large-note/raw.json`。
+
+Select All 必須真實存在且 `isHittable`；不存在、不可達或刪除後仍非空都回報 FAIL，不設定欄位值、不私有操作、不以座標強制點擊。密碼欄維持既有處理，不能讀回的密碼不增加值驗證。本次原生回歸使用既有英文系統編輯菜單；其他系統菜單語言未驗證時不得視為通過。
+
+Focused guards：`node --test tests/ios-public-input-replacement.test.js`；實際原生回歸仍使用同一 immutable App／同一 compact-en-large-note，保留獨立重跑目錄，不能覆寫原始 RED。
