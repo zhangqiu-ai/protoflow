@@ -50,11 +50,61 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   // equal to one (a sidebar heading "Settings" beside a title bar reading "Settings") stays. The comparison then
   // takes the text as it is instead of removing dynamic text by value.
   const marked = all.filter(node => dynamicAnchors.includes(node.getAttribute(attribute)));
+  // innerText includes CSS-clipped accessibility-only text. Recognise only a proven empty legacy
+  // clip rectangle; positive/auto/unsupported regions keep their original browser behaviour.
+  const emptyClip = node => {
+    const style = getComputedStyle(node);
+    if (!['absolute', 'fixed'].includes(style.position)) return false;
+    const match = /^rect\(\s*(.*?)\s*\)$/.exec(style.clip);
+    if (!match) return false;
+    const values = match[1].split(/\s*,\s*|\s+/);
+    if (values.length !== 4 || values.some(value => !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?px$/i.test(value))) return false;
+    const [top, right, bottom, left] = values.map(Number.parseFloat);
+    return [top, right, bottom, left].every(Number.isFinite) && (right <= left || bottom <= top);
+  };
+  const clipped = [...document.querySelectorAll('*')].filter(emptyClip);
+  const roots = clipped.filter(node => !clipped.some(other => other !== node && other.contains(node)));
+  const masked = [...new Set(roots.flatMap(node => [node, ...node.querySelectorAll('*')]))];
+  let clipSheet;
+  const renderedText = node => {
+    if (!masked.length || typeof CSSStyleSheet !== 'function' || !('adoptedStyleSheets' in document)) return node.innerText;
+    // CSSOM changes avoid [style] selectors and DOM MutationObservers. No attributes/nodes are added.
+    const saved = [...document.adoptedStyleSheets];
+    try {
+      if (!clipSheet) {
+        const selector = element => {
+          const path = [];
+          for (let current = element; current; current = current.parentElement) {
+            let index = 1;
+            for (let sibling = current.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index++;
+            path.unshift(current.parentElement ? `:nth-child(${index})` : ':root');
+          }
+          return path.join(' > ');
+        };
+        clipSheet = new CSSStyleSheet();
+        clipSheet.replaceSync(roots.map(root => { const at = selector(root); return `${at},${at} *{visibility:hidden!important}`; }).join('\n'));
+      }
+      document.adoptedStyleSheets = [...saved, clipSheet];
+      // Inline !important or another cascade rule can defeat the mask. Never apply half a group.
+      if (masked.every(element => getComputedStyle(element).visibility === 'hidden')) return node.innerText;
+    } catch {
+      // Unsupported CSSOM/cascade leaves the original observation authoritative.
+    } finally { document.adoptedStyleSheets = saved; }
+    return node.innerText;
+  };
   const readText = node => {
     const hidden = [...loose, ...marked.filter(item => item !== node && !item.contains(node))];
-    const saved = hidden.map(item => item.style.getPropertyValue('display'));
+    const saved = hidden.map(item => item.getAttribute('style'));
     for (const item of hidden) item.style.setProperty('display', 'none');
-    try { return node.innerText; } finally { hidden.forEach((item, index) => saved[index] ? item.style.setProperty('display', saved[index]) : item.style.removeProperty('display')); }
+    try { return renderedText(node); } finally {
+      hidden.forEach((item, index) => {
+        if (saved[index] !== null) item.setAttribute('style', saved[index]);
+        else {
+          // Synchronise dirty CSSOM first so removing a formerly absent attribute stays absent.
+          item.getAttribute('style'); item.removeAttribute('style');
+        }
+      });
+    }
   };
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
@@ -76,7 +126,7 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node) : node.innerText),
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node) : renderedText(node)),
       ...(dynamicAnchors.length && { dynamicExcluded: true }),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
