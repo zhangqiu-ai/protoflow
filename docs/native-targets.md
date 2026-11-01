@@ -430,6 +430,8 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 
 補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。
 
+UIKit flattened leaf 的幾何候選只搜尋當前公開 parent subtree，保留同 parent siblings 與其後代；局部 scroll 排序不跨入另一個 parent／modal 背景分支。原始 scroll eligibility、整窗 screen 文字與真正重疊的 ambiguity 拒絕規則維持不變；這不是一般 AX/default native-tree 的修改。見[範圍驗證與限制](uikit-flat-parent-scope-verification-2026-11-01.md)。
+
 已存在 AX 的 screen 若只涵蓋 captured content 的真子區，可在 response／AX／UIKit screen 各唯一、原始 frame 精確一致、非輸入非互動 other、原 AX text 可重算一致、完整 content bounds 及肯定可見公開文字等條件成立後，使用同一 interpreter 的整個 owned window 文字。此路徑不依賴 missing anchor，也不繞過既有 blocked correction group；只改 screen text／provenance，真實 handle、count、overlay 與其餘 facts 保留。沒有 probe 的預設行為不變。見 [screen 範圍校正驗證](uikit-screen-scope-verification-2026-10-31.md)。
 
 owned window 文字依真實 parent／tree order 與 Text／scroller extents 分層，層內維持原 subtree 的 pane 順序，避免匿名全窗 popup 被讀到主區之前。只在 UIKit 整窗 screen 解讀使用；非 screen 與預設 AX 解讀不變，背景文字不因 overlay 被刪除。見 [整窗圖層順序驗證](uikit-window-layer-verification-2026-10-31.md)。

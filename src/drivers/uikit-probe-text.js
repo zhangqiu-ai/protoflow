@@ -1,4 +1,4 @@
-import { elementText, layeredSubtreeText, scrolledOut } from './native-tree.js';
+import { elementText, layeredSubtreeText } from './native-tree.js';
 
 const TEXT = new Set(['UILabel.text', 'UIButton.currentTitle', 'RCTParagraphComponentView.attributedText']);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -56,14 +56,17 @@ export function interpretUIKitCapture(capture, semanticFacts) {
     rawFor.set(normalized, node); normalizedFor.set(node, normalized);
     return normalized;
   };
-  const tree = normalize(root), scrolled = scrolledOut(tree);
+  const tree = normalize(root);
   const under = (node, ancestor) => node === ancestor || chains.get(node).includes(ancestor);
   const facts = (node, { screen = false } = {}) => {
     const scope = screen ? root : node, normalized = normalizedFor.get(scope);
     const selected = [];
     const onTextParts = parts => selected.push(...parts);
+    // Fabric's flattened content is in actual siblings and their descendants, not another parent branch.
+    // Keep full-window layering for the screen; derive local scroll ordering only when geometry needs it.
+    const localTree = normalizedFor.get(parents.get(node)) ?? tree;
     let text = screen ? layeredSubtreeText(normalized, { onTextParts })
-      : elementText(normalized, tree, scrolled, { onTextParts });
+      : elementText(normalized, localTree, undefined, { onTextParts });
     let parts = selected.map(part => rawFor.get(part)).filter(Boolean);
     if (!normalized.visible) { text = ''; parts = []; }
     // A named accessibility-only leaf supplies no physical text ownership. Do not collect unrelated

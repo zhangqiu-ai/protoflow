@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { controlCases, controlFixture, summarizeControlCase, savedHomeFixture } from '../uikit-probe-control-fixtures.js';
+import { recordedNote, recordedNoteFacts, flatScopeCases, scopeCaseFacts } from '../uikit-flat-scope-fixtures.js';
 
 // Node Playwright regression of the actual public driver interpreter. No simulator/browser/provider is needed.
 for (const scenario of controlCases) test(scenario.name, () => {
@@ -42,4 +43,18 @@ test('preserved real QA Home keeps AX facts and corrects the observed control te
 
 test('untrusted public semantic provenance cannot drive a correction', () => {
   expect(() => controlFixture(({ control }) => { control.observedSemantics.sources.rnRole = 'expectedPrototypeRole'; })).toThrow(/untrusted semantic source/);
+});
+
+// Pure Node Playwright driver regressions; these do not run UIKit or claim native acceptance.
+test('recorded compact note keeps its public captions without borrowing the background scroll branch', () => {
+  const before = structuredClone(recordedNote), facts = recordedNoteFacts();
+  expect(facts.elements.find(item => item.anchor === 'ai.note').text).toBe(recordedNote.expectedNoteTextParts.join(' '));
+  expect(recordedNote).toEqual(before);
+});
+for (const scenario of flatScopeCases) test(`parent scope: ${scenario.name}`, () => {
+  if (scenario.error) { expect(() => scopeCaseFacts(scenario)).toThrow(scenario.error); return; }
+  const facts = scopeCaseFacts(scenario), note = facts.elements.find(item => item.anchor === 'test.note');
+  expect(note.text).toBe(scenario.expected);
+  if (scenario.offscreen) { expect(note.provenance.scrollContentEligible).toBe(true); expect(note.provenance.renderEligible).toBe(false); }
+  for (const text of scenario.screenIncludes ?? []) expect(facts.elements.find(item => item.anchor === 'test.screen').text).toContain(text);
 });
