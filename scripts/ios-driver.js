@@ -20,6 +20,7 @@ import { readFile, writeFile, mkdir, readdir, rm, stat, mkdtemp, lstat, realpath
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateScrollSteps, nativeScrollEnds } from '../src/drivers/scroll-alignment.js';
 import { iosResponse } from '../src/drivers/ios-tree.js';
 import { launchUrl, launchUrlTemplateError } from '../src/drivers/launch-url.js';
 import { startProbeBridge } from '../src/drivers/uikit-probe-bridge.js';
@@ -170,6 +171,8 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const request = JSON.parse(input);
+  try { validateScrollSteps(request.steps, { requireUIKit: true, hasUIKit: Boolean(values['uikit-probe-context']) }); }
+  catch (error) { return notRun(error.message); }
   if (process.platform !== 'darwin') return notRun('the iOS driver needs macOS with Xcode');
   if (!values['bundle-id'] || !values.device) return notRun('the iOS driver needs --bundle-id and --device');
   const optionError = responsiveOptionsError(values, request);
@@ -215,7 +218,7 @@ async function main() {
     probeSafeArea: values.frame === 'safe-area' && !safeArea,
     launchArguments: ['-PROTOFLOW_SCREEN', request.screen, '-PROTOFLOW_STATE', request.state, '-PROTOFLOW_FIXTURE', JSON.stringify(request.fixture?.data ?? {}),
       '-AppleLanguages', '(en)', '-AppleLocale', 'en_US'],
-    ...(probeSession && { captureProbe: { ...probeSession, outputDir: probeDir } }),
+    ...(probeSession && { captureProbe: { ...probeSession, outputDir: probeDir, settleBeforeCapture: true } }),
     ...(values.orientation && { orientation: values.orientation }),
     ...(values['rotate-after-steps'] && { rotateAfterSteps: values['rotate-after-steps'] }),
     ...(values['preserve-known-synthetic-inputs'] && { preserveSyntheticInputs: values['preserve-known-synthetic-inputs'].split(',') }),
@@ -226,7 +229,7 @@ async function main() {
   const jobFile = path.join(outputDir, 'job.json');
   await writeFile(jobFile, `${JSON.stringify(job, null, 2)}\n`);
   const results = await mkdtemp(path.join(probeDir ?? tmpdir(), 'protoflow-ios-'));
-  const bridge = probeSession ? startProbeBridge({ device: device.udid, bundleId: values['bundle-id'], outputDir: probeDir, session: probeSession, run }) : null;
+  const bridge = probeSession ? startProbeBridge({ device: device.udid, bundleId: values['bundle-id'], outputDir: probeDir, session: probeSession, run, settleBeforeCapture: true }) : null;
   let test;
   try {
     test = await run(['xcodebuild', 'test-without-building', '-xctestrun', built.xctestrun, '-destination', `id=${device.udid}`,
@@ -261,6 +264,8 @@ async function main() {
       const before = JSON.parse(await readFile(path.join(probeDir, 'probe-before.json'), 'utf8'));
       const after = JSON.parse(await readFile(path.join(probeDir, 'probe-after.json'), 'utf8'));
       const verified = verifiedProbe ?? validateProbePair({ before, after, timing: raw.probeTiming, expectedBuild: bridge.expectedBuild, session: probeSession });
+      const alignment = nativeScrollEnds(verified.capture, request.steps, raw.scrollEndObservations);
+      if (alignment.length) await writeFile(path.join(probeDir, 'probe-scroll-alignment.json'), JSON.stringify({ status: 'PASS', currentTreeSha256: verified.hash, sampleIds: { before: before.sampleId, after: after.sampleId }, alignment }, null, 2));
       const area = values.frame === 'device' ? { x: 0, y: 0 } : raw.safeArea ?? safeArea;
       response = supplementUIKitFacts(response, raw.tree, verified.capture, { anchors: request.anchors, screen: request.screen,
         content: { x: area.x, y: area.y, width: response.viewport.width, height: response.viewport.height } });

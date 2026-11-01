@@ -204,18 +204,48 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
     const derived = derivedFor.get(ax);
     // Only the new, fully correlated other leaf has direct nonempty public text independent of an AX parent rewrite.
     const directOther = ax.type === 'other' && changed.has(ax);
-    if (!derived && !directOther) return failClosed();
-    const text = changed.has(ax) ? actions.get(ax).facts.text
-      : elementText(derived, derivedRoot, derivedScrolled, { screen: item.anchor === screen, onTextParts: values => selected.push(...values) });
+    const ancestorExcluded = !derived && !directOther;
+    if (ancestorExcluded) {
+      // A changed real ancestor replaced its AX children with public parts. Resolve an affected
+      // original descendant in this same atomic group, never through a blocked-group bypass.
+      const observed = node.observedSemantics, semantic = semanticFacts(node), at = interpretation.paths.get(node);
+      const under = (path, parent) => path && parent && path.length > parent.length && parent.every((value, index) => path[index] === value);
+      if (ax.type !== 'other' || ax.children?.length || item.role !== 'other' || item.inputType != null
+        || item.editable !== false || item.interactive !== false || item.visible !== true || ax.visible === false
+        || !observed || observed.buttonTrait !== false || observed.linkTrait !== false || observed.editable !== undefined
+        || semantic.role !== 'other' || semantic.editable !== false || semantic.interactive !== false
+        || !sameFrame(ax.frame, node.frameInScreen) || !interpretation.facts(node).visible
+        || allNodes(node).some(child => child.inputRedacted || child.observedSemantics?.inputKind || child.observedSemantics?.editable !== undefined)
+        || [...interpretation.paths].some(([view, path]) => (view === node || under(at, path))
+          && (!view.attachedToWindow || view.ancestorOrSelfHidden || view.effectiveAlpha <= 0 || view.transformed))
+        || !parts.length || parts.some(part => !changed.has(part) || !under(axPaths.get(ax), axPaths.get(part))
+          || !under(at, interpretation.paths.get(actions.get(part)?.node)))) return failClosed();
+    }
+    const text = ancestorExcluded
+      ? elementText(ax, rawAX, scrolled, { excludeAncestorLabels: true, onTextParts: values => selected.push(...values) })
+      : changed.has(ax) ? actions.get(ax).facts.text
+        : elementText(derived, derivedRoot, derivedScrolled, { screen: item.anchor === screen, onTextParts: values => selected.push(...values) });
+    if (ancestorExcluded && selected.some(part => {
+      const current = currentById.get(part.identifier), observed = current?.[0];
+      const childPath = observed && interpretation.paths.get(observed), ownPath = interpretation.paths.get(node);
+      return !part.identifier || axById.get(part.identifier)?.length !== 1 || current?.length !== 1
+        || !sameFrame(part.frame, observed.frameInScreen) || !childPath || !ownPath
+        || childPath.length <= ownPath.length || !ownPath.every((value, index) => childPath[index] === value)
+        || observed.inputRedacted || observed.observedSemantics?.inputKind || !TEXT_SOURCES.has(observed.textSource)
+        || observed.transformed || observed.text !== part.label || interpretation.facts(observed).visible !== true
+        || [...interpretation.paths].some(([view, path]) => path.length <= childPath.length
+          && path.every((value, index) => childPath[index] === value)
+          && (!view.attachedToWindow || view.ancestorOrSelfHidden || view.effectiveAlpha <= 0 || view.transformed));
+    })) return failClosed();
     if (directOther) selected.push(...publicParts(ax));
     else if (changed.has(ax)) selected.push(...derived.children);
     if (selected.some(part => !origins.has(part))) return failClosed();
     corrections.set(item.anchor, { ...item, text, provenance: {
       ...(item.provenance && { previousProvenance: item.provenance }), source: changed.has(ax) ? 'currentUIKitViewTree' : 'derivedAXWithCurrentUIKitControlText', fields: ['text'],
       occlusion: 'notComputed', class: node.class, nativeNodePath: interpretation.paths.get(node),
-      textScope: changed.has(ax) ? actions.get(ax).facts.textScope : 'derivedAXScope',
+      textScope: ancestorExcluded ? 'AXAncestorExcludedGeometry' : changed.has(ax) ? actions.get(ax).facts.textScope : 'derivedAXScope',
       textParts: selected.map(part => origins.get(part)),
-      textCorrection: 'publicNoninputControlText',
+      textCorrection: ancestorExcluded ? 'publicAncestorAggregateExclusionInControlGroup' : 'publicNoninputControlText',
       originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) },
       correctedControls: parts.filter(part => changed.has(part)).map(part => ({ identifier: part.identifier,
         originalAXLabel: part.label ?? '', axNodePath: axPaths.get(part), nativeNodePath: interpretation.paths.get(actions.get(part).node),
@@ -233,7 +263,14 @@ function ownedWindowScreenText(response, rawAX, capture, interpretation, { scree
     && inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
   // Existing whole-content anchors keep their original interpretation. Only a genuine main-pane scope mismatch
   // enters this correction; no expected text, screen name or application layout is configured here.
-  if (!axFound.length || !contains(content, axFound[0].frame) || sameFrame(content, axFound[0].frame)) return;
+  if (!axFound.length || !contains(capture.windows[0]?.windowFrame, axFound[0].frame)) return;
+  const frame = axFound[0].frame;
+  // A genuine main pane may extend into this same owned window's safe-area insets.
+  // Only its real intersection with captured content determines whether it is a subregion.
+  const intersection = { x: Math.max(content.x, frame.x), y: Math.max(content.y, frame.y),
+    width: Math.min(content.x + content.width, frame.x + frame.width) - Math.max(content.x, frame.x),
+    height: Math.min(content.y + content.height, frame.y + frame.height) - Math.max(content.y, frame.y) };
+  if (intersection.width <= 0 || intersection.height <= 0 || sameFrame(content, intersection)) return;
   const reject = () => { blocked.add(screen); };
   const items = (response.elements ?? []).filter(item => item.anchor === screen);
   const current = [...interpretation.paths.keys()].filter(node => node.identifier === screen);
@@ -277,6 +314,72 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
   const observedMissing = missing.filter(id => byId.has(id) && !axIds.has(id));
   const { corrections, blocked } = controlTextCorrections(response, rawAX, interpretation, screen);
   ownedWindowScreenText(response, rawAX, capture, interpretation, { screen, content }, corrections, blocked);
+  // Fully correlated noninput scopes use the actual UIKit hierarchy directly. Never flatten its parts
+  // into a second AX tree and reorder them again; preserve every original semantic/interaction fact.
+  const axNodes = rawAX ? allNodes(rawAX) : [], axPaths = new Map(), axParents = new Map();
+  const locateAX = (node, at, parent) => { axPaths.set(node, at); if (parent) axParents.set(node, parent); (node.children ?? []).forEach((child, index) => locateAX(child, [...at, index], node)); };
+  if (rawAX) locateAX(rawAX, [], null);
+  const scrolled = rawAX ? scrolledOut(rawAX) : null;
+  for (const item of response.elements ?? []) {
+    if (item.anchor === screen || blocked.has(item.anchor) || item.count !== 1 || item.visible !== true
+      || item.editable !== false || item.inputType != null || INPUT_ROLES.has(item.role)
+      || (response.elements ?? []).filter(other => other.anchor === item.anchor).length !== 1) continue;
+    const axFound = axNodes.filter(node => node.identifier === item.anchor), current = nodes.filter(node => node.identifier === item.anchor);
+    if (axFound.length !== 1 || current.length !== 1) continue;
+    const ax = axFound[0], node = current[0], observed = node.observedSemantics, semantic = semanticFacts(node);
+    if (!['other', 'image', 'button', 'link', 'staticText'].includes(ax.type) || item.role !== ax.type || ax.visible === false
+      || !observed || typeof observed.buttonTrait !== 'boolean' || typeof observed.linkTrait !== 'boolean'
+      || observed.inputKind || observed.editable !== undefined || node.inputRedacted
+      || !node.attachedToWindow || node.ancestorOrSelfHidden || node.effectiveAlpha <= 0 || node.transformed
+      || !sameFrame(ax.frame, node.frameInScreen)
+      || !sameFrame(item.bounds, { x: ax.frame.x - content.x, y: ax.frame.y - content.y, width: ax.frame.width, height: ax.frame.height })
+      || (['button', 'link'].includes(ax.type) ? semantic.role !== ax.type
+        : semantic.role !== 'other' || ax.type === 'staticText' && !TEXT_SOURCES.has(node.textSource))) continue;
+    if (allNodes(node).some(child => child.inputRedacted || child.observedSemantics?.inputKind)) continue;
+    if (ax.type === 'image' && ax.children?.length) continue;
+    if (ax.type === 'other') {
+      let parent = axParents.get(ax);
+      while (parent && parent.type !== 'image') parent = axParents.get(parent);
+      if (parent) continue;
+    }
+    const originalParts = [];
+    const originalText = elementText(ax, rawAX, scrolled, { onTextParts: values => originalParts.push(...values) });
+    if (originalText !== item.text) continue;
+    const facts = interpretation.facts(node), previous = corrections.get(item.anchor) ?? item;
+    if (facts.text === previous.text) continue;
+    if (ax.children?.length && originalParts.some(part => {
+      const matches = nodes.filter(other => other.identifier === part.identifier);
+      if (!part.identifier || axNodes.filter(other => other.identifier === part.identifier).length !== 1 || matches.length !== 1
+        || !sameFrame(part.frame, matches[0].frameInScreen) || matches[0].inputRedacted) return true;
+      const role = semanticFacts(matches[0]).role;
+      return part.type === 'staticText' ? !TEXT_SOURCES.has(matches[0].textSource)
+        : ['other', 'image'].includes(part.type) ? role !== 'other' : role !== part.type;
+    })) continue;
+    const ownRendered = facts.visible === true && (facts.textNodePaths.length || ['button', 'link'].includes(ax.type) || node.children?.length)
+      && (ax.type !== 'other' || facts.text.trim())
+      && (facts.textScope !== 'flattenedSiblingGeometry' || ax.type === 'other' && !ax.label);
+    if (ownRendered) {
+      corrections.set(item.anchor, { ...previous, text: facts.text, provenance: {
+        ...(previous.provenance && { previousProvenance: previous.provenance }), source: 'currentUIKitViewTree', fields: ['text'],
+        occlusion: 'notComputed', textScope: facts.textScope, textCorrection: 'publicCorrelatedUIKitText',
+        class: node.class, nativeNodePath: interpretation.paths.get(node), textNodePaths: facts.textNodePaths,
+        originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) }
+      } });
+      continue;
+    }
+    // Even an offscreen AX container cannot own its ancestor's aggregate label. This removes only that
+    // proven foreign ownership; it does not promote unsupported nested-scroll UIKit text or visibility.
+    const ancestors = new Set();
+    for (let parent = axParents.get(ax); parent; parent = axParents.get(parent)) ancestors.add(parent);
+    if (!originalParts.some(part => ancestors.has(part))) continue;
+    const parts = [], text = elementText(ax, rawAX, scrolled, { excludeAncestorLabels: true, onTextParts: values => parts.push(...values) });
+    corrections.set(item.anchor, { ...previous, text, provenance: {
+      ...(previous.provenance && { previousProvenance: previous.provenance }), source: 'derivedAXWithCurrentUIKitOwnership', fields: ['text'],
+      occlusion: 'notComputed', textScope: 'AXAncestorExcludedGeometry', textCorrection: 'publicAncestorAggregateExclusion',
+      class: node.class, nativeNodePath: interpretation.paths.get(node), textParts: parts.map(part => ({ source: 'nativeAccessibilitySnapshot', nativeNodePath: axPaths.get(part) })),
+      originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) }
+    } });
+  }
   if (!observedMissing.length) return corrections.size
     ? { ...response, elements: response.elements.map(item => corrections.get(item.anchor) ?? item) } : response;
   const additions = [];
@@ -309,3 +412,6 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
   return { ...response, elements: [...elements.filter(item => !replaced.has(item.anchor)), ...additions],
     missing: missing.filter(id => !replaced.has(id)) };
 }
+
+// Public observation helpers for opt-in pre-capture readiness; pair validation stays unchanged.
+export { canonical as canonicalProbeValue, hash as hashProbeCapture, validateCapture as validateProbeCapture };

@@ -49,3 +49,5 @@ Android（含 Expo、React Native 的 Android 變體）與 Flutter 的開關使�
 ### 隔離 capture-only UIKit 試驗
 
 `--uikit-probe-context` 需要另行授權並編入目標 App 的 capture-only 探針；這些通用範例未包含該探針，不能只加入參數便宣稱支援。維持既有範例與模板預設，詳見[原生 target 的試驗邊界](../../docs/native-targets.md#capture-only-uikit-補充觀測試驗)。
+
+目前 reference driver 的 `scroll-to` 可明確選 `value:"end"`，但 iOS 終點證明還需要 App 真正提供公開 adjustedContentInset 的 current UIKit probe；本範例未包含探針，不能宣稱支援該 iOS opt-in。文字解讀的多層 scroll 資格與終點動作的單層限制，見[整合範圍](../../docs/uikit-reviewed-integration-2026-11-01.md)及[終點契約](../../docs/scroll-end-contract.md)。

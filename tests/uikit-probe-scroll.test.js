@@ -93,10 +93,10 @@ test('hidden, alpha-zero, detached, zero-sized or transformed offscreen content 
   }
 });
 
-test('nested scrolls and transformed scroll ancestors remain unsupported instead of guessed', () => {
+test('observed nested scrolls are supported while transformed scroll ancestors remain refused', () => {
   const inner = treeWithScroll().children[0].children[0];
   inner.identifier = 'test.inner-scroll';
-  notPromoted(treeWithScroll(inner));
+  assert.equal(supplement(treeWithScroll(inner), ['test.offscreen'])['test.offscreen'].provenance.scrollContentEligible, true);
   const transformed = treeWithScroll();
   transformed.children[0].children[0].transformed = true;
   notPromoted(transformed);

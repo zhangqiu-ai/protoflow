@@ -1,3 +1,4 @@
+import { validateScrollSteps, webScrollEnd } from './scroll-alignment.js';
 /*
  * Playwright capture of one screen state, located purely by anchor attributes. The prototype side uses `data-pf`;
  * a web or Electron target uses its own testability attribute (default `data-testid`).
@@ -14,7 +15,7 @@ async function perform(page, attribute, step) {
     case 'clear': return target.fill('', { timeout });
     case 'select': return target.selectOption(String(step.value ?? ''), { timeout });
     case 'toggle': return target.click({ timeout });
-    case 'scroll-to': return target.scrollIntoViewIfNeeded({ timeout });
+    case 'scroll-to': return step.value === 'end' ? webScrollEnd(page, attribute, step.anchor, { execute: true }) : target.scrollIntoViewIfNeeded({ timeout });
     case 'back': return page.goBack({ timeout });
     case 'wait-for': return target.waitFor({ state: 'visible', timeout });
     default: throw new Error(`Unsupported step action: ${step.action}`);
@@ -139,9 +140,11 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
  * Shared by the web and Electron drivers so both sides of a comparison use identical logic.
  */
 export async function captureOnPage(page, { attribute, anchors, steps = [], dynamicText = [], dynamicAnchors = [], timeoutMs = 10000 }) {
+  const endAnchors = validateScrollSteps(steps);
   await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
   for (const step of steps) await perform(page, attribute, step);
   await settle(page, timeoutMs);
+  for (const anchor of endAnchors) await webScrollEnd(page, attribute, anchor);
   const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText, dynamicAnchors });
   const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
   return { elements, screenshot };

@@ -14,7 +14,7 @@ ProtoFlow 是共享引擎。本 Skill 引導設計輸入到正式實作的流程
 - 原型每頁一個畫面錨點（`<body data-pf="<screen>" data-pf-role="screen">`），追蹤的元素以 `data-pf="<screen>.<name>"` 標記，`data-pf-role` 為 region／element／action／input；狀態寫在 `<page>.pf.json`。新頁面或缺錨點時先執行 `protoflow anchors suggest --patch-file .protoflow/anchors.patch`，把建議交給使用者審閱 ID 後才提交原型；不要自行在原型 repo 推送錨點修改。`protoflow anchors lint` 必須 PASS。原型由共用 runtime 預先渲染成靜態頁時，配置 `anchors.scopeExclude` 排除 runtime，版本範圍才會只含真正改變的畫面。
 - 實作時讀 context 的 `anchors`：`screens` 是本版受影響畫面的合約，`target.convention` 說明本平台如何帶上錨點 ID，`anchorIndex` 列出既有錨點在程式碼中的位置。每個錨點必須以**完全相同的 ID** 出現在應用中；畫面需可由 `urlTemplate`（Web）或外部驅動器到達。以錨點 ID 搜尋程式碼找實作位置，不需要也不要新增 mapping。`manifest.changes` 裡帶 `diffOmitted: true` 的檔案是 diff 太大（例如整頁在同一行）而沒有內嵌：看 `excerpts` 找變更處，必要時比對 `frozenBefore` 與 `frozenAfter` 兩個凍結檔（例如 `git diff --no-index`），不要修改它們。
 - 原生複合控制項的可見主標籤須保留為 `staticText` 後代（例如帶 `testID` 的 `Text`），不能只寫在控制項無障礙名稱。動態摘要提供對應動態錨點；葉節點開關仍沒有自己的文字，控制項無障礙名稱也不計入父容器文字；不以改角色或幾何猜測繞過比對。
-- 隔離 iOS 候選的 `--uikit-probe-context CTX-…` 只可在目標 App 已獲 capture-only 探針授權時啟用；要求兩次當前穩定原生樹夾住原 AX/截圖及已安裝 App 雜湊，保留 UIKit/AX 來源。不得據此改驗收門檻、原型或遮罩；細節與尚待驗證項見 `docs/native-targets.md` 的 capture-only 試驗。
+- 隔離 iOS 候選的 `--uikit-probe-context CTX-…` 只可在目標 App 已獲 capture-only 探針授權時啟用；SDK driver 會先作有界全樹靜默觀測（最多 8 samples／6 秒、至少 3 個相同 capture 且靜默跨度至少 1.5 秒），再要求兩個全新的當前穩定原生樹夾住原 AX/截圖及已安裝 App 雜湊；準備樣本不能代替正式配對，保留 UIKit/AX 來源。不得據此改驗收門檻、原型或遮罩；細節與尚待驗證項見 `docs/native-targets.md` 的 capture-only 試驗。
 - 原生純視覺圖形沿用 `visualOnly` 合約：T1 父文字只扣除已擷取的圖形摘要，保留同文靜態葉錨點；圖形像素仍由 T4 比對，不得改成 `dynamic` 來遮罩差異。
 - verify 的 `visual.tiers` 依序是 structure（文字、數量、順序、互動、sidecar 期望）、tokens、layout、visual；`visual.scenes[].tiers[].reasons` 指出具體錨點。修復時依原因修改應用，不修改原型、合約或門檻。
 - 維護者豁免（共享引擎 `docs/proposals/0005-maintainer-waivers.md`，專案需設定 `policy.waivers.reviewers`）：失敗確實是 ProtoFlow 引擎的判斷限制、無法在應用修好時，不要改門檻或原型，改為申請豁免。修復時寫入修復請求 `engineLimits` 指定的 `.protoflow/engine-limits/<CTX-id>.json`（`{ "limits": [{ "scene", "variant", "tier", "reason", "engineIssue" }] }`），同樣的發現再失敗一次時 runner 會自動申請；手動申請用 `protoflow waiver request --verification <VER> --scene <id> --tier structure|tokens|layout [--variant <id>] --reason <原因> [--engine-issue <URL>] --requested-by ai:<代理>`。只能申請、不能核准：核准、拒絕與撤回只由名單上的人在儀表板進行。T4 視覺永遠不能豁免。被豁免的層級在驗收裡仍是 FAIL 並帶 `waiver`，場景帶 `waived`，回報時把「附豁免通過」和一般通過分開列出；`waiverSkipped` 說明豁免為何沒套用（例如發現已改變）。`autoApprove` 專案用到豁免的版本仍要人工核准（交付停在 `WAIVER_APPROVAL_REQUIRED`）。
@@ -55,3 +55,7 @@ BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實�
 10. `protoflow baseline create --project <root> --review <id>` 保存已批准的 UI Baseline。內容或驗證變更會使舊批准失效，應重新 verify／review。
 
 執行時以 CLI 回傳的 session ID 與證據路徑為準；先使用 `protoflow --help` 確認命令。不得自動 commit、push、部署或覆寫既有 Baseline；報告通過、失敗、未執行與仍需人類確認的事項。
+
+`scroll-to` 的一般語意是可見；需要內容終點時，先核對目標驅動器明確支援 `value:"end"` 及唯讀終點證明。參見共享引擎 `docs/scroll-end-contract.md`；不要用硬位移、背景 anchor 刪除或比較門檻變更處理不同平台的自動捲動。
+
+既有 UIKit probe opt-in 的文字所有權／階層與完整觀測多層 scroll 資格，見 `docs/uikit-reviewed-integration-2026-11-01.md`。只允許真實觀測與原 text parts，不補 expected text、input values 或未知 metadata；一般 AX 預設不變。多層文字資格不授予巢狀 `scroll-to value:end`。整合的 Node／DOM／Swift mock 成果不能當作真 Native 或 required-tier 驗收。

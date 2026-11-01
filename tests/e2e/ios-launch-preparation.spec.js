@@ -159,7 +159,8 @@ test('probe accessibility preparation runs once before the unchanged measured br
   const shim = `import Foundation
 var events: [String] = []
 let mode = CommandLine.arguments[1]
-struct Job { let captureProbe: Int?; let hittableAnchors: [String]? = nil }
+struct Probe { let settleBeforeCapture: Bool? }
+struct Job { let captureProbe: Probe?; let hittableAnchors: [String]? = nil }
 struct Target { let exists = false; let isEnabled = false; let isHittable = false }
 struct Keyboards { var firstMatch: Target { Target() } }
 final class App {
@@ -176,11 +177,11 @@ struct XCUIScreen { static var main: XCUIScreen { XCUIScreen() }; func screensho
 func element(_ app: App, _ anchor: String) -> Target { Target() }
 func serialize(_ snapshot: Int) -> [String: Any] { ["snapshotOrdinal": snapshot, "label": "synthetic-measured-only"] }
 func failure(_ app: App, _ output: URL, _ reason: String) -> [String: Any] { ["status": "NOT_RUN", "reason": reason] }
-func requestProbe(_ probe: Int, phase: String) -> String? { events.append(phase); return nil }
+func requestProbe(_ probe: Probe, phase: String) -> String? { events.append(phase); return nil }
 let app = App()
 let output = URL(fileURLWithPath: CommandLine.arguments[2])
 func capture() throws {
- let job = Job(captureProbe: mode == "default" ? nil : 1)
+ let job = Job(captureProbe: mode == "default" ? nil : Probe(settleBeforeCapture: nil))
  var result: [String: Any] = [:]
  var responsive: [String: Any]? = nil
 ${declaration[0]}

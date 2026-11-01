@@ -112,6 +112,7 @@ func preparedLaunchURL(_ channel: NativeLaunchPreparation, original: URL, bundle
  * Output: <job.outputDir>/raw.json and <job.outputDir>/device.png.
  */
 final class CaptureTests: XCTestCase {
+    private var scrollEndObservations: [[String: Any]] = []
     struct Step: Decodable { let action: String; let anchor: String?; let value: String?; let timeoutMs: Int? }
     struct CaptureProbe: Decodable {
         let nonce: String
@@ -119,6 +120,7 @@ final class CaptureTests: XCTestCase {
         let sceneId: String
         let screenAnchor: String
         let outputDir: String
+        let settleBeforeCapture: Bool?
     }
     struct Job: Decodable {
         let bundleId: String
@@ -150,6 +152,7 @@ final class CaptureTests: XCTestCase {
         var launchPreparationObservation: [String: Any]? = nil
         var accessibilityPreparation: [String: Any]? = nil
         defer {
+            if !scrollEndObservations.isEmpty { result["scrollEndObservations"] = scrollEndObservations }
             if let safeArea { result["safeArea"] = safeArea }
             if let launchPreparationObservation { result["launchPreparation"] = launchPreparationObservation }
             if let accessibilityPreparation { result["accessibilityPreparation"] = accessibilityPreparation }
@@ -250,6 +253,12 @@ final class CaptureTests: XCTestCase {
             _ = try app.snapshot()
             accessibilityPreparation = ["method": "XCUIApplication.snapshot", "count": 1,
                 "startedAt": startedAt, "finishedAt": Date().timeIntervalSince1970]
+        }
+        if let probe = job.captureProbe, probe.settleBeforeCapture == true,
+           let reason = requestProbe(probe, phase: "settle") {
+            result = failure(app, output, reason)
+            result["status"] = "NOT_RUN"
+            return
         }
         if let probe = job.captureProbe, let reason = requestProbe(probe, phase: "before") {
             result = failure(app, output, reason)
@@ -377,6 +386,10 @@ final class CaptureTests: XCTestCase {
                 option.tap()
             }
         case "scroll-to":
+            if let value = step.value {
+                guard value == "end" else { return "unsupported scroll-to value" }
+                return scrollToEndPublicly(target, app: app, anchor: anchor, timeout: timeout)
+            }
             var attempts = 0
             while !target.isHittable && attempts < 10 { app.swipeUp(); attempts += 1 }
             if !target.isHittable { return "anchor \(anchor) is not reachable by scrolling" }
@@ -385,6 +398,54 @@ final class CaptureTests: XCTestCase {
         }
         return nil
     }
+
+    // BEGIN PUBLIC SCROLL END: gestures establish reachability; only the formal UIKit pair proves the endpoint.
+    private func scrollToEndPublicly(_ target: XCUIElement, app: XCUIApplication, anchor: String, timeout: Double) -> String? {
+        func exactCount(_ node: XCUIElementSnapshot) -> Int {
+            (node.identifier == anchor ? 1 : 0) + node.children.reduce(0) { $0 + exactCount($1) }
+        }
+        func rect(_ value: CGRect) -> [String: Double] {
+            ["x": value.minX, "y": value.minY, "width": value.width, "height": value.height]
+        }
+        guard let root = try? app.snapshot(), exactCount(root) == 1,
+              let original = try? target.snapshot(), original.identifier == anchor else { return "scroll-to end needs a unique exact target" }
+        let candidates = app.scrollViews.containing(.any, identifier: anchor).allElementsBoundByIndex.filter { element in
+            guard let snapshot = try? element.snapshot() else { return false }
+            return exactCount(snapshot) == 1
+        }
+        guard candidates.count == 1 else { return "scroll-to end needs one scroll ancestor (nested scroll unsupported)" }
+        let scroll = candidates[0], initial = scroll.frame, viewport = initial.intersection(app.frame)
+        guard [viewport.minX, viewport.minY, viewport.width, viewport.height].allSatisfy({ $0.isFinite }),
+              viewport.width >= 44, viewport.height >= 88,
+              initial == viewport else { return "scroll-to end has no unobstructed app scroll viewport" }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        var previous = target.frame, stationary = 0, gestures = 0
+        while gestures < 10 {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return "scroll-to end gesture deadline exceeded" }
+            guard scroll.exists, scroll.frame == initial, let snapshot = try? scroll.snapshot(), exactCount(snapshot) == 1 else {
+                return "scroll-to end scroll scope changed"
+            }
+            let origin = scroll.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * 0.8))
+            let finish = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * 0.2))
+            start.press(forDuration: 0.05, thenDragTo: finish, withVelocity: .slow, thenHoldForDuration: 0.2)
+            gestures += 1
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return "scroll-to end gesture deadline exceeded" }
+            let current = target.frame
+            stationary = current == previous ? stationary + 1 : 0
+            previous = current
+            if stationary >= 2 { break }
+        }
+        guard let final = try? target.snapshot(), final.identifier == anchor, target.isHittable else {
+            return "scroll-to end target is not reachable"
+        }
+        // Stationarity is only a stop condition. Node must validate actual adjusted-inset/contentOffset geometry.
+        scrollEndObservations.append(["anchor": anchor, "source": "XCUIAutomation.publicScrollGesture",
+            "scrollFrame": rect(initial), "targetFrame": rect(target.frame), "gestureCount": gestures,
+            "stationarySamples": stationary, "endpointVerified": false])
+        return nil
+    }
+    // END PUBLIC SCROLL END
 
     /// Stable names for the element types the Node driver interprets; anything else is reported as other.
     private func typeName(_ type: XCUIElement.ElementType) -> String {

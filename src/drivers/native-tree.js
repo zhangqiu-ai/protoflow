@@ -54,11 +54,44 @@ function joinText(nodes) {
     .map(item => item.label).join(' ');
 }
 
+// Only ordering changes: every part comes from the original subtree traversal, by the same node reference.
+// Empty drawing/container branches cannot perturb text order. A wrapper covering a sibling uses its real
+// text-bearing extent for placement; an ordinary row/ring and every scroll viewport retain their real frame.
+function renderedHierarchyParts(root, parts) {
+  const partSet = new Set(parts), owned = new Map();
+  const scan = node => {
+    const values = partSet.has(node) ? [node] : (node.children ?? []).flatMap(scan);
+    owned.set(node, values);
+    return values;
+  };
+  scan(root);
+  const extent = branch => {
+    const frames = [];
+    const visit = node => {
+      if (!owned.get(node)?.length) return;
+      if (SCROLLERS.has(node.type) || partSet.has(node)) { frames.push(frameOf(node)); return; }
+      for (const child of node.children ?? []) visit(child);
+    };
+    visit(branch);
+    const x = Math.min(...frames.map(f => f.x)), y = Math.min(...frames.map(f => f.y));
+    return { x, y, width: Math.max(...frames.map(f => f.x + f.width)) - x,
+      height: Math.max(...frames.map(f => f.y + f.height)) - y };
+  };
+  const ordered = node => {
+    if (partSet.has(node)) return [node];
+    const children = (node.children ?? []).filter(child => owned.get(child)?.length);
+    const units = children.map(child => ({ node: child, frame: !child.label && !SCROLLERS.has(child.type)
+      && children.some(other => other !== child && contains(frameOf(child), frameOf(other))) ? extent(child) : frameOf(child) }));
+    return readingOrder(units).flatMap(unit => ordered(unit.node));
+  };
+  return ordered(root);
+}
+
 /**
  * Visible text of a subtree, like the DOM's innerText: text and button labels in reading order, never a control's
  * accessible name or typed field values.
  */
-export function subtreeText(node, { onTextParts } = {}) {
+export function subtreeText(node, { onTextParts, renderedHierarchy = false } = {}) {
   const parts = [];
   const visit = item => {
     if (TEXT_ENTRY.has(item.type) || item.visible === false) return;
@@ -68,8 +101,9 @@ export function subtreeText(node, { onTextParts } = {}) {
     for (const child of readingOrder(item.children)) visit(child);
   };
   visit(node);
-  onTextParts?.(parts);
-  return joinText(parts);
+  const ordered = renderedHierarchy ? renderedHierarchyParts(node, parts) : parts;
+  onTextParts?.(ordered);
+  return joinText(ordered);
 }
 
 // A composite control may render Text children, unlike a leaf UISwitch. Its own label is an accessible name,
@@ -117,12 +151,12 @@ export function scrolledOut(tree) {
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
  * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
-export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts, includeContainerDescendants = false } = {}) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts, includeContainerDescendants = false, renderedHierarchy = false, excludeAncestorLabels = false } = {}) {
   if (includeContainerDescendants) {
     // The normalized subtree already owns the visibility/scroll/input decision. Geometry may order those exact
     // parts into layers, but must not discard a positive-clipped Text whose centre lies outside the window.
     const hierarchy = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
-    subtreeText(container, { onTextParts: values => hierarchy.push(...values) });
+    subtreeText(container, { onTextParts: values => hierarchy.push(...values), renderedHierarchy });
     const scan = (item, scroller) => {
       order.set(item, order.size); owner.set(item, scroller);
       if (TEXT_ENTRY.has(item.type)) return;
@@ -148,10 +182,12 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
   // the composer's. Content scrolled out of sight lies where its scroll view is. A container in the scroll view scrolls
   // along with it and compares frames directly, but only within the scroll view's visible frame: the header over the
   // part of a message list scrolled out above it is not the list's text.
-  const along = new Set();
+  const along = new Set(), ancestors = new Set();
   const enclose = (item, scrollers) => {
     if (item === container) { scrollers.forEach(scroller => along.add(scroller)); return true; }
-    return (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+    const found = (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+    if (found && excludeAncestorLabels) ancestors.add(item);
+    return found;
   };
   enclose(tree, []);
   const scrollers = scroller => { const list = new Set(); for (let item = scroller; item; item = outer.get(item)) list.add(item); return list; };
@@ -164,7 +200,7 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
     if (item === container || item.visible === false) return;
     if (textOnly && TEXT_ENTRY.has(item.type)) return;
     const controlTextOnly = textOnly || CONTROLS.has(item.type);
-    if (within(item, scroller) && !TEXT_ENTRY.has(item.type)) {
+    if (within(item, scroller) && !TEXT_ENTRY.has(item.type) && !ancestors.has(item)) {
       const leaf = controlTextOnly ? item.type === 'staticText' && item.label
         : (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
@@ -278,20 +314,20 @@ function stacked(units, placed, withinLayer = readingOrder) {
 }
 
 /** Whole-window text: original subtree order within actual overlapping layers, with original text-part references. */
-export function layeredSubtreeText(node, { onTextParts } = {}) {
-  return textWithin(node, node, scrolledOut(node), { screen: true, onTextParts, includeContainerDescendants: true });
+export function layeredSubtreeText(node, { onTextParts, renderedHierarchy = false } = {}) {
+  return textWithin(node, node, scrolledOut(node), { screen: true, onTextParts, includeContainerDescendants: true, renderedHierarchy });
 }
 
 /**
  * The element's own text: field value/placeholder, only visible Text descendants for controls (leaf checkboxes have
  * none), the label of text and buttons, else its visible text (by hierarchy, or by geometry in a flattened tree).
  */
-export function elementText(node, tree = null, scrolled = undefined, { screen = false, onTextParts } = {}) {
+export function elementText(node, tree = null, scrolled = undefined, { screen = false, onTextParts, renderedHierarchy = false, excludeAncestorLabels = false } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
   if (CONTROLS.has(node.type)) { const parts = controlTextParts(node); onTextParts?.(parts); return joinText(parts); }
   if (LABELLED.has(node.type)) { onTextParts?.(node.label ? [node] : []); return node.label ?? ''; }
-  if (node.children?.length) return subtreeText(node, { onTextParts });
-  return tree && !node.label ? textWithin(tree, node, scrolled, { screen, onTextParts }) : node.label ?? '';
+  if (node.children?.length) return subtreeText(node, { onTextParts, renderedHierarchy });
+  return tree && !node.label ? textWithin(tree, node, scrolled, { screen, onTextParts, renderedHierarchy, excludeAncestorLabels }) : node.label ?? '';
 }
 
 function collect(node, byId = new Map()) {

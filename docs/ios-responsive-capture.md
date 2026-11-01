@@ -15,6 +15,8 @@
 
 旋轉另於 `raw.json.responsiveObservations` 保存實際 window 前後 frame、尺寸是否改變、裝置 orientation 與已限定輸入的保留布林。設定 orientation 並不代表 App window 已轉向；驗收方必須檢查 `windowSizeChanged`。窄視窗必須來自 iPadOS 真實 App window 變化；縮放 macOS Simulator 外框不能作證。本擴充沒有私有 API 或模擬 window frame。
 
+既有 `--uikit-probe-context` 路徑在正式 pair 前會先作[有界全樹靜默觀測](uikit-settling-verification-2026-11-01.md)：最多 8 samples／6 秒，至少 3 個相同完整 capture 且靜默跨度至少 1500ms。這不是新的 CLI／target config flag；未穩定即 `NOT_RUN`，不重用準備樣本、不放寬原正式 pair。
+
 驗證：`node --test tests/ios-responsive-driver.test.js tests/ios-driver.test.js tests/uikit-probe.test.js tests/uikit-probe-text.test.js`。XCTest 另以 generic iOS Simulator `build-for-testing` 編譯。實際裝置與畫面驗證屬使用端驗收，本文件不代表已通過。
 
 ## 非密碼文字的完整替換
