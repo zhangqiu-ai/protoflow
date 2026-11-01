@@ -20,9 +20,11 @@ async function privateRead(file, limit) {
 }
 
 /** Fixed owned-cache bridge. Resolves only the selected simulator/bundle's current app container per sample. */
-export function startProbeBridge({ device, bundleId, outputDir, session, run, settleBeforeCapture = false }) {
+export function startProbeBridge({ device, bundleId, outputDir, session, run, settleBeforeCapture = false, settlingBudgetMs = 6000 }) {
   let stopped = false, failure = null, expectedBuild = null;
   requireValue(typeof settleBeforeCapture === 'boolean', 'invalid settling opt-in');
+  requireValue(Number.isSafeInteger(settlingBudgetMs) && settlingBudgetMs >= 6000 && settlingBudgetMs <= 10000, 'invalid settling budget');
+  requireValue(settleBeforeCapture || settlingBudgetMs === 6000, 'extended settling budget requires settling opt-in');
   const seen = new Set(), receipts = [];
   const settlingSamples = new Set(), settlingMarkers = new Set(), settlingReceipts = [];
   let settlingDeadline = null, settlingComplete = false;
@@ -74,7 +76,9 @@ export function startProbeBridge({ device, bundleId, outputDir, session, run, se
     requireValue(settling ? settlingSamples.size < 8 : seen.size < 2, 'sample replay or session limit');
     requireValue(settling || !settleBeforeCapture || settlingComplete, 'settling must complete before the measured pair');
     (settling ? settlingSamples : seen).add(marker.sampleId);
+    const serveStarted = settling ? performance.now() : null;
     const expected = await identity();
+    const identityFinished = settling ? performance.now() : null;
     const current = await container('data');
     const channel = path.join(current, 'Library/Caches/SiyueCaptureProbe');
     const info = await budget(() => lstat(channel));
@@ -100,7 +104,9 @@ export function startProbeBridge({ device, bundleId, outputDir, session, run, se
     const receipt = { phase: marker.phase, sampleId: marker.sampleId, nonce: session.nonce, copiedAt: Date.now() / 1000,
       sha256: digest(bytes), appDataContainer: current, actualInstalledBuild: expected };
     if (settling) {
-      settlingReceipts.push({ ...receipt, file });
+      const copied = performance.now();
+      const elapsedMs = { identity: Math.max(0, identityFinished - serveStarted), channel: Math.max(0, copied - identityFinished), total: Math.max(0, copied - serveStarted) };
+      settlingReceipts.push({ ...receipt, file, elapsedMs });
       await budget(() => writeFile(path.join(outputDir, 'probe-settling.json'), JSON.stringify({ session, status: 'RUNNING', settlingReceipts }, null, 2), { mode: 0o600 }));
     } else {
       receipts.push(receipt);
@@ -121,7 +127,7 @@ export function startProbeBridge({ device, bundleId, outputDir, session, run, se
     requireValue(settleBeforeCapture && marker.nonce === session.nonce && UUID.test(marker.sampleId) && marker.phase === 'settle', 'unexpected settling marker');
     requireValue(!settlingMarkers.size && !seen.size && !settlingSamples.has(marker.sampleId), 'settling phase replay or order');
     settlingMarkers.add(marker.sampleId);
-    settlingDeadline = performance.now() + 6000;
+    settlingDeadline = performance.now() + settlingBudgetMs;
     const startedAt = Date.now() / 1000;
     let previousHash = null, firstFinishedAt = 0, firstObservedAt = 0, lastFinishedAt = 0, consecutive = 0, quietSpanMs = 0, observedQuietSpanMs = 0;
     try {
@@ -138,7 +144,7 @@ export function startProbeBridge({ device, bundleId, outputDir, session, run, se
         observedQuietSpanMs = performance.now() - firstObservedAt;
         if (consecutive >= 3 && quietSpanMs >= 1500 && observedQuietSpanMs >= 1500) {
           await budget(() => writeFile(path.join(outputDir, 'probe-settling.json'), JSON.stringify({ session, status: 'READY', startedAt,
-            finishedAt: Date.now() / 1000, maxSamples: 8, budgetMs: 6000, minimumQuietSpanMs: 1500,
+            finishedAt: Date.now() / 1000, maxSamples: 8, budgetMs: settlingBudgetMs, minimumQuietSpanMs: 1500,
             consecutive, quietSpanMs, observedQuietSpanMs, settlingReceipts }, null, 2), { mode: 0o600 }));
           remaining();
           settlingComplete = true;
@@ -149,7 +155,7 @@ export function startProbeBridge({ device, bundleId, outputDir, session, run, se
       throw new Error('UIKit bridge: settling sample limit exceeded without a quiet tree');
     } catch (error) {
       await writeFile(path.join(outputDir, 'probe-settling.json'), JSON.stringify({ session, status: 'NOT_RUN', startedAt,
-        finishedAt: Date.now() / 1000, reason: error.message, maxSamples: 8, budgetMs: 6000, minimumQuietSpanMs: 1500,
+        finishedAt: Date.now() / 1000, reason: error.message, maxSamples: 8, budgetMs: settlingBudgetMs, minimumQuietSpanMs: 1500,
         consecutive, quietSpanMs, observedQuietSpanMs, settlingReceipts }, null, 2), { mode: 0o600 });
       throw error;
     } finally { settlingDeadline = null; }

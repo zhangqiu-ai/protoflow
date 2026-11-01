@@ -32,7 +32,7 @@ export const driverOptions = args => parseArgs({
   args,
   options: {
     'bundle-id': { type: 'string' }, app: { type: 'string' }, device: { type: 'string' },
-    'uikit-probe-context': { type: 'string' },
+    'uikit-probe-context': { type: 'string' }, 'uikit-settling-budget-ms': { type: 'string' },
     'launch-preparation-dir': { type: 'string' }, 'launch-preparation-token': { type: 'string' },
     frame: { type: 'string', default: 'safe-area' }, 'launch-url': { type: 'string' }, 'timeout-ms': { type: 'string' }, 'launch-timeout-ms': { type: 'string' }, cache: { type: 'string' },
     orientation: { type: 'string' }, 'rotate-after-steps': { type: 'string' },
@@ -57,6 +57,11 @@ export async function launchPreparationOptions(values) {
 
 const orientations = ['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right'];
 export function responsiveOptionsError(values, request) {
+  if (values['uikit-settling-budget-ms'] !== undefined) {
+    const budget = values['uikit-settling-budget-ms'];
+    if (!values['uikit-probe-context']) return '--uikit-settling-budget-ms needs --uikit-probe-context';
+    if (!/^[0-9]+$/.test(budget) || !Number.isSafeInteger(Number(budget)) || Number(budget) < 6000 || Number(budget) > 10000) return 'invalid --uikit-settling-budget-ms (integer 6000..10000 required)';
+  }
   if (!['safe-area', 'device', 'app-window'].includes(values.frame)) return `unknown --frame ${values.frame}`;
   if (values.frame === 'app-window' && !values['uikit-probe-context']) return '--frame app-window needs --uikit-probe-context';
   if (values['rotate-after-steps'] && values.frame === 'safe-area') return '--rotate-after-steps needs --frame device or app-window';
@@ -229,7 +234,7 @@ async function main() {
   const jobFile = path.join(outputDir, 'job.json');
   await writeFile(jobFile, `${JSON.stringify(job, null, 2)}\n`);
   const results = await mkdtemp(path.join(probeDir ?? tmpdir(), 'protoflow-ios-'));
-  const bridge = probeSession ? startProbeBridge({ device: device.udid, bundleId: values['bundle-id'], outputDir: probeDir, session: probeSession, run, settleBeforeCapture: true }) : null;
+  const bridge = probeSession ? startProbeBridge({ device: device.udid, bundleId: values['bundle-id'], outputDir: probeDir, session: probeSession, run, settleBeforeCapture: true, settlingBudgetMs: Number(values['uikit-settling-budget-ms'] ?? 6000) }) : null;
   let test;
   try {
     test = await run(['xcodebuild', 'test-without-building', '-xctestrun', built.xctestrun, '-destination', `id=${device.udid}`,

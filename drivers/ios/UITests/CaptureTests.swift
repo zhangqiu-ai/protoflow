@@ -571,6 +571,8 @@ final class CaptureTests: XCTestCase {
             guard pages.insert(signature).inserted else { return "public edit menu did not advance" }
             guard page < 3, let forward = publicEditMenuForward(app, items: items) else { return "public Select All action is unavailable" }
             forward.tap()
+            do { _ = try app.snapshot() }
+            catch { return "public edit menu refresh snapshot is unavailable" }
         }
         guard selectedAll else { return "public Select All action is unavailable" }
         field.typeText(XCUIKeyboardKey.delete.rawValue)
