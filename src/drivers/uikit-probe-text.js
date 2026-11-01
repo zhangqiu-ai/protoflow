@@ -1,4 +1,4 @@
-import { elementText, scrolledOut } from './native-tree.js';
+import { elementText, layeredSubtreeText, scrolledOut } from './native-tree.js';
 
 const TEXT = new Set(['UILabel.text', 'UIButton.currentTitle', 'RCTParagraphComponentView.attributedText']);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -61,7 +61,9 @@ export function interpretUIKitCapture(capture, semanticFacts) {
   const facts = (node, { screen = false } = {}) => {
     const scope = screen ? root : node, normalized = normalizedFor.get(scope);
     const selected = [];
-    let text = elementText(normalized, tree, scrolled, { screen, onTextParts: parts => selected.push(...parts) });
+    const onTextParts = parts => selected.push(...parts);
+    let text = screen ? layeredSubtreeText(normalized, { onTextParts })
+      : elementText(normalized, tree, scrolled, { onTextParts });
     let parts = selected.map(part => rawFor.get(part)).filter(Boolean);
     if (!normalized.visible) { text = ''; parts = []; }
     // A named accessibility-only leaf supplies no physical text ownership. Do not collect unrelated

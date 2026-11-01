@@ -117,7 +117,30 @@ export function scrolledOut(tree) {
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
  * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
-export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts } = {}) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts, includeContainerDescendants = false } = {}) {
+  if (includeContainerDescendants) {
+    // The normalized subtree already owns the visibility/scroll/input decision. Geometry may order those exact
+    // parts into layers, but must not discard a positive-clipped Text whose centre lies outside the window.
+    const hierarchy = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
+    subtreeText(container, { onTextParts: values => hierarchy.push(...values) });
+    const scan = (item, scroller) => {
+      order.set(item, order.size); owner.set(item, scroller);
+      if (TEXT_ENTRY.has(item.type)) return;
+      if (SCROLLERS.has(item.type)) outer.set(item, scroller);
+      for (const child of item.children ?? []) { parent.set(child, item); scan(child, SCROLLERS.has(item.type) ? item : scroller); }
+    };
+    scan(tree, null);
+    const top = part => {
+      let scroller = owner.get(part);
+      if (!scroller) return part;
+      while (outer.get(scroller)) scroller = outer.get(scroller);
+      return scroller;
+    };
+    const placed = layers([...new Set(hierarchy.map(top))], parent, order);
+    const parts = stacked(hierarchy, new Map(hierarchy.map(part => [part, placed.get(top(part))])), units => units);
+    onTextParts?.(parts);
+    return joinText(parts);
+  }
   const frame = frameOf(container);
   const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
   // A scroll view's content is the text of a container outside it only when the scroll view lies in the container as
@@ -245,13 +268,18 @@ function layers(units, parent, order) {
  * Units in reading order by layer: the page underneath by geometry, then each layer above it, overlay by overlay in tree
  * order (a tab bar before a drawer that comes later in the tree, even where they do not overlap), each by geometry.
  */
-function stacked(units, placed) {
+function stacked(units, placed, withinLayer = readingOrder) {
   const groups = new Map();
   for (const unit of units) {
     const { level, rank } = placed.get(unit), id = `${level}:${rank}`;
     groups.set(id, { level, rank, units: [...(groups.get(id)?.units ?? []), unit] });
   }
-  return [...groups.values()].sort((a, b) => a.level - b.level || a.rank - b.rank).flatMap(group => readingOrder(group.units));
+  return [...groups.values()].sort((a, b) => a.level - b.level || a.rank - b.rank).flatMap(group => withinLayer(group.units));
+}
+
+/** Whole-window text: original subtree order within actual overlapping layers, with original text-part references. */
+export function layeredSubtreeText(node, { onTextParts } = {}) {
+  return textWithin(node, node, scrolledOut(node), { screen: true, onTextParts, includeContainerDescendants: true });
 }
 
 /**

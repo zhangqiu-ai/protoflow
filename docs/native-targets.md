@@ -430,6 +430,8 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 
 已存在 AX 的 screen 若只涵蓋 captured content 的真子區，可在 response／AX／UIKit screen 各唯一、原始 frame 精確一致、非輸入非互動 other、原 AX text 可重算一致、完整 content bounds 及肯定可見公開文字等條件成立後，使用同一 interpreter 的整個 owned window 文字。此路徑不依賴 missing anchor，也不繞過既有 blocked correction group；只改 screen text／provenance，真實 handle、count、overlay 與其餘 facts 保留。沒有 probe 的預設行為不變。見 [screen 範圍校正驗證](uikit-screen-scope-verification-2026-10-31.md)。
 
+owned window 文字依真實 parent／tree order 與 Text／scroller extents 分層，層內維持原 subtree 的 pane 順序，避免匿名全窗 popup 被讀到主區之前。只在 UIKit 整窗 screen 解讀使用；非 screen 與預設 AX 解讀不變，背景文字不因 overlay 被刪除。見 [整窗圖層順序驗證](uikit-window-layer-verification-2026-10-31.md)。
+
 同一 opt-in 路徑也可校正已存在 AX 的非輸入 button/link 文字：只有 AX 與 UIKit identifier 唯一、公開 role 相符、原始螢幕 frame 完全相同、公開語意來源完整且控制項不含輸入 subtree 時，才使用同一公開文字 interpreter 取得實際 text parts。無障礙名稱仍保留於原 AX 與 `provenance.originalAX.label`／`correctedControls.originalAXLabel`，不是可見文字來源。文字與 provenance 以外的 count、geometry、visible、enabled、role 等 AX 事實不改。
 
 明確 AX `image` leaf（沒有 AX children）也可在此 opt-in 路徑校正可見文字，但 current UIKit 公開語意必須是 `role=other`、button/link trait 均為 false，且沒有 input 證據；與 button、link、switch 等語意衝突時不校正。只採用當前實際 subtree 的 UILabel／UIButton／RN 文字部分，不採用 flattened sibling 幾何推斷；圖片的 alt／無障礙名稱保留，圖內真實 UILabel 文字也保留。有 AX children 的 image 不參與這項 image 校正，避免 image 自身換用 UIKit caption、祖先卻仍採 AX child caption；保留原始 image facts/text/provenance。這是受限的文字校正，不推導 image 的互動性或改寫 AX role，既有 control function／provenance 名稱維持相容。原生 `image` 的預設處理不變。
