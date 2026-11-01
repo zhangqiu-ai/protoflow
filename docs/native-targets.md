@@ -424,6 +424,8 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 
 啟用後，XCTest 先帶入本輪 nonce/context/scene/screen 的 launch environment 啟動 App，再打開指定 deep link；未啟用時維持原本冷啟動流程。原步驟完成後，以兩個 fresh sample 夾住原始 AX snapshot 與完整裝置截圖，第二次觀測完成才終止 App。Node bridge 逐次解析指定 simulator/bundle 的當前容器，只使用 App 自有 `Library/Caches/SiyueCaptureProbe` 固定通道；預期身分來自已安裝 `.app` 的 Info.plist、可執行檔及 main.jsbundle 真實位元組，不來自原型預期文字。
 
+啟用 `captureProbe` 時，XCTest 在既有 0.3 秒 layout settle 後、第一份 UIKit sample 前，只呼叫一次 `app.snapshot()` 作 AX 準備，捨棄該 snapshot；未啟用 probe 的預設路徑不增加呼叫。成功後僅在 `raw.json.accessibilityPreparation` 記錄 method、count=1 與實際 startedAt／finishedAt，不保存準備 snapshot 的 tree、label 或 value。這段 metadata 與原 measured `probeTiming` 分開，不替代 AX／截圖時間，也不重試、增加等待或刪除空節點。原 measured AX → screenshot → keyboard → after probe 順序維持不變。見[診斷與 protocol 驗證範圍](ios-accessibility-preparation-verification-2026-10-31.md)。
+
 兩份完整原生樹必須相同，且 nonce、不同 sample ID、實際建置、主執行緒、時間順序與最長 10 秒 bracket 都通過。來源缺失、建置不符、不穩定或逾時均為 `NOT_RUN`，不回退成無探針成功。每次保留獨立 `uikit-probe-*` 目錄中的 raw native JSON、bridge receipt、驗證雜湊、xcodebuild log 與 xcresult；原本 `raw.json` 的 AX tree 與 `device.png` 仍保持獨立。
 
 補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。

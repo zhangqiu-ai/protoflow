@@ -402,3 +402,26 @@ test('trusted UIKit semantics never replace existing AX interaction facts when o
   for (const key of ['bounds', 'visible', 'enabled', 'interactive', 'editable', 'inputType', 'role']) assert.deepEqual(found[key], original[key]);
   assert.deepEqual(found.provenance.fields, ['text']);
 });
+
+
+test('accessibility preparation metadata cannot excuse an empty mounted child changing inside the measured pair', () => {
+  const input = pair();
+  const raw = { accessibilityPreparation: { method: 'XCUIApplication.snapshot', count: 1,
+    startedAt: input.before.startedAt - 0.2, finishedAt: input.before.startedAt - 0.1 }, probeTiming: input.timing };
+  assert.doesNotThrow(() => validateProbePair({ ...input, timing: raw.probeTiming }));
+  input.after.capture.windows[0].tree.children.push(node('', '', [], { class: 'UIView', frameInWindow: rect(20, 40, 44, 44) }));
+  input.after.capture.nodeCount += 1;
+  const saved = clone(input);
+  assert.throws(() => validateProbePair({ ...input, timing: raw.probeTiming }), /current tree changed during capture/);
+  assert.deepEqual(input, saved, 'even an empty anonymous child remains raw evidence');
+});
+
+test('preparation timestamps cannot replace or repair the measured AX and screenshot bracket', () => {
+  const input = pair();
+  const preparation = { method: 'XCUIApplication.snapshot', count: 1,
+    startedAt: input.before.startedAt - 0.2, finishedAt: input.before.startedAt - 0.1 };
+  assert.throws(() => validateProbePair({ ...input, timing: preparation }));
+  input.timing.axStartedAt = preparation.startedAt;
+  input.timing.axFinishedAt = preparation.finishedAt;
+  assert.throws(() => validateProbePair(input), /time|bracket|order|before/i);
+});

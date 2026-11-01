@@ -143,3 +143,86 @@ test('the UIKit call resolves after warm launch and returns before open on prepa
   expect(launch.indexOf('preparedLaunchURL(')).toBeLessThan(launch.indexOf('app.open(urlToOpen)'));
   expect(launch).toMatch(/guard let preparedURL = prepared.url else \{[\s\S]*"status": "NOT_RUN"[\s\S]*return\s*\}/);
 });
+
+
+// Protocol scheduling only: execute the real capture fragment with Foundation shims.
+// This does not exercise XCTest/UIKit or establish that a real application is stable.
+test('probe accessibility preparation runs once before the unchanged measured bracket and stays outside raw capture', async ({}, testInfo) => {
+  const source = await readFile(new URL('../../drivers/ios/UITests/CaptureTests.swift', import.meta.url), 'utf8');
+  const declaration = source.match(/        var accessibilityPreparation: \[String: Any\]\? = nil/);
+  expect(declaration, 'the opt-in preparation must have separate optional metadata').not.toBeNull();
+  const observation = source.match(/            if let accessibilityPreparation \{ result\["accessibilityPreparation"\] = accessibilityPreparation \}/);
+  expect(observation, 'metadata must survive the existing raw result reset and early returns').not.toBeNull();
+  const segment = source.slice(source.indexOf('        Thread.sleep(forTimeInterval: 0.3)'),
+    source.indexOf('        // A state that ends while typing'));
+  const file = path.join(root, 'preparation-order.swift'), binary = path.join(root, 'preparation-order');
+  const shim = `import Foundation
+var events: [String] = []
+let mode = CommandLine.arguments[1]
+struct Job { let captureProbe: Int?; let hittableAnchors: [String]? = nil }
+struct Target { let exists = false; let isEnabled = false; let isHittable = false }
+struct Keyboards { var firstMatch: Target { Target() } }
+final class App {
+ var calls = 0
+ var keyboards: Keyboards { Keyboards() }
+ func snapshot() throws -> Int {
+  calls += 1; events.append("snapshot")
+  if mode == "preparation-error" && calls == 1 { throw NSError(domain: "synthetic-preparation", code: 1) }
+  return calls
+ }
+}
+struct Shot { var pngRepresentation: Data { Data() } }
+struct XCUIScreen { static var main: XCUIScreen { XCUIScreen() }; func screenshot() -> Shot { events.append("screenshot"); return Shot() } }
+func element(_ app: App, _ anchor: String) -> Target { Target() }
+func serialize(_ snapshot: Int) -> [String: Any] { ["snapshotOrdinal": snapshot, "label": "synthetic-measured-only"] }
+func failure(_ app: App, _ output: URL, _ reason: String) -> [String: Any] { ["status": "NOT_RUN", "reason": reason] }
+func requestProbe(_ probe: Int, phase: String) -> String? { events.append(phase); return nil }
+let app = App()
+let output = URL(fileURLWithPath: CommandLine.arguments[2])
+func capture() throws {
+ let job = Job(captureProbe: mode == "default" ? nil : 1)
+ var result: [String: Any] = [:]
+ var responsive: [String: Any]? = nil
+${declaration[0]}
+ defer {
+${observation[0]}
+  try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]).write(to: output.appendingPathComponent("raw.json"))
+ }
+${segment}
+}
+var thrown = false
+ do { try capture() } catch { thrown = true }
+print(String(data: try JSONSerialization.data(withJSONObject: ["events": events, "thrown": thrown], options: [.sortedKeys]), encoding: .utf8)!)
+`;
+  await writeFile(file, shim);
+  await writeFile(testInfo.outputPath('actual-capture-fragment.swift'), shim);
+  await testInfo.attach('actual-capture-fragment.swift', { body: shim, contentType: 'text/plain' });
+  const compile = await exec('xcrun', ['--sdk', 'macosx', 'swiftc', file, '-o', binary], { timeout: 60000 });
+  await writeFile(testInfo.outputPath('foundation-compile.log'), compile.stdout + compile.stderr);
+  await testInfo.attach('foundation-compile.log', { body: compile.stdout + compile.stderr, contentType: 'text/plain' });
+  const observations = [];
+  for (const mode of ['probe', 'default', 'preparation-error']) {
+    const directory = await channel(), result = await exec(binary, [mode, directory]);
+    const actual = JSON.parse(result.stdout), raw = JSON.parse(await readFile(path.join(directory, 'raw.json'), 'utf8'));
+    observations.push({ mode, actual, raw });
+    if (mode === 'preparation-error') {
+      expect(actual.thrown).toBe(true);
+      expect(actual.events).not.toContain('before'); expect(actual.events).not.toContain('after');
+      expect(raw.probeTiming).toBeUndefined(); expect(raw.accessibilityPreparation).toBeUndefined();
+      continue;
+    }
+    expect(actual.thrown).toBe(false);
+    expect(actual.events).toEqual(mode === 'probe' ? ['snapshot', 'before', 'snapshot', 'screenshot', 'after'] : ['snapshot', 'screenshot']);
+    expect(raw.tree.snapshotOrdinal).toBe(mode === 'probe' ? 2 : 1);
+    if (mode === 'default') { expect(raw.accessibilityPreparation).toBeUndefined(); expect(raw.probeTiming).toBeUndefined(); continue; }
+    expect(Object.keys(raw.accessibilityPreparation).sort()).toEqual(['count', 'finishedAt', 'method', 'startedAt']);
+    expect(raw.accessibilityPreparation).toMatchObject({ method: 'XCUIApplication.snapshot', count: 1 });
+    expect(raw.accessibilityPreparation.startedAt).toBeLessThanOrEqual(raw.accessibilityPreparation.finishedAt);
+    expect(raw.accessibilityPreparation.finishedAt).toBeLessThanOrEqual(raw.probeTiming.axStartedAt);
+    expect(raw.probeTiming.axStartedAt).toBeLessThanOrEqual(raw.probeTiming.axFinishedAt);
+    expect(raw.probeTiming.axFinishedAt).toBeLessThanOrEqual(raw.probeTiming.screenshotStartedAt);
+    expect(raw.probeTiming.screenshotStartedAt).toBeLessThanOrEqual(raw.probeTiming.screenshotFinishedAt);
+  }
+  await writeFile(testInfo.outputPath('protocol-observations.json'), JSON.stringify(observations, null, 2));
+  await testInfo.attach('protocol-observations.json', { body: JSON.stringify(observations, null, 2), contentType: 'application/json' });
+});

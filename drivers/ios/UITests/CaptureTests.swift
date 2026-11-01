@@ -148,9 +148,11 @@ final class CaptureTests: XCTestCase {
         var result: [String: Any] = [:]
         var safeArea: [String: Double]? = nil
         var launchPreparationObservation: [String: Any]? = nil
+        var accessibilityPreparation: [String: Any]? = nil
         defer {
             if let safeArea { result["safeArea"] = safeArea }
             if let launchPreparationObservation { result["launchPreparation"] = launchPreparationObservation }
+            if let accessibilityPreparation { result["accessibilityPreparation"] = accessibilityPreparation }
             if let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) {
                 try? data.write(to: output.appendingPathComponent("raw.json"))
             }
@@ -243,6 +245,12 @@ final class CaptureTests: XCTestCase {
         }
         // Let layout settle after the last step; XCUITest already waits for the app to be idle on each query.
         Thread.sleep(forTimeInterval: 0.3)
+        if job.captureProbe != nil {
+            let startedAt = Date().timeIntervalSince1970
+            _ = try app.snapshot()
+            accessibilityPreparation = ["method": "XCUIApplication.snapshot", "count": 1,
+                "startedAt": startedAt, "finishedAt": Date().timeIntervalSince1970]
+        }
         if let probe = job.captureProbe, let reason = requestProbe(probe, phase: "before") {
             result = failure(app, output, reason)
             result["status"] = "NOT_RUN"
