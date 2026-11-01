@@ -329,4 +329,4 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
 | [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）、維護者豁免（0005）提案與實作紀錄 |
 
-明確的跨 Web／iOS 垂直捲動終點 opt-in 與原 `scroll-to` 的區別，見 [終點契約](docs/scroll-end-contract.md)；候選真實 iOS 驗收仍待執行。
+明確的跨 Web／iOS 垂直捲動起點 `value:"start"`／終點 `value:"end"` opt-in 與原 `scroll-to` 的區別，見 [終點契約](docs/scroll-end-contract.md)；候選真實 iOS 驗收仍待執行。

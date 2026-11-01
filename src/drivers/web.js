@@ -15,7 +15,7 @@ async function perform(page, attribute, step) {
     case 'clear': return target.fill('', { timeout });
     case 'select': return target.selectOption(String(step.value ?? ''), { timeout });
     case 'toggle': return target.click({ timeout });
-    case 'scroll-to': return step.value === 'end' ? webScrollEnd(page, attribute, step.anchor, { execute: true }) : target.scrollIntoViewIfNeeded({ timeout });
+    case 'scroll-to': return ['start', 'end'].includes(step.value) ? webScrollEnd(page, attribute, step.anchor, { execute: true, endpoint: step.value }) : target.scrollIntoViewIfNeeded({ timeout });
     case 'back': return page.goBack({ timeout });
     case 'wait-for': return target.waitFor({ state: 'visible', timeout });
     default: throw new Error(`Unsupported step action: ${step.action}`);
@@ -144,7 +144,7 @@ export async function captureOnPage(page, { attribute, anchors, steps = [], dyna
   await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
   for (const step of steps) await perform(page, attribute, step);
   await settle(page, timeoutMs);
-  for (const anchor of endAnchors) await webScrollEnd(page, attribute, anchor);
+  for (const anchor of endAnchors) await webScrollEnd(page, attribute, anchor, { endpoint: steps.find(step => step.action === 'scroll-to' && step.anchor === anchor && step.value !== undefined).value });
   const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText, dynamicAnchors });
   const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
   return { elements, screenshot };

@@ -387,8 +387,8 @@ final class CaptureTests: XCTestCase {
             }
         case "scroll-to":
             if let value = step.value {
-                guard value == "end" else { return "unsupported scroll-to value" }
-                return scrollToEndPublicly(target, app: app, anchor: anchor, timeout: timeout)
+                guard value == "end" || value == "start" else { return "unsupported scroll-to value" }
+                return scrollToEndPublicly(target, app: app, anchor: anchor, timeout: timeout, start: value == "start")
             }
             var attempts = 0
             while !target.isHittable && attempts < 10 { app.swipeUp(); attempts += 1 }
@@ -400,7 +400,7 @@ final class CaptureTests: XCTestCase {
     }
 
     // BEGIN PUBLIC SCROLL END: gestures establish reachability; only the formal UIKit pair proves the endpoint.
-    private func scrollToEndPublicly(_ target: XCUIElement, app: XCUIApplication, anchor: String, timeout: Double) -> String? {
+    private func scrollToEndPublicly(_ target: XCUIElement, app: XCUIApplication, anchor: String, timeout: Double, start: Bool = false) -> String? {
         func exactCount(_ node: XCUIElementSnapshot) -> Int {
             (node.identifier == anchor ? 1 : 0) + node.children.reduce(0) { $0 + exactCount($1) }
         }
@@ -426,9 +426,9 @@ final class CaptureTests: XCTestCase {
                 return "scroll-to end scroll scope changed"
             }
             let origin = scroll.coordinate(withNormalizedOffset: .zero)
-            let start = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * 0.8))
-            let finish = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * 0.2))
-            start.press(forDuration: 0.05, thenDragTo: finish, withVelocity: .slow, thenHoldForDuration: 0.2)
+            let from = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * (start ? 0.2 : 0.8)))
+            let finish = origin.withOffset(CGVector(dx: viewport.width * 0.5, dy: viewport.height * (start ? 0.8 : 0.2)))
+            from.press(forDuration: 0.05, thenDragTo: finish, withVelocity: .slow, thenHoldForDuration: 0.2)
             gestures += 1
             guard ProcessInfo.processInfo.systemUptime < deadline else { return "scroll-to end gesture deadline exceeded" }
             let current = target.frame
@@ -440,9 +440,11 @@ final class CaptureTests: XCTestCase {
             return "scroll-to end target is not reachable"
         }
         // Stationarity is only a stop condition. Node must validate actual adjusted-inset/contentOffset geometry.
-        scrollEndObservations.append(["anchor": anchor, "source": "XCUIAutomation.publicScrollGesture",
+        var observation: [String: Any] = ["anchor": anchor, "source": "XCUIAutomation.publicScrollGesture",
             "scrollFrame": rect(initial), "targetFrame": rect(target.frame), "gestureCount": gestures,
-            "stationarySamples": stationary, "endpointVerified": false])
+            "stationarySamples": stationary, "endpointVerified": false]
+        if start { observation["endpoint"] = "start" }
+        scrollEndObservations.append(observation)
         return nil
     }
     // END PUBLIC SCROLL END
@@ -601,6 +603,9 @@ final class CaptureTests: XCTestCase {
             "selected": node.isSelected,
             "frame": ["x": node.frame.origin.x, "y": node.frame.origin.y, "width": node.frame.size.width, "height": node.frame.size.height]
         ]
+        if node.elementType == .activityIndicator {
+            item["observedNonTextKind"] = ["kind": "activityIndicator", "source": "XCUIElementSnapshot.elementType"]
+        }
         if let value = node.value { item["value"] = "\(value)" }
         if let placeholder = node.placeholderValue { item["placeholder"] = placeholder }
         let children = node.children.map(serialize)

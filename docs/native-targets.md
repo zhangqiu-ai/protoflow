@@ -459,7 +459,7 @@ owned window 文字依真實 parent／tree order 與 Text／scroller extents 分
 
 ### 明確的內容終點（本地候選）
 
-一般 `scroll-to` 仍只要求可見；`value:"end"` 的唯讀幾何證明、public gesture 與 current UIKit probe 必要條件見[終點契約](scroll-end-contract.md)。未知 value 拒絕；沒有 value 的既有行為保留。不可用 stationary frame 代替終點，也不可把 mock/typecheck 當作真 Native 驗收。
+一般 `scroll-to` 仍只要求可見；`value:"start"`／`value:"end"` 的唯讀幾何證明、public gesture 與 current UIKit probe 必要條件見[終點契約](scroll-end-contract.md)。未知 value 拒絕；沒有 value 的既有行為保留。不可用 stationary frame 代替終點，也不可把 mock/typecheck 當作真 Native 驗收。
 
 ### 已審核文字與捲動候選的本地整合
 

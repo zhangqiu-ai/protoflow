@@ -8,5 +8,7 @@ export default defineConfig({ testDir: './e2e', testMatch: [
   'uikit-nested-scroll.spec.js', 'scroll-alignment.spec.js', 'scroll-alignment-swift.spec.js',
   'ios-launch-preparation.spec.js', 'ios-edit-menu-pagination.spec.js',
   'uikit-probe-settling.spec.js', 'native-keyboard-steps.spec.js',
+  'uikit-typed-progress.spec.js', 'uikit-nested-precision.spec.js', 'uikit-full-root.spec.js',
+  'state-only-text-accounting.spec.js', 'scroll-start.spec.js', 'scroll-start-swift.spec.js',
 ], workers: 1, fullyParallel: false, retries: 0, timeout: 60000, reporter: 'list',
 use: { channel: 'chromium', headless: true, trace: 'retain-on-failure' } });

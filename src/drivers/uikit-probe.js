@@ -255,14 +255,16 @@ function controlTextCorrections(response, rawAX, interpretation, screen) {
   return { corrections, blocked: new Set() };
 }
 
-/** A nested native screen anchor still represents the complete captured content, not just its main pane. */
+/** A verified native screen anchor represents the complete owned window, whether full-content or a main pane. */
 function ownedWindowScreenText(response, rawAX, capture, interpretation, { screen, content }, corrections, blocked) {
-  if (!rawAX || blocked.has(screen) || !rectangle(content) || content.width <= 0 || content.height <= 0) return;
+  const reject = () => { corrections.delete(screen); blocked.add(screen); };
+  if (blocked.has(screen)) return reject();
+  if (!rawAX || !rectangle(content) || content.width <= 0 || content.height <= 0) return;
   const axNodes = allNodes(rawAX), axFound = axNodes.filter(node => node.identifier === screen);
   const contains = (outer, inner) => rectangle(outer) && rectangle(inner) && inner.width > 0 && inner.height > 0
     && inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
-  // Existing whole-content anchors keep their original interpretation. Only a genuine main-pane scope mismatch
-  // enters this correction; no expected text, screen name or application layout is configured here.
+  // Full-content anchors and genuine main panes share the same verified owned-window interpretation.
+  // No expected text, screen name or application layout is configured here.
   if (!axFound.length || !contains(capture.windows[0]?.windowFrame, axFound[0].frame)) return;
   const frame = axFound[0].frame;
   // A genuine main pane may extend into this same owned window's safe-area insets.
@@ -270,20 +272,27 @@ function ownedWindowScreenText(response, rawAX, capture, interpretation, { scree
   const intersection = { x: Math.max(content.x, frame.x), y: Math.max(content.y, frame.y),
     width: Math.min(content.x + content.width, frame.x + frame.width) - Math.max(content.x, frame.x),
     height: Math.min(content.y + content.height, frame.y + frame.height) - Math.max(content.y, frame.y) };
-  if (intersection.width <= 0 || intersection.height <= 0 || sameFrame(content, intersection)) return;
-  const reject = () => { blocked.add(screen); };
+  if (intersection.width <= 0 || intersection.height <= 0) return;
   const items = (response.elements ?? []).filter(item => item.anchor === screen);
   const current = [...interpretation.paths.keys()].filter(node => node.identifier === screen);
   if (items.length !== 1 || axFound.length !== 1 || current.length !== 1 || capture.windows.length !== 1) return reject();
   const item = items[0], ax = axFound[0], node = current[0], window = capture.windows[0];
-  const semantic = semanticFacts(node);
   if (item.count !== 1 || ax.type !== 'other' || item.role !== ax.type || item.inputType != null
     || item.editable !== false || item.interactive !== false || item.visible !== true || ax.visible === false
     || node.inputRedacted || node.observedSemantics?.inputKind || node.observedSemantics?.editable !== undefined
-    || semantic.role !== 'other' || semantic.interactive !== false || semantic.editable !== false
+    || node.attachedToWindow !== true || node.ancestorOrSelfHidden !== false || node.renderEligible !== true || node.transformed !== false
     || !sameFrame(ax.frame, node.frameInScreen) || !sameFrame(item.bounds, { x: 0, y: 0, width: content.width, height: content.height })
     || window.screenAnchor !== screen || !contains(window.windowFrame, content)
     || elementText(ax, rawAX, scrolledOut(rawAX), { screen: true }) !== item.text) return reject();
+  // Public text-entry observations are usable only as already-redacted leaves. Never inspect AX values.
+  if (allNodes(window.tree).some(view => (view.inputRedacted || view.textSource === 'redactedInput'
+    || ['textField', 'textView'].includes(view.observedSemantics?.inputKind))
+    && (view.inputRedacted !== true || view.textSource !== 'redactedInput' || view.text !== '' || 'children' in view))) return reject();
+  // Legacy full-content observations may lack root semantics while independent controls remain fully proven.
+  // This path is then inapplicable, not invalid; subpanes and any present but conflicting proof stay strict.
+  if (sameFrame(content, intersection) && !('observedSemantics' in node)) return;
+  const semantic = semanticFacts(node);
+  if (semantic.role !== 'other' || semantic.interactive !== false || semantic.editable !== false) return reject();
   const facts = interpretation.facts(node, { screen: true });
   if (facts.visible !== true || facts.textScope !== 'ownedWindow' || !facts.text.trim() || !facts.textNodePaths.length) return reject();
   const axPaths = new Map();
@@ -320,6 +329,65 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
   const locateAX = (node, at, parent) => { axPaths.set(node, at); if (parent) axParents.set(node, parent); (node.children ?? []).forEach((child, index) => locateAX(child, [...at, index], node)); };
   if (rawAX) locateAX(rawAX, [], null);
   const scrolled = rawAX ? scrolledOut(rawAX) : null;
+  const currentParents = new Map();
+  for (const parent of nodes) for (const child of parent.children ?? []) currentParents.set(child, parent);
+  const under = (path, parent) => path && parent && path.length > parent.length && parent.every((value, index) => path[index] === value);
+  const renderedNoninput = node => {
+    const at = interpretation.paths.get(node), observed = node.observedSemantics;
+    return at && observed && typeof observed.buttonTrait === 'boolean' && typeof observed.linkTrait === 'boolean'
+      && !observed.inputKind && observed.editable === undefined && !node.inputRedacted
+      && node.renderEligible === true && [...interpretation.paths].every(([view, path]) =>
+        !(path.length <= at.length && path.every((value, index) => at[index] === value))
+        || view.attachedToWindow === true && view.ancestorOrSelfHidden === false && view.effectiveAlpha > 0
+          && view.transformed === false && !view.inputRedacted && !view.observedSemantics?.inputKind);
+  };
+  const anonymousPart = (part, scopeAX, scope, used) => {
+    if (part.identifier || !['staticText', 'other'].includes(part.type) || typeof part.label !== 'string' || !part.label.trim() || part.visible === false) return null;
+    const physical = part.type === 'staticText', proof = part.observedNonTextKind;
+    if (!physical && (part.children?.length || !proof || Object.keys(proof).sort().join(',') !== 'kind,source'
+      || proof.kind !== 'activityIndicator' || proof.source !== 'XCUIElementSnapshot.elementType')) return null;
+    const axChain = [];
+    let ownerAX = axParents.get(part);
+    while (ownerAX && !ownerAX.identifier) { axChain.push(ownerAX); ownerAX = axParents.get(ownerAX); }
+    if (!ownerAX || axNodes.filter(node => node.identifier === ownerAX.identifier).length !== 1
+      || ownerAX !== scopeAX && !under(axPaths.get(ownerAX), axPaths.get(scopeAX)) || ownerAX.type !== 'other') return null;
+    const owners = nodes.filter(node => node.identifier === ownerAX.identifier);
+    if (owners.length !== 1 || !sameFrame(ownerAX.frame, owners[0].frameInScreen) || !renderedNoninput(owners[0])
+      || semanticFacts(owners[0]).role !== 'other' || owners[0] !== scope && !under(interpretation.paths.get(owners[0]), interpretation.paths.get(scope))) return null;
+    const owner = owners[0];
+    const matches = nodes.filter(node => {
+      if (node.identifier || used.has(node) || !sameFrame(part.frame, node.frameInScreen) || !renderedNoninput(node)
+        || !under(interpretation.paths.get(node), interpretation.paths.get(owner))) return false;
+      const semantic = semanticFacts(node);
+      if (semantic.role !== 'other' || semantic.interactive || semantic.editable) return false;
+      if (physical ? !TEXT_SOURCES.has(node.textSource) || node.text !== part.label
+        : node.textSource !== 'none' || node.text !== '' || node.accessibilityLabel !== part.label
+          || allNodes(node).some(child => TEXT_SOURCES.has(child.textSource) || child.inputRedacted
+            || child.observedSemantics?.inputKind || child.observedSemantics?.editable !== undefined)) return false;
+      const chain = [];
+      for (let parent = currentParents.get(node); parent && parent !== owner; parent = currentParents.get(parent)) {
+        if (parent.identifier) return false;
+        chain.push(parent);
+      }
+      // AX may omit anonymous wrappers. Require one unique order-preserving mapping of every
+      // observed AX parent into the actual UIKit parent chain, never a geometric sibling search.
+      const ways = Array(axChain.length + 1).fill(0); ways[0] = 1;
+      for (const current of chain) for (let index = axChain.length - 1; index >= 0; index--) {
+        if (!ways[index]) continue;
+        const axParent = axChain[index];
+        if (axParent.type !== 'other' || axParent.visible === false || !sameFrame(axParent.frame, current.frameInScreen)
+          || !renderedNoninput(current) || semanticFacts(current).role !== 'other'
+          || axParent.label && axParent.label !== current.accessibilityLabel) continue;
+        ways[index + 1] = Math.min(2, ways[index + 1] + ways[index]);
+      }
+      return ways[axChain.length] === 1;
+    });
+    if (matches.length !== 1) return null;
+    used.add(matches[0]);
+    return { source: physical ? matches[0].textSource : proof.source, kind: physical ? 'physicalText' : proof.kind,
+      axNodePath: axPaths.get(part), nativeNodePath: interpretation.paths.get(matches[0]),
+      ownerAXNodePath: axPaths.get(ownerAX), ownerNativeNodePath: interpretation.paths.get(owner) };
+  };
   for (const item of response.elements ?? []) {
     if (item.anchor === screen || blocked.has(item.anchor) || item.count !== 1 || item.visible !== true
       || item.editable !== false || item.inputType != null || INPUT_ROLES.has(item.role)
@@ -347,7 +415,13 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
     if (originalText !== item.text) continue;
     const facts = interpretation.facts(node), previous = corrections.get(item.anchor) ?? item;
     if (facts.text === previous.text) continue;
+    const anonymousContributors = [], usedAnonymous = new Set();
     if (ax.children?.length && originalParts.some(part => {
+      if (!part.identifier) {
+        const correlation = anonymousPart(part, ax, node, usedAnonymous);
+        if (!correlation) return true;
+        anonymousContributors.push(correlation); return false;
+      }
       const matches = nodes.filter(other => other.identifier === part.identifier);
       if (!part.identifier || axNodes.filter(other => other.identifier === part.identifier).length !== 1 || matches.length !== 1
         || !sameFrame(part.frame, matches[0].frameInScreen) || matches[0].inputRedacted) return true;
@@ -363,6 +437,7 @@ export function supplementUIKitFacts(response, rawAX, capture, { anchors, screen
         ...(previous.provenance && { previousProvenance: previous.provenance }), source: 'currentUIKitViewTree', fields: ['text'],
         occlusion: 'notComputed', textScope: facts.textScope, textCorrection: 'publicCorrelatedUIKitText',
         class: node.class, nativeNodePath: interpretation.paths.get(node), textNodePaths: facts.textNodePaths,
+        ...(anonymousContributors.length && { anonymousContributors }),
         originalAX: { text: item.text, label: ax.label ?? '', nativeNodePath: axPaths.get(ax) }
       } });
       continue;

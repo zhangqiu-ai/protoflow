@@ -52,8 +52,26 @@ test('preserved real QA Home reinterprets only verified control contributions wi
     const { text: originalText, provenance: previousProvenance, ...originalFacts } = original;
     assert.deepEqual(facts, originalFacts);
     if (provenance?.textCorrection) {
-      assert.ok(provenance.textParts.every(part => part && Array.isArray(part.nativeNodePath)));
-      assert.equal(provenance.source, original.role === 'button' ? 'currentUIKitViewTree' : 'derivedAXWithCurrentUIKitControlText');
+      if (item.anchor === 'ai.home') {
+        assert.equal(provenance.textCorrection, 'publicOwnedWindowScreenText');
+        assert.equal(provenance.source, 'currentUIKitViewTree');
+        assert.equal(provenance.textScope, 'ownedWindow');
+        assert.deepEqual(provenance.fields, ['text']);
+        assert.deepEqual(provenance.scopeNativeNodePath, [0]);
+        const publicAt = at => at.slice(1).reduce((node, index) => node.children[index], saved.capture.windows[0].tree);
+        assert.equal(publicAt(provenance.nativeNodePath).identifier, 'ai.home');
+        assert.ok(provenance.textNodePaths.length > 0);
+        assert.ok(provenance.textNodePaths.every(at => {
+          const node = publicAt(at);
+          return ['UILabel.text', 'UIButton.currentTitle', 'RCTParagraphComponentView.attributedText'].includes(node.textSource)
+            && node.text && !node.inputRedacted && !node.observedSemantics?.inputKind;
+        }));
+        assert.equal(provenance.originalAX.text, original.text);
+        assert.equal(provenance.previousProvenance.source, 'derivedAXWithCurrentUIKitControlText');
+      } else {
+        assert.ok(provenance.textParts.every(part => part && Array.isArray(part.nativeNodePath)));
+        assert.equal(provenance.source, original.role === 'button' ? 'currentUIKitViewTree' : 'derivedAXWithCurrentUIKitControlText');
+      }
     }
     else assert.deepEqual(item, original);
   }

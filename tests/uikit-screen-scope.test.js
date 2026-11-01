@@ -105,7 +105,6 @@ export const rejectedScreenScopes = [
   ['hidden AX anchor', ({ screenAX }) => { screenAX.visible = false; }],
   ['unknown UIKit semantics', ({ screenUIKit }) => { delete screenUIKit.observedSemantics; }],
   ['content exceeds owned window', fixture => { fixture.windowFrame = fixture.rect(0, 0, 1000, 834); }],
-  ['non-subregion full screen', ({ screenAX, screenUIKit, rect }) => { const frame = rect(0, 32, 1210, 782); screenAX.frame = frame; screenUIKit.frameInScreen = frame; screenUIKit.frameInWindow = frame; screenUIKit.clipIntersection = frame; }],
   ['screen outside content', ({ screenAX, screenUIKit }) => { screenAX.frame.x = -1; screenUIKit.frameInScreen.x = -1; screenUIKit.frameInWindow.x = -1; }],
   ['blocked existing correction group', ({ container }) => { container.identifier = ''; }],
 ];
@@ -119,5 +118,12 @@ for (const [name, change] of rejectedScreenScopes) test(`${name} cannot activate
 for (const [name, change] of rejectedScreenScopes.filter(([name]) => name !== 'blocked existing correction group')) test(`${name} fails closed independently of a control text rewrite`, () => {
   const fixture = screenScopeFixture(value => { value.axControl.label = ''; change(value); });
   assert.notEqual(screen(fixture).provenance?.textCorrection, 'publicOwnedWindowScreenText');
+  assertImmutable(fixture);
+});
+
+test('a full-content screen uses the same guarded owned-window scope as a main pane', () => {
+  const fixture = screenScopeFixture(({ screenAX, screenUIKit, rect }) => { const frame=rect(0,32,1210,782); screenAX.frame=frame;screenUIKit.frameInScreen=frame;screenUIKit.frameInWindow=frame;screenUIKit.clipIntersection=frame; });
+  assert.equal(screen(fixture).text,'Profile Search Settings Visible heading');
+  assert.equal(screen(fixture).provenance.textCorrection,'publicOwnedWindowScreenText');
   assertImmutable(fixture);
 });

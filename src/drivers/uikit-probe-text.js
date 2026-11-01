@@ -6,6 +6,19 @@ const overlap = (a, b) => ({ x: Math.max(a.x, b.x), y: Math.max(a.y, b.y), width
 const positive = frame => frame.width > 0 && frame.height > 0;
 const contains = (a, b) => b.x >= a.x - 1e-6 && b.y >= a.y - 1e-6 && b.x + b.width <= a.x + a.width + 1e-6 && b.y + b.height <= a.y + a.height + 1e-6;
 const sameRect = (a, b) => contains(a, b) && contains(b, a);
+// A complete nested viewport may differ only by numeric representation, not a physical pixel edge.
+// This local exception never changes general containment, local leaf clipping, or text ownership.
+const representedSameViewport = (capture, chain, a, b) => {
+  const scale = capture.windows?.length === 1 && capture.windows[0].screenScale;
+  if (capture.source !== 'currentUIKitViewTree' || capture.occlusion !== 'notComputed'
+    || !finite(scale) || scale <= 0 || chain.some(node => node.inputRedacted || node.observedSemantics?.inputKind)) return false;
+  const edges = frame => [frame.x, frame.y, frame.x + frame.width, frame.y + frame.height];
+  const left = edges(a), right = edges(b);
+  return positive(a) && positive(b) && left.every((edge, index) => finite(edge) && finite(right[index])
+    && Math.abs(edge - right[index]) <= 1e-4
+    && Number.isSafeInteger(Math.round(edge * scale)) && Number.isSafeInteger(Math.round(right[index] * scale))
+    && Math.round(edge * scale) === Math.round(right[index] * scale));
+};
 const assert = (condition, reason) => { if (!condition) throw new Error(`UIKit interpretation: ${reason}`); };
 function scrollGeometry(node) {
   const value = node.scrollGeometry;
@@ -61,7 +74,8 @@ export function interpretUIKitCapture(capture, semanticFacts) {
         if (next) {
           // Partial intermediate clipping needs composed scroll/clip reasoning that is not observed here.
           // Support only a complete next viewport; a positive overlap alone would admit permanently hidden text.
-          if (clips.some(parent => !contains(parent.frameInScreen, next.frameInScreen))) { reason = 'partialNestedViewportClipUnsupported'; break; }
+          if (clips.some(parent => !contains(parent.frameInScreen, next.frameInScreen)
+            && !representedSameViewport(capture, chain, parent.frameInScreen, next.frameInScreen))) { reason = 'partialNestedViewportClipUnsupported'; break; }
         } else {
           let localClip = node.frameInScreen;
           for (const parent of clips) localClip = overlap(localClip, parent.frameInScreen);

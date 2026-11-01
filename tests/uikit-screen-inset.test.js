@@ -11,6 +11,8 @@ const immutable = f => {
   for (const item of f.response.elements) assert.deepEqual(stripTextEvidence(f.result.elements.find(x => x.anchor === item.anchor)), stripTextEvidence(item));
 };
 for (const [name, frame] of [
+  ['whole content', { x: 0, y: 32, width: 1210, height: 782 }],
+  ['whole owned window', { x: 0, y: 0, width: 1210, height: 834 }],
   ['bottom owned-window safe-area extension', bottom],
   ['top owned-window safe-area extension', { x: 300, y: 0, width: 910, height: 814 }],
   ['both owned-window safe-area extensions', { x: 300, y: 0, width: 910, height: 834 }],
@@ -23,8 +25,6 @@ for (const [name, frame] of [
 });
 for (const [name, frame, change] of [
   ['zero intersection', { x: 300, y: 815, width: 910, height: 19 }, () => {}],
-  ['whole content', { x: 0, y: 32, width: 1210, height: 782 }, () => {}],
-  ['whole owned window', { x: 0, y: 0, width: 1210, height: 834 }, () => {}],
   ['extends outside owned window', { x: 300, y: 32, width: 910, height: 803 }, () => {}],
   ['AX/UIKit mismatch', bottom, f => { f.screenAX.frame = { ...f.screenAX.frame, width: 909 }; }],
   ['duplicate current screen', bottom, f => { f.tree.children.push(structuredClone(f.screenUIKit)); }],

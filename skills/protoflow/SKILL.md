@@ -56,6 +56,6 @@ BLOCKED／STOPPED／中斷 RUNNING 時先閱讀 execution／verification 的實�
 
 執行時以 CLI 回傳的 session ID 與證據路徑為準；先使用 `protoflow --help` 確認命令。不得自動 commit、push、部署或覆寫既有 Baseline；報告通過、失敗、未執行與仍需人類確認的事項。
 
-`scroll-to` 的一般語意是可見；需要內容終點時，先核對目標驅動器明確支援 `value:"end"` 及唯讀終點證明。參見共享引擎 `docs/scroll-end-contract.md`；不要用硬位移、背景 anchor 刪除或比較門檻變更處理不同平台的自動捲動。
+`scroll-to` 的一般語意是可見；需要內容起點或終點時，先核對目標驅動器明確支援 `value:"start"`／`value:"end"` 及唯讀 endpoint 證明。參見共享引擎 `docs/scroll-end-contract.md`；不要用硬位移、背景 anchor 刪除或比較門檻變更處理不同平台的自動捲動。
 
-既有 UIKit probe opt-in 的文字所有權／階層與完整觀測多層 scroll 資格，見 `docs/uikit-reviewed-integration-2026-11-01.md`。只允許真實觀測與原 text parts，不補 expected text、input values 或未知 metadata；一般 AX 預設不變。多層文字資格不授予巢狀 `scroll-to value:end`。整合的 Node／DOM／Swift mock 成果不能當作真 Native 或 required-tier 驗收。
+既有 UIKit probe opt-in 的文字所有權／階層與完整觀測多層 scroll 資格，見 `docs/uikit-reviewed-integration-2026-11-01.md`。只允許真實觀測與原 text parts，不補 expected text、input values 或未知 metadata；一般 AX 預設不變。多層文字資格不授予巢狀 `scroll-to value:start/end`。整合的 Node／DOM／Swift mock 成果不能當作真 Native 或 required-tier 驗收。
