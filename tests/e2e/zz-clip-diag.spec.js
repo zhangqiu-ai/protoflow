@@ -18,24 +18,32 @@ const diff = (a, b) => {
 };
 const shot = page => page.screenshot({ animations: 'disabled' });
 
+const setup = async (page, { sheet, observer }) => {
+  await page.setContent(markup);
+  await page.evaluate(({ sheet, observer }) => {
+    if (sheet) { const s = new CSSStyleSheet(); s.replaceSync('p{color:rgb(12,34,56)}'); document.adoptedStyleSheets = [s]; }
+    if (observer) { window.o = new MutationObserver(() => {}); window.o.observe(document.querySelector('main'), { subtree: true, attributes: true, childList: true, characterData: true }); }
+  }, { sheet, observer });
+};
+const options = { attribute: 'data-pf', anchors: ['screen', 'bar', 'action', 'label'] };
+
 test('diag', async ({ page }) => {
   const report = {};
-  await page.setContent(markup);
-  const a = await shot(page); const a2 = await shot(page);
-  const result = await captureOnPage(page, { attribute: 'data-pf', anchors: ['screen', 'bar', 'action', 'label'] });
-  const c = await shot(page);
-  Object.assign(report, { a_a2: diff(a, a2), a_capture: diff(a, result.screenshot), capture_after: diff(result.screenshot, c), a_after: diff(a, c) });
-  await page.setContent(markup);
-  const f0 = await shot(page);
-  await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
-  report.freezeOnly = diff(f0, await shot(page));
-  await page.setContent(markup);
-  const m0 = await shot(page);
-  await page.evaluate(() => { const s = new CSSStyleSheet(); s.replaceSync('[data-pf=label],[data-pf=label] *{visibility:hidden!important}'); const saved = [...document.adoptedStyleSheets]; document.adoptedStyleSheets = [...saved, s]; void document.body.innerText; document.adoptedStyleSheets = saved; });
-  report.maskOnly = diff(m0, await shot(page));
-  await page.setContent(markup);
-  const r0 = await shot(page);
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  report.rafOnly = diff(r0, await shot(page));
-  throw new Error(`CLIPDIAG ${process.platform} ${JSON.stringify(report)}`);
+  for (const [name, sheet, observer, aria] of [['full', true, true, true], ['noSheet', false, true, true], ['noObserver', true, false, true], ['noAria', true, true, false], ['sheetOnly', true, false, false]]) {
+    await setup(page, { sheet, observer });
+    if (aria) await page.locator('[data-pf="action"]').ariaSnapshot();
+    const a = await shot(page); const a2 = await shot(page);
+    const result = await captureOnPage(page, options);
+    const c = await shot(page);
+    report[name] = { a_a2: diff(a, a2), a_capture: diff(a, result.screenshot), a_after: diff(a, c), capture_after: diff(result.screenshot, c) };
+  }
+  await setup(page, { sheet: true, observer: false });
+  const s0 = await shot(page);
+  await page.evaluate(() => { const saved = [...document.adoptedStyleSheets]; const m = new CSSStyleSheet(); m.replaceSync('[data-pf=label],[data-pf=label] *{visibility:hidden!important}'); document.adoptedStyleSheets = [...saved, m]; void document.body.innerText; document.adoptedStyleSheets = saved; });
+  report.sheetMaskOnly = diff(s0, await shot(page));
+  await setup(page, { sheet: true, observer: false });
+  const t0 = await shot(page);
+  await page.evaluate(() => { document.adoptedStyleSheets = [...document.adoptedStyleSheets]; });
+  report.sheetReassignOnly = diff(t0, await shot(page));
+  throw new Error(`CLIPDIAG2 ${process.platform} ${JSON.stringify(report)}`);
 });
