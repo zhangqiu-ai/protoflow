@@ -274,6 +274,8 @@ async function main() {
       const area = values.frame === 'device' ? { x: 0, y: 0 } : raw.safeArea ?? safeArea;
       response = supplementUIKitFacts(response, raw.tree, verified.capture, { anchors: request.anchors, screen: request.screen,
         content: { x: area.x, y: area.y, width: response.viewport.width, height: response.viewport.height } });
+      // Probe-supplemented text is what UIKit draws: an icon button's accessibility label is not part of it.
+      if (response.status === 'PASS') response = { ...response, textSemantics: 'visible' };
       await writeFile(path.join(probeDir, 'probe-validation.json'), JSON.stringify({ status: 'PASS', currentTreeSha256: verified.hash,
         session: probeSession, actualInstalledBuild: bridge.expectedBuild, timing: raw.probeTiming }, null, 2));
     } catch (error) {

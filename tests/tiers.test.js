@@ -52,6 +52,16 @@ test('T1 structure: multiplicity, visibility, text, role, order and expectations
   assert.deepEqual(compareStructure(screen, state, capture({ 'home.title': null }), capture()).reasons, ['home.title: visible in application but absent from the prototype state']);
 });
 
+test('T1 structure: the prototype\'s drawn text is compared only with a driver that reads drawn text', () => {
+  // An icon button: the prototype's clipped accessibility-only "Go" is innerText (`text`), not drawn (`visibleText`).
+  const prototype = capture({ 'home.go': { text: 'Go', visibleText: '' } });
+  const labels = capture(), drawn = { ...capture({ 'home.go': { text: '' } }), textSemantics: 'visible' };
+  assert.deepEqual(compareStructure(screen, state, prototype, labels).reasons, []);
+  assert.deepEqual(compareStructure(screen, state, prototype, drawn).reasons, []);
+  assert.deepEqual(compareStructure(screen, state, prototype, { ...labels, textSemantics: 'visible' }).reasons, ['home.go: text "" vs "Go"']);
+  assert.deepEqual(compareStructure(screen, state, prototype, { ...drawn, textSemantics: undefined }).reasons, ['home.go: text "Go" vs ""']);
+});
+
 test('T1 structure: sibling order is reading order, so a taller touch target beside a title stays to its right', () => {
   const row = { anchors: [{ id: 'bar', role: 'screen', parent: null }, { id: 'bar.title', role: 'element', parent: 'bar' }, { id: 'bar.action', role: 'action', parent: 'bar' }] };
   const capture = (title, action) => ({ elements: {

@@ -4,15 +4,19 @@ import { captureOnPage, captureWeb } from '../../src/drivers/web.js';
 
 const options = { attribute: 'data-pf', anchors: ['screen', 'bar', 'action', 'label'] };
 const compact = value => value.replace(/\s+/g, ' ').trim();
+// `text` keeps innerText (what an accessibility tree reads); `visibleText` leaves clipped accessibility-only text out.
+const shown = item => item.visibleText ?? item.text;
 const pageMarkup = (clip = 'rect(0px, 0px, 0px, 0px)', position = 'absolute', extra = '') => `<body style="background:white"><main data-pf="screen"><header data-pf="bar"><button data-pf="action"><svg width="20" height="20"></svg><span data-pf="label" style="position:${position};width:1px;height:1px;overflow:hidden;clip:${clip}">New chat${extra}</span></button><span>New chat</span></header><p>Visible body</p></main></body>`;
 
 test('empty computed clip excludes only its real text source and retains the accessible name', async ({ page }) => {
   await page.setContent(pageMarkup());
   const { elements } = await captureOnPage(page, options);
-  expect(elements.action.text).toBe('');
-  expect(elements.label.text).toBe('');
-  expect(compact(elements.bar.text)).toBe('New chat');
-  expect(compact(elements.screen.text)).toBe('New chat Visible body');
+  expect(shown(elements.action)).toBe('');
+  expect(shown(elements.label)).toBe('');
+  expect(compact(shown(elements.bar))).toBe('New chat');
+  expect(compact(shown(elements.screen))).toBe('New chat Visible body');
+  expect(elements.action.text).toBe('New chat');
+  expect(compact(elements.screen.text)).toBe('New chat New chat Visible body');
   await expect(page.getByRole('button', { name: 'New chat', exact: true })).toHaveCount(1);
 });
 
@@ -32,7 +36,7 @@ test('CSSOM mask restores application DOM, inline priority, sheets, layout, pixe
     restored: document.adoptedStyleSheets.length === window.originalClipSheets.length && document.adoptedStyleSheets.every((sheet, i) => sheet === window.originalClipSheets[i]), mutations: window.clipMutationCount + window.clipObserver.takeRecords().length }));
   expect(after).toEqual({ html: before.html, bounds: before.bounds, restored: true, mutations: 0 });
   expect(result.screenshot.equals(pixels)).toBe(true);
-  expect(result.elements.action.text).toBe('');
+  expect(shown(result.elements.action)).toBe('');
   const { x, y, width, height } = before.bounds[2];
   expect(result.elements.action.bounds).toEqual({ x, y, width, height });
   expect(await page.locator('[data-pf="action"]').ariaSnapshot()).toBe(accessibleBefore);
@@ -47,15 +51,16 @@ for (const [name, clip, position] of [
   await page.setContent(pageMarkup(clip, position));
   const original = await page.locator('[data-pf="action"]').innerText();
   const { elements } = await captureOnPage(page, options);
-  expect(elements.action.text).toBe(original);
+  expect(shown(elements.action)).toBe(original);
+  expect(elements.action.visibleText).toBeUndefined();
 });
 
 test('visibility important that prevents a complete mask keeps the whole original text group', async ({ page }) => {
   await page.setContent(pageMarkup('rect(0px,0px,0px,0px)', 'absolute', '<b style="visibility:visible!important">Override</b>') + '<span data-pf="second" style="position:fixed;clip:rect(0px,0px,0px,0px)">Second name</span>');
   const original = await page.locator('[data-pf="screen"]').innerText();
   const { elements } = await captureOnPage(page, { ...options, anchors: [...options.anchors, 'second'] });
-  expect(elements.screen.text).toBe(original);
-  expect(elements.second.text).toBe('Second name');
+  expect(shown(elements.screen)).toBe(original);
+  expect(shown(elements.second)).toBe('Second name');
 });
 
 test('fixed descendant really stays unpainted under empty clip, then is omitted from text', async ({ page }) => {
@@ -64,8 +69,8 @@ test('fixed descendant really stays unpainted under empty clip, then is omitted 
   const at = (150 * before.width + 270) * 4;
   expect([...before.data.subarray(at, at + 4)]).toEqual([255, 255, 255, 255]);
   const { elements } = await captureOnPage(page, { ...options, anchors: ['screen', 'label'] });
-  expect(elements.label.text).toBe('');
-  expect(compact(elements.screen.text)).toBe('Visible body');
+  expect(shown(elements.label)).toBe('');
+  expect(compact(shown(elements.screen))).toBe('Visible body');
   await page.locator('div').evaluate(node => node.style.clip = 'auto');
   const visible = PNG.sync.read(await page.screenshot());
   expect([...visible.data.subarray(at, at + 4)]).toEqual([0, 255, 0, 255]);
@@ -96,10 +101,10 @@ test('input values, placeholders, dynamic text and dynamic anchors preserve thei
     return screenshot(settings);
   };
   const { elements } = await captureOnPage(page, { ...options, anchors: ['screen', 'action', 'input', 'textarea', 'empty', 'checkbox', 'dynamic'], dynamicAnchors: ['dynamic'] });
-  expect(elements.input.text).toBe('Edited actual value'); expect(elements.textarea.text).toBe('Edited actual note');
-  expect(elements.empty.text).toBe('Helpful hint'); expect(elements.checkbox.text).toBe('');
-  expect(elements.dynamic.text).toBe('Fixture title'); expect(elements.action.text).toBe('');
-  expect(elements.screen.text).not.toContain('New chat'); expect(elements.screen.text).not.toContain('Fixture title'); expect(elements.screen.text).not.toContain('7');
+  expect(shown(elements.input)).toBe('Edited actual value'); expect(shown(elements.textarea)).toBe('Edited actual note');
+  expect(shown(elements.empty)).toBe('Helpful hint'); expect(shown(elements.checkbox)).toBe('');
+  expect(shown(elements.dynamic)).toBe('Fixture title'); expect(shown(elements.action)).toBe('');
+  expect(shown(elements.screen)).not.toContain('New chat'); expect(shown(elements.screen)).not.toContain('Fixture title'); expect(shown(elements.screen)).not.toContain('7');
   expect(collectorBoundary.html).toBe(before);
   expect(collectorBoundary.inputMutations).toBe(0); expect(collectorBoundary.otherMutations).toBe(0);
   expect(collectorBoundary.dynamicMutations).toBeGreaterThan(0); // Existing dynamic exclusion temporarily changes display.
@@ -111,12 +116,12 @@ test('input values, placeholders, dynamic text and dynamic anchors preserve thei
 test('style-attribute selectors cannot hide a genuinely visible neighbouring text node', async ({ page }) => {
   await page.setContent('<style>.clipping{position:absolute;clip:rect(0px,0px,0px,0px)}.clipping[style]+span{display:none}</style><main data-pf="screen"><span class="clipping">Clipped name</span><span>Visible peer</span></main>');
   const { elements } = await captureOnPage(page, { ...options, anchors: ['screen'] });
-  expect(elements.screen.text).toBe('Visible peer');
+  expect(shown(elements.screen)).toBe('Visible peer');
   expect(await page.locator('.clipping').getAttribute('style')).toBeNull();
 });
 
 test('default captureWeb applies the same collector without a prototype flag', async ({ browser }) => {
   const result = await captureWeb(browser, { ...options, url: 'data:text/html,' + encodeURIComponent(pageMarkup()), viewport: { width: 400, height: 250, scale: 1 } });
-  expect(result.elements.action.text).toBe('');
-  expect(compact(result.elements.screen.text)).toBe('New chat Visible body');
+  expect(shown(result.elements.action)).toBe('');
+  expect(compact(shown(result.elements.screen))).toBe('New chat Visible body');
 });

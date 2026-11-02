@@ -99,6 +99,12 @@ export function normalizeNode(node, density) {
   // A composed button takes its label from its text; a field without a platform hint shows its placeholder as child
   // text (Compose decorationBox, Flutter). Both absorb those children, so containers do not count the text twice.
   const absorbed = field || (type === 'button' && !node.text && !node.contentDescription && node.children?.length);
+  const frame = toFrame(node.bounds, density);
+  // A CheckBox, RadioButton or Switch draws its own text beside the box. A control's label is only its accessible
+  // name, so the drawn text is a text child its containers read; the control itself, like a web checkbox, has none.
+  const drawn = ['checkBox', 'radioButton', 'switch'].includes(type) && node.text
+    ? [{ type: 'staticText', label: node.text, enabled: node.enabled !== false, visible: node.visible !== false, frame, drawnByControl: true }] : [];
+  const children = [...drawn, ...(!absorbed ? (node.children ?? []).map(child => normalizeNode(child, density)) : [])];
   return {
     type,
     identifier: anchorFromResource(node.resourceId),
@@ -106,8 +112,8 @@ export function normalizeNode(node, density) {
     ...(field && { value, placeholder: node.hint || (!value ? texts(node.children ?? []).join(' ') : '') }),
     enabled: node.enabled !== false,
     visible: node.visible !== false,
-    frame: toFrame(node.bounds, density),
-    ...(!absorbed && node.children?.length && { children: node.children.map(child => normalizeNode(child, density)) })
+    frame,
+    ...(children.length && { children })
   };
 }
 

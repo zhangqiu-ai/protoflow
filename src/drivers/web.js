@@ -51,8 +51,10 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   // equal to one (a sidebar heading "Settings" beside a title bar reading "Settings") stays. The comparison then
   // takes the text as it is instead of removing dynamic text by value.
   const marked = all.filter(node => dynamicAnchors.includes(node.getAttribute(attribute)));
-  // innerText includes CSS-clipped accessibility-only text. Recognise only a proven empty legacy
-  // clip rectangle; positive/auto/unsupported regions keep their original browser behaviour.
+  // innerText includes CSS-clipped accessibility-only text (an icon button's "Back"), as a native accessibility tree
+  // includes the button's label. A driver that reads only drawn text compares with `visibleText`, the text without it.
+  // Recognise only a proven empty legacy clip rectangle; positive/auto/unsupported regions keep their original
+  // browser behaviour.
   const emptyClip = node => {
     const style = getComputedStyle(node);
     if (!['absolute', 'fixed'].includes(style.position)) return false;
@@ -93,11 +95,11 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
     } finally { document.adoptedStyleSheets = saved; }
     return node.innerText;
   };
-  const readText = node => {
+  const readText = (node, read) => {
     const hidden = [...loose, ...marked.filter(item => item !== node && !item.contains(node))];
     const saved = hidden.map(item => item.getAttribute('style'));
     for (const item of hidden) item.style.setProperty('display', 'none');
-    try { return renderedText(node); } finally {
+    try { return read(node); } finally {
       hidden.forEach((item, index) => {
         if (saved[index] !== null) item.setAttribute('style', saved[index]);
         else {
@@ -127,10 +129,14 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node) : renderedText(node)),
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node, item => item.innerText) : node.innerText),
       ...(dynamicAnchors.length && { dynamicExcluded: true }),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && masked.some(item => node === item || node.contains(item))) {
+      const shown = loose.length || marked.length ? readText(node, renderedText) : renderedText(node);
+      if (shown !== facts[id].text) facts[id].visibleText = shown;
+    }
   }
   return facts;
 }

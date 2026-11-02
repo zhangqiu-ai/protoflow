@@ -43,6 +43,10 @@ const NATIVE_TEXT_INPUTS = new Set(['email', 'tel', 'url', 'number']);
 // Existing native input kinds plus DOM input roles; readonly/disabled inputs still contain private text.
 const INPUT_ROLES = new Set(['textField', 'secureTextField', 'searchField', 'textView', 'switch', 'toggle', 'checkBox', 'radioButton', 'slider', 'stepper', 'picker', 'pickerWheel', 'datePicker', 'segmentedControl', 'input', 'textbox', 'searchbox', 'combobox', 'spinbutton', 'checkbox', 'radio', 'listbox']);
 export function compareStructure(screen, state, prototype, application, { native = false } = {}) {
+  // A driver that reads only drawn text (`textSemantics: 'visible'`, no accessibility-only labels) compares with the
+  // prototype's drawn text: an icon button's clipped accessibility-only label is then left out on both sides.
+  if (application.textSemantics === 'visible') prototype = { ...prototype, elements: Object.fromEntries(Object.entries(prototype.elements ?? {})
+    .map(([id, facts]) => [id, facts.visibleText === undefined ? facts : { ...facts, text: facts.visibleText }])) };
   const reasons = [];
   let checked = 0;
   const allAnchors = uniqueAnchors(screen);

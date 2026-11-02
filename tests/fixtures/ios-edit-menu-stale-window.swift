@@ -53,6 +53,8 @@ class XCUIApplication {
  }
 }
 class Subject {
+    // A probe capture: clearField goes straight to the public replacement path.
+    var publicReplacementOnly = true
     // ACTUAL_SDK_PUBLIC_INPUT_HELPERS
     func exercise(_ field: XCUIElement, app: XCUIApplication) -> String? { clearPublicly(field, app: app) }
 

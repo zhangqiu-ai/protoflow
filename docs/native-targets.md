@@ -208,11 +208,13 @@ Compose 與 Flutter 注意事項：
 |---|---|---|
 | `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density。捲動區外的節點被裁切時，以 `boundsInParent` 的尺寸還原（見下） |
 | `visible` | frame 與內容區域相交且尺寸大於 0，或是捲動區已捲出畫面的內容 | `isVisibleToUser` 且與內容區域相交，或是捲動區已捲出畫面的內容 |
-| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項只取可見 `staticText` 後代，葉節點沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
+| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項只取可見 `staticText` 後代，葉節點沒有文字；分段控制（`segmentedControl`）取各分段按鈕的標題 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字；`CheckBox`、`RadioButton`、`Switch` 自己畫出的 text 算父容器的文字，控制項本身與 Web checkbox 一樣沒有文字，`contentDescription` 只是無障礙名稱 |
 | `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型；可勾選的 `Button`（`ToggleButton`、帶 checked 狀態的 React Native 按鈕）視為按鈕，文字取其標籤 |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
 
 **複合控制項的可見文字**：帶文字的自訂開關須在原生快照保留實際可見的 `staticText` 後代（例如帶 `testID` 的 React Native `Text`）。控制項自己的 `text` 與父容器文字均不納入控制項無障礙 label 或 value，也不因寬度或附近文字推測主標籤；標示不可見的節點及其後代、輸入框的文字均不納入。原型的動態文字須有對應錨點，既有 T1 會依合約從控制項及父容器文字排除它；只有動態摘要而沒有主標籤後代時，不能宣稱已擷取主標籤。例如葉節點開關的無障礙名稱是 `Session reminder`，旁置可見標題是 `Before shared sessions`，父容器只保留可見標題與副標題；階層快照與 React Native 攤平快照採相同規則，旁置文字不受影響。這與 Web checkbox 的 `aria-label` 不進入自身或父容器 `innerText` 的行為一致。快照缺少 modal 背景節點時，也不能用前一張快照補造當前節點。
+
+**只在無障礙樹裡的文字**：原型常把圖示按鈕的名稱寫成裁切為零面積的文字（`position:absolute; clip:rect(0 0 0 0)`，即 `.sr-only`），`innerText` 會讀到它（例如「Back」），XCUITest 的按鈕 label 也是它，所以預設兩邊一致。原型擷取另外回報 `visibleText`：只在零面積裁切的文字讓結果不同時才有，是不含這段文字的版本。驅動器回應帶 `textSemantics: "visible"`（只讀畫出來的文字，圖示按鈕沒有文字）時，T1 改用原型的 `visibleText` 比對；目前只有啟用 `--uikit-probe-context` 且觀測通過的 iOS 擷取會這樣標示。未標示（`accessibility`，預設）的原生驅動器與 Web／Electron 目標照舊比對 `text`。
 
 **純視覺圖形的無障礙摘要**：`data-pf-visual-only`／`visualOnly` 圖形在 T1 不比對自己的文字。原生快照仍保留圖形的無障礙 label，但 T1 比對父容器時，使用該子錨點實際擷取的文字排除摘要，每個圖形最多扣除一次；同文的靜態葉錨點仍保留並比對。未擷取到圖形文字時不推測摘要，父容器的差異仍會報錯。Web 的 `aria-label` 原本不進入 `innerText`，此規則不改寫 DOM 文字。這是 T1 文字處理，沒有把圖形設為動態、沒有遮罩圖形像素，也沒有變更 T2／T3／T4 或門檻；柱圖的實際像素仍參與 T4 比對。靜態文字應有自己的錨點，才能在摘要同文時提供保留依據。
 
@@ -247,11 +249,11 @@ Compose 與 Flutter 注意事項：
 
 圖層規則以 siyue 與其他專案共 2,073 次歷史擷取回放驗證（23,258 個錨點文字；其中 435 個 Android 場景另經 Android 正規化重放，7,640 個錨點）：唯一的變化是 iPad `nav.sidebar` 補回「1/4」，其餘錨點文字完全不變。上層單元不算壓平元素文字的規則，以及上述捲動區與重複文字的規則，另以 siyue 3,080 次擷取回放並與原型文字比對：相對 0.3.74 共 712 個錨點（50 種）改為與原型一致，沒有原本一致的錨點變得不一致。
 
-開關等控制項常以旁邊的可見標題作為無障礙名稱。這類控制項的 label 若與容器內其他文字相同，不論是否相鄰都略過；網頁的 checkbox 也沒有文字。
+開關等控制項常以旁邊的可見標題作為無障礙名稱。控制項的 label 不算文字，只取它畫出的文字（見上方「複合控制項的可見文字」）；網頁的 checkbox 也沒有文字。
 
-這兩條規則以 siyue 的 1,419 次歷史擷取（iPhone、iPad、Android）（16,765 個錨點文字）回放驗證：與原型一致的錨點從 14,830 個增為 14,896 個，原本一致的沒有任何一個變成不一致。
+上方攤平容器的規則，連同當時「與容器內其他文字相同的控制項 label 才略過」的舊規則，以 siyue 的 1,419 次歷史擷取（iPhone、iPad、Android）（16,765 個錨點文字）回放驗證：與原型一致的錨點從 14,830 個增為 14,896 個，原本一致的沒有任何一個變成不一致。
 
-步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
+步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（iOS 先以刪除鍵清空；游標落在中間而留下文字時，改用公開編輯選單的「Select All」整段刪除。啟用 `--uikit-probe-context` 的擷取一律用「Select All」，找不到選單項目即 FAIL。密碼欄位只用刪除鍵；輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
 
 原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）、`screen.png`（比較用的裁切圖），失敗時另有 `failure.png`。
 
@@ -421,6 +423,8 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 ## Capture-only UIKit 補充觀測試驗
 
 隔離候選驅動器提供明確 opt-in 參數 `--uikit-probe-context CTX-…`。此功能需要目標 App 另行授權、只在 capture 組態編入的 `SiyueCaptureProbe`，目前限定已核對公開 `RCTParagraphComponentView.attributedText` 的 RN 0.86.3；並非一般 iOS App 的預設能力。不得自動替專案加入探針或修改 target 設定。已完成指定 iPhone 17 模擬器的單一 RN modal 觀測試驗，見[證據與限制](uikit-probe-verification-2026-10-31.md)；編譯、合成測試與單場景觀測都不代表產品驗收。
+
+**待辦**：探針協定目前寫死 siyue App 的名稱與版本：launch environment `SIYUE_CAPTURE_PROBE_*`、通道 `Library/Caches/SiyueCaptureProbe`、React Native `0.86.3` 檢查與 `main.jsbundle` 雜湊。其他 App 要接入，需先把這些改為可設定。
 
 啟用後，XCTest 先帶入本輪 nonce/context/scene/screen 的 launch environment 啟動 App，再打開指定 deep link；未啟用時維持原本冷啟動流程。原步驟完成後，以兩個 fresh sample 夾住原始 AX snapshot 與完整裝置截圖，第二次觀測完成才終止 App。Node bridge 逐次解析指定 simulator/bundle 的當前容器，只使用 App 自有 `Library/Caches/SiyueCaptureProbe` 固定通道；預期身分來自已安裝 `.app` 的 Info.plist、可執行檔及 main.jsbundle 真實位元組，不來自原型預期文字。
 

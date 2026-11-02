@@ -103,7 +103,7 @@ protoflow install --project /path/to/app
 - **短效 deep link 的啟動準備（選用）**：iOS driver 可用 `--launch-preparation-dir` 與 `--launch-preparation-token`，在裝置／runner 準備與 warm launch 後、實際 `openURL` 前向主機取得新 URL。通道需要私有檔案權限及每次開啟的新 request ID；錯誤不會退回舊 URL。主機的發碼憑證不進入 SDK 或 App，預設擷取路徑不變。見[檔案協定](docs/ios-responsive-capture.md#短效-deep-link-的啟動準備)。
 - **UIKit 靜默觀測預算（選用）**：啟用 `--uikit-probe-context` 時，可顯式設定 `--uikit-settling-budget-ms 6000..10000`；預設仍為 6000ms。至少三份相同完整樣本、App／host 雙側 1500ms 靜默、最多八份樣本及正式 fresh 配對要求不變，詳見[有界預算](docs/uikit-settling-budget-verification-2026-11-01.md)。公開文字編輯選單在既有 Forward 點擊後重新取得一次 snapshot，失敗即停止；見[回歸與原生診斷](docs/evidence/ios-edit-menu-refresh-2026-11-01.md)。
 - **原生比對**：文字比對忽略單獨的分隔符號（`·`、`•`、`—` 等），因為 iOS 合併標籤會省略它們；React Native 攤平後，包住其他文字的具名容器（例如名為「Main navigation」的分頁列）的標籤視為無障礙名稱，不算可見文字。T2 取樣只在兩邊的主色各占元素至少一半時才比對；漸層、開關的軌道與圓鈕沒有穩定主色，不取樣。
-- **原生控制項文字**：葉節點開關的文字仍為空，無障礙名稱也不計入父容器文字；複合控制項只擷取可見 `staticText` 後代，不以自身無障礙名稱猜測文字。UIKit 補充觀測的 flattened leaf 只向真實 parent subtree 取文字，見[範圍驗證](docs/uikit-flat-parent-scope-verification-2026-11-01.md)。動態摘要沿用錨點合約排除，詳見[原生文字契約](docs/native-targets.md#驅動器如何回報元素)。
+- **原生控制項文字**：葉節點開關的文字仍為空，無障礙名稱也不計入父容器文字；複合控制項只擷取可見 `staticText` 後代，不以自身無障礙名稱猜測文字；iOS 分段控制取各分段標題，Android `CheckBox`／`RadioButton`／`Switch` 畫出的 text 算父容器文字。原型裡裁切成零面積的無障礙文字（`.sr-only`）預設照舊計入，只有回應帶 `textSemantics: "visible"` 的驅動器（目前是啟用 UIKit 補充觀測的 iOS 擷取）改比原型的 `visibleText`，見[只在無障礙樹裡的文字](docs/native-targets.md#驅動器如何回報元素)。UIKit 補充觀測的 flattened leaf 只向真實 parent subtree 取文字，見[範圍驗證](docs/uikit-flat-parent-scope-verification-2026-11-01.md)。動態摘要沿用錨點合約排除，詳見[原生文字契約](docs/native-targets.md#驅動器如何回報元素)。
 - **純視覺錨點**：原生圖形的 `visualOnly` 無障礙摘要不計入 T1 父容器文字；只扣除該子錨點已擷取的文字，保留同文靜態葉錨點。圖形像素仍參與 T4，不能以 `dynamic` 代替。
 - **變體與差異**：同一份程式碼跑在多個平台（React Native、Expo、Flutter）時，用 `variants` 列出 `ios`、`android` 等變體，每個必要變體都 PASS 才接受，交付只做一次。`deviations` 逐錨點宣告已審核的平台慣例差異（`tokens`／`layout`／`visual`）。
 - **維護者豁免**（[提案 0005](docs/proposals/0005-maintainer-waivers.md)）：引擎限制短期修不好時，可以申請只涵蓋「一個場景 × 一個 T1–T3 層級（× 一個變體）× 一個原型版本」的豁免，綁定那次驗收的發現全文；需設定 `policy.waivers.reviewers`，由列在其中的人在儀表板核准。被豁免的層級照常比對並保留 FAIL 與發現，只有版本關卡不看它；發現一變、原型改版或撤回就失效。T4 視覺永遠不能豁免。修復代理可在 `.protoflow/engine-limits/` 標示引擎限制，同樣的發現連續失敗時 runner 自動申請（不會自動核准）；`autoApprove` 專案用到豁免的版本仍要人工核准。
@@ -323,11 +323,11 @@ Playwright 有四個 project：`chromium`、`electron`、`ios`、`android`，可
 | [docs/git-runner.md](docs/git-runner.md) | Git 來源、Runner、多目標、自動交付與恢復 |
 | [docs/independent-review.md](docs/independent-review.md) | 獨立 AI 審查閘門與重用接口 |
 | [docs/native-targets.md](docs/native-targets.md) | iOS、Android、React Native、Expo、Flutter 的需求、配置、deep link 啟動與約定 |
+| [docs/ios-responsive-capture.md](docs/ios-responsive-capture.md) | iOS 響應式擷取（方向、擷取範圍）與短效 deep link 啟動準備（選用） |
+| [docs/scroll-end-contract.md](docs/scroll-end-contract.md) | `scroll-to` 的 `value:"start"`／`value:"end"` 起點／終點契約與原 `scroll-to` 的區別；真實 iOS 驗收待執行 |
 | [docs/integrations.md](docs/integrations.md) | Codex、Claude（規劃、執行、驗收）、GitHub Issues、Spec Kit、BMad adapter 與沙箱權限 |
 | [docs/acceptance-adapters.md](docs/acceptance-adapters.md) | 專案驗收 adapter 協定（v1） |
 | [docs/protocols.md](docs/protocols.md) | 狀態鏈、evidence tree、Manifest、Review、Baseline |
 | [docs/prototype-structure.md](docs/prototype-structure.md) | 原型拆分與元件映射（v1） |
 | [docs/skill-installation.md](docs/skill-installation.md) | Skill 安裝與個人安裝 |
 | [docs/proposals/](docs/proposals/) | 語意錨點（0001）、Android／Flutter／Expo（0002）、Claude 規劃與驗收及 GitHub Issues（0003）、多專案儀表板（0004）、維護者豁免（0005）提案與實作紀錄 |
-
-明確的跨 Web／iOS 垂直捲動起點 `value:"start"`／終點 `value:"end"` opt-in 與原 `scroll-to` 的區別，見 [終點契約](docs/scroll-end-contract.md)；候選真實 iOS 驗收仍待執行。

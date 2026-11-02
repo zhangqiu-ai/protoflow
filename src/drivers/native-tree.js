@@ -108,11 +108,13 @@ export function subtreeText(node, { onTextParts, renderedHierarchy = false } = {
 
 // A composite control may render Text children, unlike a leaf UISwitch. Its own label is an accessible name,
 // never evidence of visible text. Dynamic descendant anchors are excluded later by compareStructure as usual.
+// A segmented control draws each segment's title: its segments report as buttons.
+const shownInControl = (item, control) => Boolean(item.label) && (item.type === 'staticText' || control === 'segmentedControl' && LABELLED.has(item.type));
 function controlTextParts(node) {
   const parts = [];
   const visit = item => {
     if (item.visible === false || TEXT_ENTRY.has(item.type)) return;
-    if (item.type === 'staticText' && item.label) { parts.push(item); return; }
+    if (item !== node && shownInControl(item, node.type)) { parts.push(item); return; }
     for (const child of item.children ?? []) visit(child);
   };
   visit(node);
@@ -194,19 +196,19 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
   const within = (item, scroller) => !scroller || along.has(scroller)
     ? inside(frameOf(item), frame) && [...along].every(clip => scrollers(scroller).has(clip) || inside(frameOf(item), frameOf(clip)))
     : within(scroller, outer.get(scroller)) && (scrolled.has(item) || inside(frameOf(item), frame));
-  const visit = (item, scroller, textOnly = false) => {
+  const visit = (item, scroller, control = null) => {
     order.set(item, order.size);
     if (item === container) owner.set(item, scroller);
     if (item === container || item.visible === false) return;
-    if (textOnly && TEXT_ENTRY.has(item.type)) return;
-    const controlTextOnly = textOnly || CONTROLS.has(item.type);
+    if (control && TEXT_ENTRY.has(item.type)) return;
+    const inControl = control ?? (CONTROLS.has(item.type) ? item.type : null);
     if (within(item, scroller) && !TEXT_ENTRY.has(item.type) && !ancestors.has(item)) {
-      const leaf = controlTextOnly ? item.type === 'staticText' && item.label
+      const leaf = inControl ? control !== null && shownInControl(item, control)
         : (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
     if (SCROLLERS.has(item.type)) outer.set(item, scroller);
-    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller, controlTextOnly); }
+    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller, inControl); }
   };
   visit(tree, null);
   const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
@@ -320,11 +322,12 @@ export function layeredSubtreeText(node, { onTextParts, renderedHierarchy = fals
 
 /**
  * The element's own text: field value/placeholder, only visible Text descendants for controls (leaf checkboxes have
- * none), the label of text and buttons, else its visible text (by hierarchy, or by geometry in a flattened tree).
+ * none, and the text an Android checkbox draws is its container's), the label of text and buttons, else its visible
+ * text (by hierarchy, or by geometry in a flattened tree).
  */
 export function elementText(node, tree = null, scrolled = undefined, { screen = false, onTextParts, renderedHierarchy = false, excludeAncestorLabels = false } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
-  if (CONTROLS.has(node.type)) { const parts = controlTextParts(node); onTextParts?.(parts); return joinText(parts); }
+  if (CONTROLS.has(node.type)) { const parts = controlTextParts(node).filter(part => !part.drawnByControl); onTextParts?.(parts); return joinText(parts); }
   if (LABELLED.has(node.type)) { onTextParts?.(node.label ? [node] : []); return node.label ?? ''; }
   if (node.children?.length) return subtreeText(node, { onTextParts, renderedHierarchy });
   return tree && !node.label ? textWithin(tree, node, scrolled, { screen, onTextParts, renderedHierarchy, excludeAncestorLabels }) : node.label ?? '';

@@ -84,3 +84,13 @@ test('a composite control with only a dynamic summary cannot masquerade as a vis
   assert.equal(result.status, 'FAIL');
   assert.ok(result.reasons.includes('settings.context: text "Use my growth data" vs ""'));
 });
+
+test('a segmented control reads the titles its segments draw, which XCUITest reports as buttons', () => {
+  const segments = ['Day', 'Week', 'Month'].map((label, index) => ({ type: 'button', label, frame: frame(10 + index * 100, 50, 100, 30) }));
+  const control = { type: 'segmentedControl', identifier: 'stats.range', label: 'Range', frame: frame(10, 50, 300, 30), children: segments };
+  const tree = { type: 'other', identifier: 'stats', frame: frame(0, 0, 400, 100), children: [text('Stats', 'stats.title'), control] };
+  assert.equal(elementText(control), 'Day Week Month');
+  assert.equal(subtreeText(tree), 'Stats Day Week Month');
+  // A switch's button descendants are still not its text.
+  assert.equal(elementText({ ...control, type: 'switch' }), '');
+});

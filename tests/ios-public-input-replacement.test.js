@@ -4,11 +4,15 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../drivers/ios/UITests/CaptureTests.swift', import.meta.url), 'utf8');
 const publicClear = source.slice(source.indexOf('private func clearPublicly('), source.indexOf('/// Typing can drop'));
+const clearField = source.slice(source.indexOf('private func clearField('), source.indexOf('private func clearPublicly('));
 const performFill = source.slice(source.indexOf('case "fill", "clear":'), source.indexOf('case "select":'));
 const type = source.slice(source.indexOf('private func type(_ text:'), source.indexOf('private func serialize('));
 
-test('generic nonsecure fill and clear require public whole-value replacement while secure fields retain their old path', () => {
-  assert.match(performFill, /target\.elementType == \.secureTextField[\s\S]*clear\(target\)[\s\S]*else if let reason = clearPublicly\(target, app: app\)/);
+test('nonsecure fill and clear replace the whole value while secure fields retain their old path', () => {
+  assert.match(performFill, /target\.elementType == \.secureTextField[\s\S]*clear\(target\)[\s\S]*else if let reason = clearField\(target, app: app\)/);
+  // Without the probe the original delete-key clear runs first; only text it leaves goes to Select All.
+  assert.match(source, /publicReplacementOnly = job\.captureProbe != nil/);
+  assert.match(clearField, /if !publicReplacementOnly \{\s*clear\(field\)\s*if fieldValue\(field\)\.isEmpty \|\| !\[\.textField, \.textView, \.searchField\]\.contains\(field\.elementType\) \{ return nil \}\s*\}\s*return clearPublicly\(field, app: app\)/);
   assert.match(publicClear, /\[\.textField, \.textView, \.searchField\]/);
   assert.match(publicClear, /if fieldValue\(field\)\.isEmpty \{ return nil \}/);
   assert.match(type, /if field\.elementType == \.secureTextField \{ return nil \}/);
@@ -23,10 +27,10 @@ test('public selection must exist and be hittable; no private setter or coordina
   assert.doesNotMatch(publicClear, /setValue|performSelector|coordinate\(|withOffset|String\(repeating:/);
 });
 
-test('public replacement verifies empty before typing and every retry uses the same complete replacement path', () => {
+test('public replacement verifies empty before typing and every retry uses the same clearing path', () => {
   assert.match(publicClear, /field\.typeText\(XCUIKeyboardKey\.delete\.rawValue\)/);
   assert.match(publicClear, /fieldValue\(field\)\.isEmpty \? nil : "public Select All did not clear the complete input"/);
-  assert.match(type, /for _ in 0\.\.<3[\s\S]*clearPublicly\(field, app: app\)/);
+  assert.match(type, /for _ in 0\.\.<3[\s\S]*clearField\(field, app: app\)/);
   assert.doesNotMatch(type, /clear\(field\)/);
   assert.match(type, /shown == text \? nil :/);
 });

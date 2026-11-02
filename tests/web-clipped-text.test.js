@@ -23,8 +23,11 @@ for (const scenario of [
     await page.setContent(`<main data-pf="root"><button data-pf="action" aria-label="Accessible operation"><span style="position:${scenario.position};clip:${scenario.clip};${scenario.extra ?? ''}">Observed label</span></button></main>`);
     if (scenario.noCSSOM) await page.evaluate(() => { window.CSSStyleSheet = undefined; });
     const { elements } = await captureOnPage(page, { attribute: 'data-pf', anchors: ['root', 'action'] });
-    assert.equal(elements.action.text, scenario.text);
-    assert.equal(elements.root.text, scenario.text);
+    // `text` stays innerText, the accessibility-only text included; `visibleText` leaves it out where it differs.
+    assert.equal(elements.action.text, 'Observed label');
+    assert.equal(elements.root.text, 'Observed label');
+    assert.equal(elements.action.visibleText ?? elements.action.text, scenario.text);
+    assert.equal(elements.root.visibleText ?? elements.root.text, scenario.text);
     assert.equal(elements.action.enabled, true);
     assert.equal(elements.action.interactive, true);
     assert.equal(elements.action.count, 1);

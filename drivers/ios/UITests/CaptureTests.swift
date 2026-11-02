@@ -113,6 +113,7 @@ func preparedLaunchURL(_ channel: NativeLaunchPreparation, original: URL, bundle
  */
 final class CaptureTests: XCTestCase {
     private var scrollEndObservations: [[String: Any]] = []
+    private var publicReplacementOnly = false
     struct Step: Decodable { let action: String; let anchor: String?; let value: String?; let timeoutMs: Int? }
     struct CaptureProbe: Decodable {
         let nonce: String
@@ -217,6 +218,7 @@ final class CaptureTests: XCTestCase {
             result = failure(app, output, "screen anchor \(job.screen) did not appear (does the app honour \(job.launchUrl.map { "the launch URL \($0)" } ?? "-PROTOFLOW_SCREEN")?)")
             return
         }
+        publicReplacementOnly = job.captureProbe != nil
         for (index, step) in job.steps.enumerated() {
             if let reason = perform(app, step, timeout: Double(step.timeoutMs ?? job.timeoutMs ?? 10000) / 1000) {
                 result = failure(app, output, "step \(index + 1) \(step.action) \(step.anchor ?? ""): \(reason)")
@@ -375,7 +377,7 @@ final class CaptureTests: XCTestCase {
             if target.elementType == .secureTextField {
                 // Secure values cannot be read back; preserve the existing secure-field behavior.
                 clear(target)
-            } else if let reason = clearPublicly(target, app: app) { return reason }
+            } else if let reason = clearField(target, app: app) { return reason }
             if step.action == "fill" { return type(step.value ?? "", into: target, app: app) }
         case "select":
             let wheel = target.pickerWheels.firstMatch
@@ -547,6 +549,17 @@ final class CaptureTests: XCTestCase {
         return candidates.count == 1 ? candidates[0] : nil
     }
 
+    /// Without the capture probe the original delete-key clear runs first, and the public Select All path only replaces
+    /// what it leaves (a caret placed mid-value): a wrapper anchor, a localised menu or a hidden edit menu still clear
+    /// as before. A probe capture replaces through Select All only.
+    private func clearField(_ field: XCUIElement, app: XCUIApplication) -> String? {
+        if !publicReplacementOnly {
+            clear(field)
+            if fieldValue(field).isEmpty || ![.textField, .textView, .searchField].contains(field.elementType) { return nil }
+        }
+        return clearPublicly(field, app: app)
+    }
+
     /// A tap can position the caret in the middle. Select All proves the entire nonsecure value is replaced.
     /// Inspect at most four public menu pages; no progress, ambiguity or an unavailable action fails closed.
     private func clearPublicly(_ field: XCUIElement, app: XCUIApplication) -> String? {
@@ -586,7 +599,7 @@ final class CaptureTests: XCTestCase {
         if field.elementType == .secureTextField { return nil }
         for _ in 0..<3 {
             if fieldValue(field) == text { return nil }
-            if let reason = clearPublicly(field, app: app) { return reason }
+            if let reason = clearField(field, app: app) { return reason }
             for character in text {
                 field.typeText(String(character))
                 Thread.sleep(forTimeInterval: 0.05)
