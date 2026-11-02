@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 const exec=promisify(execFile),root=new URL('../../',import.meta.url);
+test.skip(process.platform!=='darwin','Swift helper runtime needs the macOS Swift toolchain');
 test('actual Swift capture fragment runs readiness after preparation and before the untouched measured pair',async({},info)=>{
  const source=await readFile(new URL('drivers/ios/UITests/CaptureTests.swift',root),'utf8');
  const fragment=source.slice(source.indexOf('        Thread.sleep(forTimeInterval: 0.3)'),source.indexOf('        // A state that ends while typing'));

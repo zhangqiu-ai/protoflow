@@ -46,3 +46,5 @@ input/dynamic case 以真 Page screenshot wrapper 在 collector 完成、真正 
 - `tests/e2e/web-clipped-text.spec.js`：`87cf2d18e4693b86aaefc8404b55c07eafc43009f903e9bd044903ea9808aa5b`
 - `tests/web-clipped-text.test.js`：`6ef014f77e4148b2ead63095e1d532a7a19db2dbec932e0f5d601a235a92d2dd`
 - `tests/web-clipped-text-playwright.config.js`：`92307c998a554d575e49bcba54f9c4c3a33d3e7d00c11ce851112c8e2f3fb453`
+
+0.3.77 起，Node guards 移到 `tests/e2e/web-clipped-text-guards.spec.js`，改由 Playwright runner 執行，因為 CI 的單元測試工作不安裝瀏覽器。同時 `text` 改回保留裁切文字，排除後的結果改放在 `visibleText`，見 `docs/native-targets.md`「只在無障礙樹裡的文字」。上面的雜湊是移動前的紀錄。
