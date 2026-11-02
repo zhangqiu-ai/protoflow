@@ -68,6 +68,15 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   const clipped = [...document.querySelectorAll('*')].filter(emptyClip);
   const roots = clipped.filter(node => !clipped.some(other => other !== node && other.contains(node)));
   const masked = [...new Set(roots.flatMap(node => [node, ...node.querySelectorAll('*')]))];
+  const selector = element => {
+    const path = [];
+    for (let current = element; current; current = current.parentElement) {
+      let index = 1;
+      for (let sibling = current.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index++;
+      path.unshift(current.parentElement ? `:nth-child(${index})` : ':root');
+    }
+    return path.join(' > ');
+  };
   let clipSheet;
   const renderedText = node => {
     if (!masked.length || typeof CSSStyleSheet !== 'function' || !('adoptedStyleSheets' in document)) return node.innerText;
@@ -75,15 +84,6 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
     const saved = [...document.adoptedStyleSheets];
     try {
       if (!clipSheet) {
-        const selector = element => {
-          const path = [];
-          for (let current = element; current; current = current.parentElement) {
-            let index = 1;
-            for (let sibling = current.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index++;
-            path.unshift(current.parentElement ? `:nth-child(${index})` : ':root');
-          }
-          return path.join(' > ');
-        };
         clipSheet = new CSSStyleSheet();
         clipSheet.replaceSync(roots.map(root => { const at = selector(root); return `${at},${at} *{visibility:hidden!important}`; }).join('\n'));
       }
@@ -98,7 +98,7 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   const readText = (node, read) => {
     const hidden = [...loose, ...marked.filter(item => item !== node && !item.contains(node))];
     const saved = hidden.map(item => item.getAttribute('style'));
-    for (const item of hidden) item.style.setProperty('display', 'none');
+    for (const item of hidden) item.style.setProperty('display', 'none', 'important');
     try { return read(node); } finally {
       hidden.forEach((item, index) => {
         if (saved[index] !== null) item.setAttribute('style', saved[index]);
@@ -109,6 +109,26 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
       });
     }
   };
+  // innerText runs neighbouring inline-block boxes together (two adjacent buttons, a list number in its own box) although
+  // they are drawn apart, where a native tree reads separate texts. Lay those boxes out at block level only while text
+  // is read, so each starts a new word. Each keeps its inner layout (an inline-flex avatar stack stays a flex container,
+  // so its items stay apart too). Bounds, styles and pixels are read without it, and no DOM node or attribute changes.
+  const blockLevel = { 'inline-block': 'flow-root', 'inline-flex': 'flex', 'inline-grid': 'grid', 'inline-table': 'table' };
+  const atomic = [...document.body.querySelectorAll('*')].map(node => [node, blockLevel[getComputedStyle(node).display]]).filter(([, display]) => display);
+  const separated = read => {
+    if (!atomic.length || typeof CSSStyleSheet !== 'function' || !('adoptedStyleSheets' in document)) return read();
+    const saved = [...document.adoptedStyleSheets];
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(Object.values(blockLevel).map(display => [atomic.filter(item => item[1] === display).map(([node]) => selector(node)), display])
+        .filter(([selectors]) => selectors.length).map(([selectors, display]) => `${selectors.join(',')}{display:${display}!important}`).join('\n'));
+      document.adoptedStyleSheets = [...saved, sheet];
+    } catch {
+      // Unsupported CSSOM keeps the browser's own innerText.
+    }
+    try { return read(); } finally { document.adoptedStyleSheets = saved; }
+  };
+  const textual = [];
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
     if (!nodes.length) { facts[id] = { count: 0, visible: false }; continue; }
@@ -129,15 +149,21 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node, item => item.innerText) : node.innerText),
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : '',
       ...(dynamicAnchors.length && { dynamicExcluded: true }),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
-    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && masked.some(item => node === item || node.contains(item))) {
-      const shown = loose.length || marked.length ? readText(node, renderedText) : renderedText(node);
-      if (shown !== facts[id].text) facts[id].visibleText = shown;
-    }
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA') textual.push([id, node]);
   }
+  separated(() => {
+    for (const [id, node] of textual) {
+      facts[id].text = loose.length || marked.length ? readText(node, item => item.innerText) : node.innerText;
+      if (masked.some(item => node === item || node.contains(item))) {
+        const shown = loose.length || marked.length ? readText(node, renderedText) : renderedText(node);
+        if (shown !== facts[id].text) facts[id].visibleText = shown;
+      }
+    }
+  });
   return facts;
 }
 
