@@ -1,3 +1,4 @@
+import { validateScrollSteps, webScrollEnd } from './scroll-alignment.js';
 /*
  * Playwright capture of one screen state, located purely by anchor attributes. The prototype side uses `data-pf`;
  * a web or Electron target uses its own testability attribute (default `data-testid`).
@@ -14,7 +15,7 @@ async function perform(page, attribute, step) {
     case 'clear': return target.fill('', { timeout });
     case 'select': return target.selectOption(String(step.value ?? ''), { timeout });
     case 'toggle': return target.click({ timeout });
-    case 'scroll-to': return target.scrollIntoViewIfNeeded({ timeout });
+    case 'scroll-to': return ['start', 'end'].includes(step.value) ? webScrollEnd(page, attribute, step.anchor, { execute: true, endpoint: step.value }) : target.scrollIntoViewIfNeeded({ timeout });
     case 'back': return page.goBack({ timeout });
     case 'wait-for': return target.waitFor({ state: 'visible', timeout });
     default: throw new Error(`Unsupported step action: ${step.action}`);
@@ -50,11 +51,63 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
   // equal to one (a sidebar heading "Settings" beside a title bar reading "Settings") stays. The comparison then
   // takes the text as it is instead of removing dynamic text by value.
   const marked = all.filter(node => dynamicAnchors.includes(node.getAttribute(attribute)));
-  const readText = node => {
+  // innerText includes CSS-clipped accessibility-only text (an icon button's "Back"), as a native accessibility tree
+  // includes the button's label. A driver that reads only drawn text compares with `visibleText`, the text without it.
+  // Recognise only a proven empty legacy clip rectangle; positive/auto/unsupported regions keep their original
+  // browser behaviour.
+  const emptyClip = node => {
+    const style = getComputedStyle(node);
+    if (!['absolute', 'fixed'].includes(style.position)) return false;
+    const match = /^rect\(\s*(.*?)\s*\)$/.exec(style.clip);
+    if (!match) return false;
+    const values = match[1].split(/\s*,\s*|\s+/);
+    if (values.length !== 4 || values.some(value => !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?px$/i.test(value))) return false;
+    const [top, right, bottom, left] = values.map(Number.parseFloat);
+    return [top, right, bottom, left].every(Number.isFinite) && (right <= left || bottom <= top);
+  };
+  const clipped = [...document.querySelectorAll('*')].filter(emptyClip);
+  const roots = clipped.filter(node => !clipped.some(other => other !== node && other.contains(node)));
+  const masked = [...new Set(roots.flatMap(node => [node, ...node.querySelectorAll('*')]))];
+  let clipSheet;
+  const renderedText = node => {
+    if (!masked.length || typeof CSSStyleSheet !== 'function' || !('adoptedStyleSheets' in document)) return node.innerText;
+    // CSSOM changes avoid [style] selectors and DOM MutationObservers. No attributes/nodes are added.
+    const saved = [...document.adoptedStyleSheets];
+    try {
+      if (!clipSheet) {
+        const selector = element => {
+          const path = [];
+          for (let current = element; current; current = current.parentElement) {
+            let index = 1;
+            for (let sibling = current.previousElementSibling; sibling; sibling = sibling.previousElementSibling) index++;
+            path.unshift(current.parentElement ? `:nth-child(${index})` : ':root');
+          }
+          return path.join(' > ');
+        };
+        clipSheet = new CSSStyleSheet();
+        clipSheet.replaceSync(roots.map(root => { const at = selector(root); return `${at},${at} *{visibility:hidden!important}`; }).join('\n'));
+      }
+      document.adoptedStyleSheets = [...saved, clipSheet];
+      // Inline !important or another cascade rule can defeat the mask. Never apply half a group.
+      if (masked.every(element => getComputedStyle(element).visibility === 'hidden')) return node.innerText;
+    } catch {
+      // Unsupported CSSOM/cascade leaves the original observation authoritative.
+    } finally { document.adoptedStyleSheets = saved; }
+    return node.innerText;
+  };
+  const readText = (node, read) => {
     const hidden = [...loose, ...marked.filter(item => item !== node && !item.contains(node))];
-    const saved = hidden.map(item => item.style.getPropertyValue('display'));
+    const saved = hidden.map(item => item.getAttribute('style'));
     for (const item of hidden) item.style.setProperty('display', 'none');
-    try { return node.innerText; } finally { hidden.forEach((item, index) => saved[index] ? item.style.setProperty('display', saved[index]) : item.style.removeProperty('display')); }
+    try { return read(node); } finally {
+      hidden.forEach((item, index) => {
+        if (saved[index] !== null) item.setAttribute('style', saved[index]);
+        else {
+          // Synchronise dirty CSSOM first so removing a formerly absent attribute stays absent.
+          item.getAttribute('style'); item.removeAttribute('style');
+        }
+      });
+    }
   };
   for (const id of ids) {
     const nodes = all.filter(node => node.getAttribute(attribute) === id);
@@ -76,10 +129,14 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
       bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       // Text-entry fields show their value or placeholder; other inputs (checkbox, radio, range...) show no text,
       // matching native controls whose label lives in a separate text element.
-      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node) : node.innerText),
+      text: tag === 'TEXTAREA' || (tag === 'INPUT' && textEntryTypes.includes(type)) ? node.value || node.getAttribute('placeholder') || '' : tag === 'INPUT' ? '' : (loose.length || marked.length ? readText(node, item => item.innerText) : node.innerText),
       ...(dynamicAnchors.length && { dynamicExcluded: true }),
       style: { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, borderRadius: style.borderTopLeftRadius }
     };
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && masked.some(item => node === item || node.contains(item))) {
+      const shown = loose.length || marked.length ? readText(node, renderedText) : renderedText(node);
+      if (shown !== facts[id].text) facts[id].visibleText = shown;
+    }
   }
   return facts;
 }
@@ -89,9 +146,11 @@ function inspect({ attribute, ids, dynamicText = [], dynamicAnchors = [] }) {
  * Shared by the web and Electron drivers so both sides of a comparison use identical logic.
  */
 export async function captureOnPage(page, { attribute, anchors, steps = [], dynamicText = [], dynamicAnchors = [], timeoutMs = 10000 }) {
+  const endAnchors = validateScrollSteps(steps);
   await page.addStyleTag({ content: '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important}' });
   for (const step of steps) await perform(page, attribute, step);
   await settle(page, timeoutMs);
+  for (const anchor of endAnchors) await webScrollEnd(page, attribute, anchor, { endpoint: steps.find(step => step.action === 'scroll-to' && step.anchor === anchor && step.value !== undefined).value });
   const elements = await page.evaluate(inspect, { attribute, ids: anchors, dynamicText, dynamicAnchors });
   const screenshot = await page.screenshot({ animations: 'disabled', scale: 'device' });
   return { elements, screenshot };

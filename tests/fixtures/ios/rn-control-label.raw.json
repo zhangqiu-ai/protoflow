@@ -1,0 +1,31 @@
+{
+  "description": "Trimmed XCUITest React Native reminder row; anchor prefix shortened, labels and nested Text structure preserved.",
+  "tree": {
+    "type": "application",
+    "frame": { "x": 0, "y": 0, "width": 402, "height": 874 },
+    "children": [
+      {
+        "type": "other", "identifier": "settings.before", "label": "", "enabled": true,
+        "frame": { "x": 16, "y": 246, "width": 370, "height": 64 }
+      },
+      {
+        "type": "staticText", "identifier": "", "label": "Before shared sessions", "enabled": true,
+        "frame": { "x": 74, "y": 258, "width": 235, "height": 21 },
+        "children": [
+          { "type": "staticText", "identifier": "", "label": "Before shared sessions", "enabled": true, "frame": { "x": 74, "y": 258, "width": 235, "height": 21 } }
+        ]
+      },
+      {
+        "type": "staticText", "identifier": "", "label": "Available once sessions have a time", "enabled": true,
+        "frame": { "x": 74, "y": 280, "width": 235, "height": 18 },
+        "children": [
+          { "type": "staticText", "identifier": "", "label": "Available once sessions have a time", "enabled": true, "frame": { "x": 74, "y": 280, "width": 235, "height": 18 } }
+        ]
+      },
+      {
+        "type": "switch", "identifier": "settings.before-toggle", "label": "Session reminder", "value": "0", "enabled": false,
+        "frame": { "x": 321, "y": 262.6666660308838, "width": 51, "height": 31 }
+      }
+    ]
+  }
+}

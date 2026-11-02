@@ -193,12 +193,12 @@ Compose 與 Flutter 注意事項：
 
 `fill` 會叫出軟體鍵盤（Android AVD 設硬體鍵盤時不會）。鍵盤會遮住畫面，原型中也不存在，因此一般狀態的最後一步完成時鍵盤必須已收起（例如送出後結束編輯），否則擷取 FAIL。失焦後鍵盤是非同步收起的（Flutter 需要數個影格），Android 驅動器最多等 3 秒，只有仍在螢幕上（範圍非空）的輸入法視窗才算可見。
 
-例外：狀態的**最後一步是 `fill` 或 `clear`** 時，這個狀態描述的就是「正在輸入」，原型也保留焦點，應用不必為了擷取而失焦（例如原型的 `input` 事件只隱藏錯誤訊息，應用若在第一個按鍵就結束編輯會打斷輸入）。此時鍵盤可以留在畫面上：
+例外：略過尾端 `scroll-to`／`wait-for` 後，**最後一個其他動作是 `fill` 或 `clear`** 時，這個狀態描述的就是「正在輸入」，原型也保留焦點，應用不必為了擷取而失焦（例如原型的 `input` 事件只隱藏錯誤訊息，應用若在第一個按鍵就結束編輯會打斷輸入）。此時鍵盤可以留在畫面上：
 
 - 驅動器回報鍵盤範圍（iOS：`app.keyboards.firstMatch.frame`；Android：輸入法視窗的 `boundsInScreen` ÷ density），裁到內容區域後以 `occluded: [{x, y, width, height}]`（內容區域座標）放進回應。
 - 鍵盤自己的節點（iOS 的 `keyboard` 子樹）不屬於應用畫面，不參與錨點比對；被鍵盤蓋住的應用元素仍在無障礙樹中，視為已渲染，與捲出畫面的內容相同，T1 結構與 T3 版面照常比對。
 - T2 取樣跳過與遮蔽區域相交的元素，T4 在原型與應用兩側同一區域都遮罩後再比較，結果與鍵盤無關。
-- 量不到鍵盤範圍時記為 `NOT_RUN`。最後一步是其他動作（例如 `tap`）時鍵盤仍在，規則不變，仍然 FAIL。
+- 量不到鍵盤範圍時記為 `NOT_RUN`。`tap`／`toggle`／`select`／`back`／未知動作會中斷先前輸入狀態；沒有先前輸入或只有定位／等待也不建立編輯狀態，鍵盤仍在時仍為 FAIL。相關實際 PNG／範圍回歸見 [鍵盤步驟驗證](native-keyboard-step-verification-2026-10-31.md)。
 
 「鍵盤在畫面上」以鍵盤範圍是否與螢幕相交判斷。輸入框保有焦點時，XCUITest 即使在模擬器接著硬體鍵盤、畫面上沒有軟體鍵盤的情況下，也會列出一個停在螢幕下方的鍵盤元素（iPhone 17 上 y = 918，螢幕高 874 pt）；這種鍵盤不遮住任何內容，不論最後一步為何都不算可見。
 
@@ -208,9 +208,15 @@ Compose 與 Flutter 注意事項：
 |---|---|---|
 | `count`、`bounds` | 同一識別碼的元素數量；第一個元素的 frame，換算為內容區域座標 | 同一 `resource-id`（去掉 `<package>:id/` 並還原轉換）的節點數；`boundsInScreen` 的 px ÷ density。捲動區外的節點被裁切時，以 `boundsInParent` 的尺寸還原（見下） |
 | `visible` | frame 與內容區域相交且尺寸大於 0，或是捲動區已捲出畫面的內容 | `isVisibleToUser` 且與內容區域相交，或是捲動區已捲出畫面的內容 |
-| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項本身沒有文字 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字 |
+| `text` | 文字元素、按鈕取 label；輸入框取值，空白時取 placeholder（或 label）；容器依閱讀順序串接可見子元素的 label（同 `innerText`，不含輸入值，含捲出畫面的內容）；開關等控制項只取可見 `staticText` 後代，葉節點沒有文字；分段控制（`segmentedControl`）取各分段按鈕的標題 | 同左：`TextView` 取 text、`EditText` 取 text，空白時取 hint 或子文字；`CheckBox`、`RadioButton`、`Switch` 自己畫出的 text 算父容器的文字，控制項本身與 Web checkbox 一樣沒有文字，`contentDescription` 只是無障礙名稱 |
 | `interactive`、`editable`、`inputType`、`role` | 依 XCUITest 元素類型 | 依 className 與 `isClickable`／`isCheckable`／`isEditable`／`isPassword` 正規化為相同類型；可勾選的 `Button`（`ToggleButton`、帶 checked 狀態的 React Native 按鈕）視為按鈕，文字取其標籤 |
 | `style` | 不提供；T2 改以截圖在元素範圍內取樣主色比較 | 同左 |
+
+**複合控制項的可見文字**：帶文字的自訂開關須在原生快照保留實際可見的 `staticText` 後代（例如帶 `testID` 的 React Native `Text`）。控制項自己的 `text` 與父容器文字均不納入控制項無障礙 label 或 value，也不因寬度或附近文字推測主標籤；標示不可見的節點及其後代、輸入框的文字均不納入。原型的動態文字須有對應錨點，既有 T1 會依合約從控制項及父容器文字排除它；只有動態摘要而沒有主標籤後代時，不能宣稱已擷取主標籤。例如葉節點開關的無障礙名稱是 `Session reminder`，旁置可見標題是 `Before shared sessions`，父容器只保留可見標題與副標題；階層快照與 React Native 攤平快照採相同規則，旁置文字不受影響。這與 Web checkbox 的 `aria-label` 不進入自身或父容器 `innerText` 的行為一致。快照缺少 modal 背景節點時，也不能用前一張快照補造當前節點。
+
+**只在無障礙樹裡的文字**：原型常把圖示按鈕的名稱寫成裁切為零面積的文字（`position:absolute; clip:rect(0 0 0 0)`，即 `.sr-only`），`innerText` 會讀到它（例如「Back」），XCUITest 的按鈕 label 也是它，所以預設兩邊一致。原型擷取另外回報 `visibleText`：只在零面積裁切的文字讓結果不同時才有，是不含這段文字的版本。驅動器回應帶 `textSemantics: "visible"`（只讀畫出來的文字，圖示按鈕沒有文字）時，T1 改用原型的 `visibleText` 比對；目前只有啟用 `--uikit-probe-context` 且觀測通過的 iOS 擷取會這樣標示。未標示（`accessibility`，預設）的原生驅動器與 Web／Electron 目標照舊比對 `text`。
+
+**純視覺圖形的無障礙摘要**：`data-pf-visual-only`／`visualOnly` 圖形在 T1 不比對自己的文字。原生快照仍保留圖形的無障礙 label，但 T1 比對父容器時，使用該子錨點實際擷取的文字排除摘要，每個圖形最多扣除一次；同文的靜態葉錨點仍保留並比對。未擷取到圖形文字時不推測摘要，父容器的差異仍會報錯。Web 的 `aria-label` 原本不進入 `innerText`，此規則不改寫 DOM 文字。這是 T1 文字處理，沒有把圖形設為動態、沒有遮罩圖形像素，也沒有變更 T2／T3／T4 或門檻；柱圖的實際像素仍參與 T4 比對。靜態文字應有自己的錨點，才能在摘要同文時提供保留依據。
 
 **捲出畫面的內容**：網頁原型在 Playwright 中把折線以下的元素算作可見，文字也算進容器；原生平台只回報螢幕上的部分。為使兩邊一致，位於捲動區（iOS 的 `scrollView`／`table`／`collectionView`，Android 的 `isScrollable` 節點或 `ScrollView`、`HorizontalScrollView`、`RecyclerView`、`ListView`）內、中心落在捲動區之外的元素（或其所在的捲動區本身已捲出，例如折線以下的橫向列表）視為已渲染：`visible` 為 true，文字算進包含該捲動區的容器。不在任何捲動區內的畫面外元素（例如停在螢幕外的抽屜）仍不可見。Android 的 UiAutomator 還會把捲出節點的螢幕邊界裁到捲動區邊緣並回報 `isVisibleToUser` 為 false；驅動器另外回報節點的 `boundsInParent` 尺寸與 `isScrollable`，正規化時被夾住的那一側依尺寸往外還原並恢復可見。夾住的線可能是捲動區的外框，也可能是它的內距邊緣（React Native 裁到內距，siyue 實測在外框內 18 px），所以以離捲動區邊緣較近的一側為被夾住的一側（在下方的保留真實上緣，在上方或被上內距裁掉一截的保留真實下緣），兩側一樣近時保持原樣；本身被外層裁切的捲動區（例如折線以下的橫向列表），其內容沿該方向沿用外層的邊緣。捲動區內未被裁切卻不可見的節點（例如透明度為 0）仍不可見。容器文字依閱讀順序串接時，同一個捲動區的內容視為一整塊、放在捲動區的位置，和 DOM 的文件順序一致：疊在捲動區上方的固定分頁列排在捲動內容之後，不會插在折線上下之間。
 
@@ -243,11 +249,11 @@ Compose 與 Flutter 注意事項：
 
 圖層規則以 siyue 與其他專案共 2,073 次歷史擷取回放驗證（23,258 個錨點文字；其中 435 個 Android 場景另經 Android 正規化重放，7,640 個錨點）：唯一的變化是 iPad `nav.sidebar` 補回「1/4」，其餘錨點文字完全不變。上層單元不算壓平元素文字的規則，以及上述捲動區與重複文字的規則，另以 siyue 3,080 次擷取回放並與原型文字比對：相對 0.3.74 共 712 個錨點（50 種）改為與原型一致，沒有原本一致的錨點變得不一致。
 
-開關等控制項常以旁邊的可見標題作為無障礙名稱。這類控制項的 label 若與容器內其他文字相同，不論是否相鄰都略過；網頁的 checkbox 也沒有文字。
+開關等控制項常以旁邊的可見標題作為無障礙名稱。控制項的 label 不算文字，只取它畫出的文字（見上方「複合控制項的可見文字」）；網頁的 checkbox 也沒有文字。
 
-這兩條規則以 siyue 的 1,419 次歷史擷取（iPhone、iPad、Android）（16,765 個錨點文字）回放驗證：與原型一致的錨點從 14,830 個增為 14,896 個，原本一致的沒有任何一個變成不一致。
+上方攤平容器的規則，連同當時「與容器內其他文字相同的控制項 label 才略過」的舊規則，以 siyue 的 1,419 次歷史擷取（iPhone、iPad、Android）（16,765 個錨點文字）回放驗證：與原型一致的錨點從 14,830 個增為 14,896 個，原本一致的沒有任何一個變成不一致。
 
-步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
+步驟對應：`tap` 點擊、`fill`／`clear` 點擊後清空再輸入（iOS 先以刪除鍵清空；游標落在中間而留下文字時，改用公開編輯選單的「Select All」整段刪除。啟用 `--uikit-probe-context` 的擷取一律用「Select All」，找不到選單項目即 FAIL。密碼欄位只用刪除鍵；輸入後讀回欄位值；忙碌的模擬器可能漏字，不符時重打，最多三次，仍不符則 FAIL 並列出欄位實際內容；密碼欄位無法讀回不驗證）、`toggle` 點開關、`select` 調整 picker 或點選選項、`scroll-to` 捲動直到可見、`back` 返回、`wait-for` 等待出現。Android 在畫面錨點出現後先等 UI 閒置再重放步驟，擷取前清除 UiAutomation 快取並等無障礙樹穩定（Compose 會延遲發布語意變更）。
 
 原始證據保存在驗證產物的 `driver/` 目錄：`job.json`（啟動參數與步驟）、`raw.json`（完整無障礙樹）、`device.png`（整個螢幕）、`screen.png`（比較用的裁切圖），失敗時另有 `failure.png`。
 
@@ -412,3 +418,59 @@ Claude 費用約 6 美元（規劃 1.56、執行 1.39、驗收 3.09）。這輪�
 2. 重新啟動 Runner 一次後，規劃、修復、verify PASS、獨立審查 PASS，交付 [protoflow-test#47](https://github.com/zhangqiu-ai/protoflow-test/pull/47) 自動合併（變更 `expo/app/tasks.tsx`、`expo/src/ui.tsx` 與功能測試）。
 
 從推送原型到合併 49 分鐘，人工介入 1（上述重啟），Claude 費用約 1.40 美元（規劃 0.47、執行 0.25、審查 0.68）。T4 為 advisory：場景整體相似度 0.947–0.992，低於門檻的元素是標題列字型渲染。證據摘要：驗收專案的 `evidence/expo-p35-20261018.json`。
+
+
+## Capture-only UIKit 補充觀測試驗
+
+隔離候選驅動器提供明確 opt-in 參數 `--uikit-probe-context CTX-…`。此功能需要目標 App 另行授權、只在 capture 組態編入的 `SiyueCaptureProbe`，目前限定已核對公開 `RCTParagraphComponentView.attributedText` 的 RN 0.86.3；並非一般 iOS App 的預設能力。不得自動替專案加入探針或修改 target 設定。已完成指定 iPhone 17 模擬器的單一 RN modal 觀測試驗，見[證據與限制](uikit-probe-verification-2026-10-31.md)；編譯、合成測試與單場景觀測都不代表產品驗收。
+
+**待辦**：探針協定目前寫死 siyue App 的名稱與版本：launch environment `SIYUE_CAPTURE_PROBE_*`、通道 `Library/Caches/SiyueCaptureProbe`、React Native `0.86.3` 檢查與 `main.jsbundle` 雜湊。其他 App 要接入，需先把這些改為可設定。
+
+啟用後，XCTest 先帶入本輪 nonce/context/scene/screen 的 launch environment 啟動 App，再打開指定 deep link；未啟用時維持原本冷啟動流程。原步驟完成後，以兩個 fresh sample 夾住原始 AX snapshot 與完整裝置截圖，第二次觀測完成才終止 App。Node bridge 逐次解析指定 simulator/bundle 的當前容器，只使用 App 自有 `Library/Caches/SiyueCaptureProbe` 固定通道；預期身分來自已安裝 `.app` 的 Info.plist、可執行檔及 main.jsbundle 真實位元組，不來自原型預期文字。
+
+啟用 `captureProbe` 時，XCTest 在既有 0.3 秒 layout settle 後、第一份 UIKit sample 前，只呼叫一次 `app.snapshot()` 作 AX 準備，捨棄該 snapshot；未啟用 probe 的預設路徑不增加呼叫。成功後僅在 `raw.json.accessibilityPreparation` 記錄 method、count=1 與實際 startedAt／finishedAt，不保存準備 snapshot 的 tree、label 或 value。這段 AX 準備 metadata 與原 measured `probeTiming` 分開，不替代 AX／截圖時間；AX 準備本身不重試或刪除空節點。原 measured AX → screenshot → keyboard → after probe 順序維持不變。見[診斷與 protocol 驗證範圍](ios-accessibility-preparation-verification-2026-10-31.md)。
+
+SDK driver 只在既有 UIKit probe opt-in 路徑將 `captureProbe.settleBeforeCapture` 設為 `true`，於 AX 準備後、正式 `before` 前要求 `settle`。Bridge 最多觀測 8 個 fresh samples，sampling/readiness 缺省共用 6 秒 monotonic deadline；至少 3 份完整 capture canonical hash 相同，且 App sample 與 host monotonic 觀測的靜默跨度都達 1500ms 才放行。不排除 indicator、caret、class 或任何欄位，不以整張 PNG 等待穩定。缺省沒有 probe，或直接使用未帶此 optional job 欄位的舊 client，保留原路徑。
+
+Host 可顯式使用 `--uikit-settling-budget-ms <6000..10000>`，僅允許帶有 `--uikit-probe-context` 的 UIKit probe 路徑；缺省仍為 6000ms。這是整段 sampling／readiness 的單一 monotonic deadline，不是每個 sample 重新起算，且不提高 Swift 原有 12 秒 ack handshake 或 outer timeout。延長 host IO 預算不減少至少 3 份完整同 hash 樣本、App／host 兩側至少 1500ms quiet span、最多 8 samples 的要求，正式 before／after 仍須重新量測及通過原 validator。`--timeout-ms` 只控制公開互動步驟，不會變更此預算。Receipt 的 `budgetMs` 記錄實際選用值；每個 settling receipt 的 `elapsedMs` 僅記錄 identity、channel 與 total 三項耗時，不記錄 keys、文字或輸入值。既有身分與安全檢查不採用快取放寬。見[有界預算候選與離線驗證](uikit-settling-budget-verification-2026-11-01.md)。
+
+每個準備 sample 以獨立 `probe-settling-<index>-<UUID>.json` 保留原 bytes，`probe-settling.json` 另存 `settlingReceipts`、`READY`／`NOT_RUN`、sample 數與靜默跨度。正式 `probe-bridge.json.receipts` 仍只有 `before`／`after` 兩份全新樣本；兩階段同一輪 nonce 相同，sample ID 不重用。到期只保全失敗診斷及 ack，不提高原 handshake／outer timeout；缺省 6 秒是 sampling/readiness 上限，不宣稱不可取消 OS IO 已物理停止。詳見[驗證與限制](uikit-settling-verification-2026-11-01.md)。
+
+兩份完整原生樹必須相同，且 nonce、不同 sample ID、實際建置、主執行緒、時間順序與最長 10 秒 bracket 都通過。來源缺失、建置不符、不穩定或逾時均為 `NOT_RUN`，不回退成無探針成功。每次保留獨立 `uikit-probe-*` 目錄中的 raw native JSON、bridge receipt、驗證雜湊、xcodebuild log 與 xcresult；原本 `raw.json` 的 AX tree 與 `device.png` 仍保持獨立。
+
+補充事實只針對原 AX 中不存在、且當前 UIKit 樹實際帶相同 identifier 的 requested anchors。文字只取公開 UILabel/UIButton/RN 實際文字；不把 accessibility label、輸入值或原型文字當可見文字。保留真實原生節點路徑；背景 parent 只取自身 subtree，screen 依既有完整內容區語意讀實際 owned window，包含同一 window 的 modal。已存在 AX 的幾何及互動事實不變；當前原生 subtree 證實有 AX 缺失後代時，為該 parent 重算文字並標明 UIKit 來源。缺失 action/input 不猜測互動性，仍須符合原驗收。
+
+UIKit flattened leaf 的幾何候選只搜尋當前公開 parent subtree，保留同 parent siblings 與其後代；局部 scroll 排序不跨入另一個 parent／modal 背景分支。真正重疊的 ambiguity 拒絕規則與一般 AX/default native-tree 路徑維持；完整觀測的多層 scroll eligibility 另依下方整合範圍處理。見[範圍驗證與限制](uikit-flat-parent-scope-verification-2026-11-01.md)。
+
+已存在 AX 的 screen 若只涵蓋 captured content 的真子區，可在 response／AX／UIKit screen 各唯一、原始 frame 精確一致、非輸入非互動 other、原 AX text 可重算一致、完整 content bounds 及肯定可見公開文字等條件成立後，使用同一 interpreter 的整個 owned window 文字。此路徑不依賴 missing anchor，也不繞過既有 blocked correction group；只改 screen text／provenance，真實 handle、count、overlay 與其餘 facts 保留。沒有 probe 的預設行為不變。見 [screen 範圍校正驗證](uikit-screen-scope-verification-2026-10-31.md)。
+
+owned window 文字依真實 parent／tree order 與 Text／scroller extents 分層，層內維持原 subtree 的 pane 順序，避免匿名全窗 popup 被讀到主區之前。整窗圖層順序用於 UIKit screen 解讀；相關非輸入 scope 的後續真實 hierarchy 校正見下方整合範圍，預設 AX 解讀不變，背景文字不因 overlay 被刪除。見 [整窗圖層順序驗證](uikit-window-layer-verification-2026-10-31.md)。
+
+同一 opt-in 路徑也可校正已存在 AX 的非輸入 button/link 文字：只有 AX 與 UIKit identifier 唯一、公開 role 相符、原始螢幕 frame 完全相同、公開語意來源完整且控制項不含輸入 subtree 時，才使用同一公開文字 interpreter 取得實際 text parts。無障礙名稱仍保留於原 AX 與 `provenance.originalAX.label`／`correctedControls.originalAXLabel`，不是可見文字來源。文字與 provenance 以外的 count、geometry、visible、enabled、role 等 AX 事實不改。
+
+明確 AX `image` leaf（沒有 AX children）也可在此 opt-in 路徑校正可見文字，但 current UIKit 公開語意必須是 `role=other`、button/link trait 均為 false，且沒有 input 證據；與 button、link、switch 等語意衝突時不校正。只採用當前實際 subtree 的 UILabel／UIButton／RN 文字部分，不採用 flattened sibling 幾何推斷；圖片的 alt／無障礙名稱保留，圖內真實 UILabel 文字也保留。有 AX children 的 image 不參與這項 image 校正，避免 image 自身換用 UIKit caption、祖先卻仍採 AX child caption；保留原始 image facts/text/provenance。這是受限的文字校正，不推導 image 的互動性或改寫 AX role，既有 control function／provenance 名稱維持相容。原生 `image` 的預設處理不變。
+
+所有文字校正候選都必須有 interpreter 的肯定可見性證據（`visible=true`，可包含已證實的 scroll content）；未符合逐層觀測守衛的 nested scroll 等情況，其空文字不能當作「實際沒有文字」。這只限制候選資格，不改原 visibility、捲動幾何或 atomic scope 檢查。非 UIControl 的 RN View 仍依公開 button/link traits 與 role 判定，沒有以 class 名稱或原型預期文字補造事實。圖片、icon-only 控制項、真實字元與衝突負例見 [image text 驗證記錄](uikit-image-text-verification-2026-10-31.md)。
+
+明確非輸入 `other` AX leaf 可另校正自身的非空公開文字：除上述唯一 ID／exact frame 等條件，current role 必須是 other、button/link traits 均為 false，且不在 AX image 後代中。文字 scope 必須為 subtree；每個非空 public Text part 的原生 path 都須實際屬於該 UIView 的 own subtree。空白、空容器、未知語意、input／editable 證據或 flattened sibling 推斷都不校正，不能用未知的空文字刪除 AX 名稱。即使 parent button 的文字替換不再保留該 AX 後代的 derived node，這個已完整對應的 other leaf 也只能從已確認的自身非空 public parts 記錄 own fact；button/image 的 derived-node 檢查及所有 affected scope 的 atomic 驗證維持原樣。AX 名稱與先前 provenance 保留；原 role、count、geometry、visible 等事實不變。這不是 role 推導、動態文字排除或原型預期值替換；既有 control provenance 名稱只為相容。見 [other own-text 驗證記錄](uikit-other-text-verification-2026-10-31.md)。
+
+受影響 parent 由原 `elementText` 的實際 `onTextParts` 節點參照判定，包含 flattened 幾何容器；使用獨立 derived AX tree，只替換已驗證控制項的文字貢獻，再沿用 `elementText` 重導。其他 AX contributors（包含無 identifier 的控制項）保持原樣，不整個改採 UIKit scope，也不搜尋刪除特定字串。每個 derived part 明記原 AX path 或 UIKit public text path 與其控制項 AX path；任何受影響 requested scope 的重複、缺失或來源無法對應均使整組文字校正維持原值，舊 missing-anchor 路徑也不能間接改寫該組。沒有 probe 的預設 native-tree 行為不變。這不是通用自繪文字 OCR；未知來源不能取得校正資格。離線回歸命令與範圍見 [control text 驗證記錄](uikit-control-text-verification-2026-10-31.md)。
+
+`visible` 在此延續原生與 DOM 的 rendered 語意：已附掛且通過 hidden、alpha、clip 檢查；每個補充事實明示 `renderEligible` 與 `occlusion: notComputed`，不宣稱未被遮擋，也不新增遮罩。輸入文字刻意不擷取，因此兩份樹相同不證明輸入內容未變；輸入仍由原始 AX、截圖及對應功能測試驗證。
+
+隔離回歸入口：`node --test tests/uikit-probe.test.js tests/uikit-probe-bridge.test.js tests/ios-driver.test.js tests/native-control-text.test.js`。瀏覽器無法執行 UIKit/XCTest 或 simulator cache 通道，這些路徑以 Node runner、原生編譯及另行協調的實際 RN 單場景驗證。其他 Web 覆蓋仍由既有 Node Playwright runner 執行。
+
+
+補充語意只使用公開 UIKit traits／enabled／editable 與 RN 0.86.3 的公開 `RCTComponentViewProtocol.props`，限定 ViewProps 的 role/accessibilityRole/disabled，逐欄記錄來源；unknown 不推定。非 input UIScrollView 只觀測公開幾何。捲出 viewport 的內容另記 `scrollContentEligible`、原因及 scroll 祖先路徑，保留原 `renderEligible`／clip；隱藏、零 alpha、detached、真正 local clip、零尺寸及未獲完整觀測的 nested／任何 transformed chain 不提升。空的實際 subtree 只有在既有同層幾何規則能明確解釋時才取得 sibling 文字，明記 `flattenedSiblingGeometry` 及原始 Text paths；不改原樹或宣稱後代，歧義拒絕。
+
+### 明確的內容終點（本地候選）
+
+一般 `scroll-to` 仍只要求可見；`value:"start"`／`value:"end"` 的唯讀幾何證明、public gesture 與 current UIKit probe 必要條件見[終點契約](scroll-end-contract.md)。未知 value 拒絕；沒有 value 的既有行為保留。不可用 stationary frame 代替終點，也不可把 mock/typecheck 當作真 Native 驗收。
+
+### 已審核文字與捲動候選的本地整合
+
+此整合只對既有 UIKit probe opt-in 增加真實文字 hierarchy／所有權校正：唯一 response／AX／UIKit、原 frame／role／文字關聯、blocked group、輸入遮蔽及歧義拒絕仍為必要條件。僅改 text／provenance；safe-area 延伸須仍在同一 owned window，使用與 content 的真交集判定子區。一般 AX 路徑不變。
+
+多層 scroll 的衍生內容資格只在每層公開 geometry 完整、chain 已附著／非隱藏／正 alpha／無 transform、outer viewport 真 rendered 且各 scroll enabled 時成立；逐層以「下一 viewport」驗 extent，最內層才驗文字。中間非 scroll clip 必須完整包住下一 viewport；未知／部分遮蔽拒絕。原單層路徑不變，原 renderEligible／clip／tree 不改。沒有 scroll metadata 的 view 不按 class 猜測為 scroll。
+
+獨立原候選證據與本地整合結果見[整合記錄](uikit-reviewed-integration-2026-11-01.md)。終點 action 仍拒絕巢狀 scroll；可供文字解讀的多層資格不等於手勢終點支援。原候選失敗與已存 raw 不改；真 Native／required-tier／整輪驗收須另行執行。

@@ -1,0 +1,135 @@
+{
+  "description": "Chart subtree from Siyue VER-1793406035421-60ac4a4f iPhone growth.goal.initial; node content unchanged; no screenshot or surrounding user data retained.",
+  "tree": {
+    "children": [
+      {
+        "enabled": true,
+        "frame": {
+          "height": 56,
+          "width": 338,
+          "x": 32,
+          "y": 837
+        },
+        "identifier": "growth.goal.chart.bars",
+        "label": "2 records in the last 7 days",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 56,
+          "width": 41.333343505859375,
+          "x": 180.3333282470703,
+          "y": 837
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 56,
+          "width": 41.666656494140625,
+          "x": 279,
+          "y": 837
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 3,
+          "width": 41.333335876464844,
+          "x": 32,
+          "y": 890
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 3,
+          "width": 41.666664123535156,
+          "x": 81.33333206176758,
+          "y": 890
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 3,
+          "width": 41.33332824707031,
+          "x": 131,
+          "y": 890
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 3,
+          "width": 41.33332824707031,
+          "x": 229.6666717529297,
+          "y": 890
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 3,
+          "width": 41.333343505859375,
+          "x": 328.6666564941406,
+          "y": 890
+        },
+        "identifier": "",
+        "label": "",
+        "selected": false,
+        "type": "other"
+      },
+      {
+        "enabled": true,
+        "frame": {
+          "height": 38,
+          "width": 338,
+          "x": 32,
+          "y": 915
+        },
+        "identifier": "growth.goal.chart.note",
+        "label": "Progress counts only completed records; AI suggestions never count as done.",
+        "selected": false,
+        "type": "other"
+      }
+    ],
+    "enabled": true,
+    "frame": {
+      "height": 144,
+      "width": 370,
+      "x": 16,
+      "y": 823
+    },
+    "identifier": "growth.goal.chart",
+    "label": "",
+    "selected": false,
+    "type": "other"
+  }
+}

@@ -54,6 +54,9 @@ export const driverResponseSchema = {
     screenshot: { type: 'string', minLength: 1 }, viewport, log: { type: 'string' },
     // Viewport regions a system overlay covers (a keyboard kept up after a final fill/clear); the tiers leave them out.
     occluded: { type: 'array', items: box },
+    // How element text was read: accessibility labels (default; an icon button reads its label), or only drawn text,
+    // which compares with the prototype's text without clipped accessibility-only text.
+    textSemantics: { enum: ['accessibility', 'visible'] },
     elements: { type: 'array', items: { type: 'object', required: ['anchor'], properties: {
       anchor: anchorId, count: { type: 'integer', minimum: 0 }, visible: { type: 'boolean' }, enabled: { type: 'boolean' },
       interactive: { type: 'boolean' }, editable: { type: 'boolean' }, bounds: box, text: { type: 'string' },

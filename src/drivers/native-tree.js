@@ -1,4 +1,5 @@
 import { PNG } from 'pngjs';
+import { orientedPng, PngOrientationError } from './png-orientation.js';
 
 /*
  * Platform-neutral interpretation of a native accessibility snapshot as driver-protocol facts. Each platform driver
@@ -44,32 +45,80 @@ function fieldText(node) {
 }
 
 /**
- * Join a container's text parts (nodes in reading order). Native controls often repeat a visible label as their
- * accessible name (a switch named like the title beside it), so a control's label that matches other text in the
- * container is left out wherever it stands, and consecutive duplicates collapse.
+ * Join visible text parts in reading order. Consecutive duplicates from overlapping native nodes collapse;
+ * a control's accessible name never enters these parts, whether or not another visible label matches it.
  */
 const apart = (a, b) => area(frameOf(a)) > 0 && area(frameOf(b)) > 0 && overlap(frameOf(a), frameOf(b)) < 0.5;
 function joinText(nodes) {
-  const shown = new Set(nodes.filter(item => !CONTROLS.has(item.type)).map(item => item.label));
-  const parts = nodes.filter(item => !CONTROLS.has(item.type) || !shown.has(item.label));
-  return parts.filter((item, index) => index === 0 || item.label !== parts[index - 1].label || apart(item, parts[index - 1]))
+  return nodes.filter((item, index) => index === 0 || item.label !== nodes[index - 1].label || apart(item, nodes[index - 1]))
     .map(item => item.label).join(' ');
 }
 
+// Only ordering changes: every part comes from the original subtree traversal, by the same node reference.
+// Empty drawing/container branches cannot perturb text order. A wrapper covering a sibling uses its real
+// text-bearing extent for placement; an ordinary row/ring and every scroll viewport retain their real frame.
+function renderedHierarchyParts(root, parts) {
+  const partSet = new Set(parts), owned = new Map();
+  const scan = node => {
+    const values = partSet.has(node) ? [node] : (node.children ?? []).flatMap(scan);
+    owned.set(node, values);
+    return values;
+  };
+  scan(root);
+  const extent = branch => {
+    const frames = [];
+    const visit = node => {
+      if (!owned.get(node)?.length) return;
+      if (SCROLLERS.has(node.type) || partSet.has(node)) { frames.push(frameOf(node)); return; }
+      for (const child of node.children ?? []) visit(child);
+    };
+    visit(branch);
+    const x = Math.min(...frames.map(f => f.x)), y = Math.min(...frames.map(f => f.y));
+    return { x, y, width: Math.max(...frames.map(f => f.x + f.width)) - x,
+      height: Math.max(...frames.map(f => f.y + f.height)) - y };
+  };
+  const ordered = node => {
+    if (partSet.has(node)) return [node];
+    const children = (node.children ?? []).filter(child => owned.get(child)?.length);
+    const units = children.map(child => ({ node: child, frame: !child.label && !SCROLLERS.has(child.type)
+      && children.some(other => other !== child && contains(frameOf(child), frameOf(other))) ? extent(child) : frameOf(child) }));
+    return readingOrder(units).flatMap(unit => ordered(unit.node));
+  };
+  return ordered(root);
+}
+
 /**
- * Visible text of a subtree, like the DOM's innerText: labels of text, buttons and controls in reading order, never
- * typed field values.
+ * Visible text of a subtree, like the DOM's innerText: text and button labels in reading order, never a control's
+ * accessible name or typed field values.
  */
-export function subtreeText(node) {
+export function subtreeText(node, { onTextParts, renderedHierarchy = false } = {}) {
   const parts = [];
   const visit = item => {
     if (TEXT_ENTRY.has(item.type) || item.visible === false) return;
+    if (CONTROLS.has(item.type)) { parts.push(...controlTextParts(item)); return; }
     if (LABELLED.has(item.type) && item.label) { parts.push(item); return; }
     if (!item.children?.length) { if (item.label) parts.push(item); return; }
     for (const child of readingOrder(item.children)) visit(child);
   };
   visit(node);
-  return joinText(parts);
+  const ordered = renderedHierarchy ? renderedHierarchyParts(node, parts) : parts;
+  onTextParts?.(ordered);
+  return joinText(ordered);
+}
+
+// A composite control may render Text children, unlike a leaf UISwitch. Its own label is an accessible name,
+// never evidence of visible text. Dynamic descendant anchors are excluded later by compareStructure as usual.
+// A segmented control draws each segment's title: its segments report as buttons.
+const shownInControl = (item, control) => Boolean(item.label) && (item.type === 'staticText' || control === 'segmentedControl' && LABELLED.has(item.type));
+function controlTextParts(node) {
+  const parts = [];
+  const visit = item => {
+    if (item.visible === false || TEXT_ENTRY.has(item.type)) return;
+    if (item !== node && shownInControl(item, node.type)) { parts.push(item); return; }
+    for (const child of item.children ?? []) visit(child);
+  };
+  visit(node);
+  return readingOrder(parts);
 }
 
 const inside = (inner, outer) => {
@@ -104,7 +153,30 @@ export function scrolledOut(tree) {
  * overlay such as a side drawer reads after what it covers, like an element later in the DOM, and its items never count
  * as text enclosed by an element of the layer underneath. Scroll views are placed by the tree, not by clipped frames.
  */
-export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false } = {}) {
+export function textWithin(tree, container, scrolled = scrolledOut(tree), { screen = false, onTextParts, includeContainerDescendants = false, renderedHierarchy = false, excludeAncestorLabels = false } = {}) {
+  if (includeContainerDescendants) {
+    // The normalized subtree already owns the visibility/scroll/input decision. Geometry may order those exact
+    // parts into layers, but must not discard a positive-clipped Text whose centre lies outside the window.
+    const hierarchy = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
+    subtreeText(container, { onTextParts: values => hierarchy.push(...values), renderedHierarchy });
+    const scan = (item, scroller) => {
+      order.set(item, order.size); owner.set(item, scroller);
+      if (TEXT_ENTRY.has(item.type)) return;
+      if (SCROLLERS.has(item.type)) outer.set(item, scroller);
+      for (const child of item.children ?? []) { parent.set(child, item); scan(child, SCROLLERS.has(item.type) ? item : scroller); }
+    };
+    scan(tree, null);
+    const top = part => {
+      let scroller = owner.get(part);
+      if (!scroller) return part;
+      while (outer.get(scroller)) scroller = outer.get(scroller);
+      return scroller;
+    };
+    const placed = layers([...new Set(hierarchy.map(top))], parent, order);
+    const parts = stacked(hierarchy, new Map(hierarchy.map(part => [part, placed.get(top(part))])), units => units);
+    onTextParts?.(parts);
+    return joinText(parts);
+  }
   const frame = frameOf(container);
   const found = [], owner = new Map(), outer = new Map(), parent = new Map(), order = new Map();
   // A scroll view's content is the text of a container outside it only when the scroll view lies in the container as
@@ -112,26 +184,31 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
   // the composer's. Content scrolled out of sight lies where its scroll view is. A container in the scroll view scrolls
   // along with it and compares frames directly, but only within the scroll view's visible frame: the header over the
   // part of a message list scrolled out above it is not the list's text.
-  const along = new Set();
+  const along = new Set(), ancestors = new Set();
   const enclose = (item, scrollers) => {
     if (item === container) { scrollers.forEach(scroller => along.add(scroller)); return true; }
-    return (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+    const found = (item.children ?? []).some(child => enclose(child, SCROLLERS.has(item.type) ? [...scrollers, item] : scrollers));
+    if (found && excludeAncestorLabels) ancestors.add(item);
+    return found;
   };
   enclose(tree, []);
   const scrollers = scroller => { const list = new Set(); for (let item = scroller; item; item = outer.get(item)) list.add(item); return list; };
   const within = (item, scroller) => !scroller || along.has(scroller)
     ? inside(frameOf(item), frame) && [...along].every(clip => scrollers(scroller).has(clip) || inside(frameOf(item), frameOf(clip)))
     : within(scroller, outer.get(scroller)) && (scrolled.has(item) || inside(frameOf(item), frame));
-  const visit = (item, scroller) => {
+  const visit = (item, scroller, control = null) => {
     order.set(item, order.size);
     if (item === container) owner.set(item, scroller);
     if (item === container || item.visible === false) return;
-    if (within(item, scroller) && !TEXT_ENTRY.has(item.type)) {
-      const leaf = (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
+    if (control && TEXT_ENTRY.has(item.type)) return;
+    const inControl = control ?? (CONTROLS.has(item.type) ? item.type : null);
+    if (within(item, scroller) && !TEXT_ENTRY.has(item.type) && !ancestors.has(item)) {
+      const leaf = inControl ? control !== null && shownInControl(item, control)
+        : (LABELLED.has(item.type) && item.label) || (!item.children?.length && item.label && item.type !== 'application' && item.type !== 'window');
       if (leaf) { found.push(item); owner.set(item, scroller); return; }
     }
     if (SCROLLERS.has(item.type)) outer.set(item, scroller);
-    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller); }
+    for (const child of item.children ?? []) { parent.set(child, item); visit(child, SCROLLERS.has(item.type) ? item : scroller, inControl); }
   };
   visit(tree, null);
   const chain = item => { const list = []; for (let scroller = owner.get(item); scroller; scroller = outer.get(scroller)) list.unshift(scroller); return list; };
@@ -158,7 +235,9 @@ export function textWithin(tree, container, scrolled = scrolledOut(tree), { scre
     return stacked([...units.keys()], depth ? layers([...units.keys()], parent, order) : placed)
       .flatMap(key => units.get(key)[0] === key ? [key] : ordered(units.get(key), depth + 1));
   };
-  return joinText(ordered(text, 0));
+  const parts = ordered(text, 0);
+  onTextParts?.(parts);
+  return joinText(parts);
 }
 
 const area = frame => Math.max(0, frame.width) * Math.max(0, frame.height);
@@ -227,25 +306,31 @@ function layers(units, parent, order) {
  * Units in reading order by layer: the page underneath by geometry, then each layer above it, overlay by overlay in tree
  * order (a tab bar before a drawer that comes later in the tree, even where they do not overlap), each by geometry.
  */
-function stacked(units, placed) {
+function stacked(units, placed, withinLayer = readingOrder) {
   const groups = new Map();
   for (const unit of units) {
     const { level, rank } = placed.get(unit), id = `${level}:${rank}`;
     groups.set(id, { level, rank, units: [...(groups.get(id)?.units ?? []), unit] });
   }
-  return [...groups.values()].sort((a, b) => a.level - b.level || a.rank - b.rank).flatMap(group => readingOrder(group.units));
+  return [...groups.values()].sort((a, b) => a.level - b.level || a.rank - b.rank).flatMap(group => withinLayer(group.units));
+}
+
+/** Whole-window text: original subtree order within actual overlapping layers, with original text-part references. */
+export function layeredSubtreeText(node, { onTextParts, renderedHierarchy = false } = {}) {
+  return textWithin(node, node, scrolledOut(node), { screen: true, onTextParts, includeContainerDescendants: true, renderedHierarchy });
 }
 
 /**
- * The element's own text: field value/placeholder, nothing for controls (web reports '' for checkboxes), the label of
- * text and buttons, else the visible text it contains (by hierarchy, or by geometry when the tree is flattened).
+ * The element's own text: field value/placeholder, only visible Text descendants for controls (leaf checkboxes have
+ * none, and the text an Android checkbox draws is its container's), the label of text and buttons, else its visible
+ * text (by hierarchy, or by geometry in a flattened tree).
  */
-export function elementText(node, tree = null, scrolled = undefined, { screen = false } = {}) {
+export function elementText(node, tree = null, scrolled = undefined, { screen = false, onTextParts, renderedHierarchy = false, excludeAncestorLabels = false } = {}) {
   if (TEXT_ENTRY.has(node.type)) return fieldText(node);
-  if (CONTROLS.has(node.type)) return '';
-  if (LABELLED.has(node.type)) return node.label ?? '';
-  if (node.children?.length) return subtreeText(node);
-  return tree && !node.label ? textWithin(tree, node, scrolled, { screen }) : node.label ?? '';
+  if (CONTROLS.has(node.type)) { const parts = controlTextParts(node).filter(part => !part.drawnByControl); onTextParts?.(parts); return joinText(parts); }
+  if (LABELLED.has(node.type)) { onTextParts?.(node.label ? [node] : []); return node.label ?? ''; }
+  if (node.children?.length) return subtreeText(node, { onTextParts, renderedHierarchy });
+  return tree && !node.label ? textWithin(tree, node, scrolled, { screen, onTextParts, renderedHierarchy, excludeAncestorLabels }) : node.label ?? '';
 }
 
 function collect(node, byId = new Map()) {
@@ -291,7 +376,7 @@ export function anchorFacts(tree, { anchors, screen, content }) {
 
 /** Crop a device screenshot (PNG buffer) to a frame in points; returns { png, scale }. */
 export function cropScreenshot(buffer, frame, screenWidthPoints) {
-  const image = PNG.sync.read(buffer);
+  const image = orientedPng(buffer);
   const scale = image.width / screenWidthPoints;
   const left = Math.round(frame.x * scale), top = Math.round(frame.y * scale);
   const width = Math.min(Math.round(frame.width * scale), image.width - left), height = Math.min(Math.round(frame.height * scale), image.height - top);
@@ -302,6 +387,8 @@ export function cropScreenshot(buffer, frame, screenWidthPoints) {
 
 /** Steps after which a software keyboard may stay up: the state is "while typing", as in the prototype. */
 const EDITING_STEPS = new Set(['fill', 'clear']);
+// Locating and observing may follow input without changing that intent; they cannot establish editing themselves.
+const FOCUS_NEUTRAL_STEPS = new Set(['scroll-to', 'wait-for']);
 
 /** The tree without the software keyboard's own nodes: its keys are not part of the app's screen. */
 function withoutKeyboard(node) {
@@ -319,7 +406,8 @@ function clipTo(box, content) {
 /**
  * Turn a normalised capture ({ status, tree, safeArea?, keyboardVisible?, keyboardFrame?, reason? }) into a driver
  * response. `frame` is 'safe-area' (default: the device content area without system bars) or 'device'.
- * A software keyboard still up after the steps is FAIL, unless the last step is `fill` or `clear`: then the state is
+ * A software keyboard still up after the steps is FAIL, unless the last interaction is `fill` or `clear` (optionally
+ * followed by `scroll-to` or `wait-for`): then the state is
  * the field being edited (focus kept, as the prototype keeps it), and the keyboard's frame is reported as `occluded`
  * so the tiers leave those pixels out. Elements behind it stay in the tree as rendered, like content scrolled away.
  * Returns { response, png } where png is the cropped screenshot to write next to the response.
@@ -330,15 +418,21 @@ export function nativeResponse(raw, deviceScreenshot, { anchors, screen, frame =
   // XCUITest reports a keyboard element whenever a field has focus, even one parked below the screen (a Simulator
   // with a connected hardware keyboard): only a keyboard frame that reaches the screen covers anything.
   const keyboardUp = raw.keyboardVisible === true && (!raw.keyboardFrame || clipTo(raw.keyboardFrame, device) !== null);
-  const editing = EDITING_STEPS.has(steps?.at(-1)?.action);
-  if (keyboardUp && !editing) return { response: { schemaVersion: 1, status: 'FAIL', reason: 'the software keyboard is still visible after the steps; the app must dismiss it (end editing) before the state is captured (only a state whose last step is fill or clear may keep it up)' } };
-  if (keyboardUp && !raw.keyboardFrame) return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: 'the software keyboard is up after the last fill/clear step but its frame could not be measured' } };
+  const editing = EDITING_STEPS.has(steps?.findLast(step => !FOCUS_NEUTRAL_STEPS.has(step?.action))?.action);
+  if (keyboardUp && !editing) return { response: { schemaVersion: 1, status: 'FAIL', reason: 'the software keyboard is still visible after the steps; the app must dismiss it (end editing) before the state is captured (only a state whose last interaction is fill or clear, optionally followed by scroll-to or wait-for, may keep it up)' } };
+  if (keyboardUp && !raw.keyboardFrame) return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: 'the software keyboard is up after the last fill/clear interaction but its frame could not be measured' } };
   const area = raw.safeArea ?? safeArea;
   if (frame === 'safe-area' && !area) return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: 'the device safe area could not be measured' } };
   const measured = frame === 'device' ? { x: 0, y: 0, width: device.width, height: device.height } : area;
   // Whole points, so the viewport and the cropped screenshot always agree (a 136 px status bar is 45.33 dp at 3×).
   const content = { ...measured, width: Math.floor(measured.width + 1e-6), height: Math.floor(measured.height + 1e-6) };
-  const { png, scale } = cropScreenshot(deviceScreenshot, content, device.width);
+  let png, scale;
+  try {
+    ({ png, scale } = cropScreenshot(deviceScreenshot, content, device.width));
+  } catch (error) {
+    if (!(error instanceof PngOrientationError)) throw error;
+    return { response: { schemaVersion: 1, status: 'NOT_RUN', reason: error.message } };
+  }
   const { elements, missing } = anchorFacts(withoutKeyboard(raw.tree), { anchors, screen, content });
   const keyboard = keyboardUp ? clipTo(raw.keyboardFrame, content) : null;
   return {

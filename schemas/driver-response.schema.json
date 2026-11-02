@@ -75,6 +75,12 @@
         }
       }
     },
+    "textSemantics": {
+      "enum": [
+        "accessibility",
+        "visible"
+      ]
+    },
     "elements": {
       "type": "array",
       "items": {

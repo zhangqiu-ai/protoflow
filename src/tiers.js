@@ -40,10 +40,17 @@ function siblingOrder(capture, ids, byIndex) {
 // Native accessibility trees expose text, password and search fields but not the keyboard type, so on a native
 // target the prototype's email, tel, url and number inputs compare as text.
 const NATIVE_TEXT_INPUTS = new Set(['email', 'tel', 'url', 'number']);
+// Existing native input kinds plus DOM input roles; readonly/disabled inputs still contain private text.
+const INPUT_ROLES = new Set(['textField', 'secureTextField', 'searchField', 'textView', 'switch', 'toggle', 'checkBox', 'radioButton', 'slider', 'stepper', 'picker', 'pickerWheel', 'datePicker', 'segmentedControl', 'input', 'textbox', 'searchbox', 'combobox', 'spinbutton', 'checkbox', 'radio', 'listbox']);
 export function compareStructure(screen, state, prototype, application, { native = false } = {}) {
+  // A driver that reads only drawn text (`textSemantics: 'visible'`, no accessibility-only labels) compares with the
+  // prototype's drawn text: an icon button's clipped accessibility-only label is then left out on both sides.
+  if (application.textSemantics === 'visible') prototype = { ...prototype, elements: Object.fromEntries(Object.entries(prototype.elements ?? {})
+    .map(([id, facts]) => [id, facts.visibleText === undefined ? facts : { ...facts, text: facts.visibleText }])) };
   const reasons = [];
   let checked = 0;
-  const anchors = uniqueAnchors(screen).filter(anchor => !anchor.visualOnly);
+  const allAnchors = uniqueAnchors(screen);
+  const anchors = allAnchors.filter(anchor => !anchor.visualOnly);
   // A container's text includes its descendants'. Text an anchor marks dynamic (a clock, a countdown, a receipt id)
   // is left out at every level, so it is checked only for presence, never compared through an ancestor. The same
   // words can also be static text nearby (a field labelled "Password" whose placeholder is "Password"), and whether a
@@ -62,18 +69,47 @@ export function compareStructure(screen, state, prototype, application, { native
     return id === screenId;
   };
   const leaves = anchors.filter(item => !item.dynamic && !anchors.some(other => !other.dynamic && isUnder(other, item.id)));
+  // A visible state query supplies text evidence, not a new role, parent or dynamic declaration.
+  const declaredIds = new Set(allAnchors.map(anchor => anchor.id));
+  const stateTextScopes = [...new Set(state.expect?.visible ?? [])].filter(id => !declaredIds.has(id)
+    && [prototype, application].every(capture => {
+      const facts = element(capture, id);
+      return facts.count === 1 && facts.visible === true && facts.editable === false
+        && facts.inputType === null && !INPUT_ROLES.has(facts.role) && typeof facts.text === 'string';
+    }));
   // Separator glyphs standing alone ("Siyue · 0.0.1") are not read out by every platform: iOS leaves them out of a
   // container's combined label. They carry no words, so both sides compare without them.
   const words = text => text.split(' ').filter(word => !/^[·•‧∙・|—–-]+$/u.test(word)).join(' ');
   const occurrences = (text, part) => [...` ${text} `.matchAll(new RegExp(`(?<= )${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= )`, 'g'))].map(match => match.index - 1);
   const textOf = (capture, id) => {
     let text = words(normalizeText(element(capture, id).text));
-    // A DOM capture (web, Electron) already left dynamic anchors out where they are.
-    if (element(capture, id).dynamicExcluded) return text;
-    const parts = anchors.filter(other => other.dynamic && isUnder(other, id)).map(item => words(normalizeText(element(capture, item.id).text))).filter(Boolean);
-    for (const part of parts.sort((a, b) => b.split(' ').length - a.split(' ').length || b.length - a.length)) {
-      const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(textOf(capture, leaf.id), part).length, 0);
-      for (const index of occurrences(text, part).slice(accounted).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
+    // DOM captures already remove dynamic text in place. A native visual-only graphic can additionally expose an
+    // accessible description in its ancestors: use its captured text, preserving static leaves with the same words.
+    // Do not infer missing descriptions or change DOM text. One graphic capture authorizes at most one removal.
+    const parts = allAnchors.filter(other => isUnder(other, id) && (
+      (other.dynamic && !other.visualOnly && !element(capture, id).dynamicExcluded) || (native && capture === application && other.visualOnly)
+    )).map(item => ({ text: words(normalizeText(element(capture, item.id).text)), limit: item.visualOnly ? 1 : Infinity, scoped: !item.visualOnly })).filter(part => part.text);
+    for (const { text: part, limit, scoped } of parts.sort((a, b) => b.text.split(' ').length - a.text.split(' ').length || b.text.length - a.text.length)) {
+      const ranges = [];
+      if (scoped && id === screenId) for (const scope of stateTextScopes) {
+        const value = textOf(capture, scope), at = value && occurrences(text, value);
+        // A short repeated value is not a location. Only the scope's complete, unique observed span is evidence.
+        if (at.length === 1) ranges.push([at[0], at[0] + value.length]);
+      }
+      if (!ranges.length) {
+        const accounted = leaves.filter(leaf => isUnder(leaf, id)).reduce((sum, leaf) => sum + occurrences(textOf(capture, leaf.id), part).length, 0);
+        for (const index of occurrences(text, part).slice(accounted).slice(-limit).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
+        continue;
+      }
+      let ambiguous = 0;
+      for (const leaf of leaves.filter(leaf => isUnder(leaf, id))) {
+        const value = textOf(capture, leaf.id), at = value && occurrences(text, value);
+        if (at.length === 1) ranges.push([at[0], at[0] + value.length]);
+        else ambiguous += occurrences(value, part).length;
+      }
+      // Overlapping state scopes (a dialog and its row) protect the same positions once, without invented parentage.
+      const removable = occurrences(text, part).filter(index => !ranges.some(([start, end]) => index < end && index + part.length > start));
+      for (const index of removable.slice(ambiguous).slice(-limit).reverse()) text = normalizeText(`${text.slice(0, index)} ${text.slice(index + part.length)}`);
     }
     return text;
   };

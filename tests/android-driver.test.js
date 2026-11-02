@@ -262,3 +262,19 @@ esac`,
   const calls = (await readFile(path.join(sdk, 'adb.log'), 'utf8')).split('\n').filter(line => /install/.test(line));
   assert.deepEqual(calls.map(line => line.replace(path.join(sdk, 'app.apk'), 'APK')), ['-s emulator-5554 install -r -g APK', '-s emulator-5554 uninstall dev.example', '-s emulator-5554 install -r -g APK']);
 });
+
+test('the text an Android CheckBox, RadioButton or Switch draws is its container\'s text, never its accessible name', () => {
+  const bounds = (top, bottom) => ({ left: 0, top, right: 400, bottom });
+  const raw = { status: 'PASS', density: 1, screen: { width: 400, height: 800 }, insets: { left: 0, top: 0, right: 0, bottom: 0 }, keyboardVisible: false,
+    tree: { className: 'android.widget.FrameLayout', resourceId: 'login', bounds: bounds(0, 800), children: [
+      { className: 'android.widget.Button', resourceId: 'login.submit', text: 'Sign in', clickable: true, bounds: bounds(0, 50) },
+      { className: 'android.widget.CheckBox', resourceId: 'login.remember', text: 'Remember me', checkable: true, clickable: true, bounds: bounds(60, 110) },
+      { className: 'android.widget.RadioButton', resourceId: 'login.plan', text: 'Monthly', checkable: true, clickable: true, bounds: bounds(120, 170) },
+      { className: 'android.widget.Switch', resourceId: 'login.dark', contentDescription: 'Dark mode', checkable: true, clickable: true, bounds: bounds(180, 230) }
+    ] } };
+  const png = new PNG({ width: 400, height: 800 });
+  const { response } = androidResponse(raw, PNG.sync.write(png), { anchors: ['login', 'login.remember', 'login.plan', 'login.dark'], screen: 'login' });
+  const text = Object.fromEntries(response.elements.map(item => [item.anchor, item.text]));
+  // Like a web checkbox input, the control itself has no text; the switch's content description is only its name.
+  assert.deepEqual(text, { login: 'Sign in Remember me Monthly', 'login.remember': '', 'login.plan': '', 'login.dark': '' });
+});
