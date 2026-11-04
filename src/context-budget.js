@@ -92,13 +92,55 @@ export function contextSizes(request, count = 6) {
   return sizes.sort((a, b) => b[1] - a[1]).slice(0, count);
 }
 
+const sceneName = scene => `${scene.variant ? `${scene.variant}/` : ''}${scene.id}`;
+/**
+ * A repair's visual result as the executor needs it when the request is over budget: passing scenes by name only (they
+ * need no repair) and failing scenes with their reasons and artifacts, grouped by scene across variants. With `detailed`,
+ * only that many failing scenes keep their details; the rest are named with their failing tiers and repaired in a later
+ * round, once verification shows them again. The verification record keeps every detail.
+ */
+export function briefVisual(verification, { detailed = Infinity } = {}) {
+  const visual = verification?.visual;
+  if (!visual || !Array.isArray(visual.scenes)) return verification;
+  const { scenes, artifacts, ...rest } = visual;
+  const failing = scenes.filter(scene => scene.status !== 'PASS').sort((a, b) => String(a.id).localeCompare(String(b.id)) || String(a.variant ?? '').localeCompare(String(b.variant ?? '')));
+  const deferred = failing.slice(detailed).map(scene => ({ scene: sceneName(scene), status: scene.status, tiers: Object.entries(scene.tiers ?? {}).filter(([, tier]) => tier?.status && tier.status !== 'PASS').map(([name]) => name) }));
+  return {
+    ...verification,
+    visual: {
+      ...rest, record: `.protoflow/verifications/${verification.id}.json`, scenes: failing.slice(0, detailed),
+      passed: scenes.filter(scene => scene.status === 'PASS').map(sceneName),
+      ...(Array.isArray(artifacts) && { artifactCount: artifacts.length }),
+      ...(deferred.length && { deferred })
+    }
+  };
+}
+
 // Executors print the Context Package indented, so the budget counts it that way.
 const measure = value => JSON.stringify(value, null, 2).length;
-/** The request for the executor within the budget: large diffs by reference first, then every diff, else a clear error. */
+/**
+ * The request for the executor within the budget: large diffs by reference first, then every diff, then a repair's
+ * passing scenes by name, then as many failing scenes in detail as fit (at least one); else a clear error.
+ */
 export async function fitContext(root, request, { budget = CONTEXT_BUDGET } = {}) {
   let fitted = { ...request, manifest: await briefManifest(root, request.manifest) };
   if (measure(fitted) > budget) fitted = { ...fitted, manifest: await briefManifest(root, request.manifest, { all: true }) };
+  const verification = request.repair?.verification;
+  if (measure(fitted) > budget && Array.isArray(verification?.visual?.scenes)) {
+    const withVisual = options => ({ ...fitted, repair: { ...fitted.repair, verification: briefVisual(verification, options) } });
+    let candidate = withVisual();
+    // Fewer detailed scenes is smaller: the largest count that fits, by bisection.
+    if (measure(candidate) > budget) {
+      let low = 1, high = candidate.repair.verification.visual.scenes.length - 1;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (measure(withVisual({ detailed: middle })) <= budget) low = middle; else high = middle - 1;
+      }
+      candidate = withVisual({ detailed: low });
+    }
+    fitted = candidate;
+  }
   const size = measure(fitted);
-  if (size > budget) throw Object.assign(new Error(`Context Package is ${size} characters, above the executor budget of ${budget} even with every prototype diff referenced by its frozen files; largest parts: ${contextSizes(fitted).map(([key, part]) => `${key} (${part})`).join(', ')}`), { reasonCode: 'context-too-large' });
+  if (size > budget) throw Object.assign(new Error(`Context Package is ${size} characters, above the executor budget of ${budget} even with every prototype diff referenced by its frozen files${verification?.visual ? ' and one failing scene in detail' : ''}; largest parts: ${contextSizes(fitted).map(([key, part]) => `${key} (${part})`).join(', ')}`), { reasonCode: 'context-too-large' });
   return fitted;
 }
