@@ -86,3 +86,36 @@ test('a frozen manifest from an older engine fits too: references first, every d
   assert.deepEqual(await briefManifest(root, { id: 'x', changes: [{ path: 'a', diff: 'small' }] }), { id: 'x', changes: [{ path: 'a', diff: 'small' }] });
   await assert.rejects(fitContext(root, { kind: 'implement', manifest, anchors: { screens: 'y'.repeat(300000) } }, { budget: 200000 }), error => error.reasonCode === 'context-too-large' && /above the executor budget of 200000[\s\S]*largest parts: anchors\.screens \(300002\)/.test(error.message));
 });
+
+test('a repair over budget names its passing scenes and details as many failing scenes as fit, instead of blocking', async t => {
+  const { root, first } = await target(t, { 'index.html': page('old', 1000) });
+  const scene = (id, variant, status) => ({ id, variant, screen: id.split('.')[0], status, tiers: { structure: { status, reasons: status === 'PASS' ? [] : [`FAKE FIXTURE ${'text differs '.repeat(400)}`] }, layout: { status: 'PASS', reasons: [] } }, artifacts: [`/x/${variant}/${id}/prototype.png`, `/x/${variant}/${id}/application.png`] });
+  const scenes = ['iphone', 'ipad'].flatMap(variant => Array.from({ length: 40 }, (_, i) => scene(`s${String(i).padStart(2, '0')}`, variant, i < 10 ? 'FAIL' : 'PASS')));
+  const verification = { id: 'VER-FAKE', status: 'FAIL', visual: { status: 'FAIL', scenes, artifacts: scenes.flatMap(item => item.artifacts) }, build: { status: 'PASS' } };
+  const request = { kind: 'repair', manifest: { id: first.id, changes: [] }, repair: { attempt: 1, verification } };
+  // Under budget nothing changes.
+  assert.deepEqual((await fitContext(root, request)).repair.verification, verification);
+  // Over budget with passing scenes by name: every failing scene still fits in detail.
+  const compact = await fitContext(root, request, { budget: 150000 });
+  const visual = compact.repair.verification.visual;
+  assert.equal(visual.passed.length, 60); assert.ok(visual.passed.includes('ipad/s10'));
+  assert.deepEqual(visual.scenes.map(item => `${item.variant}/${item.id}`).slice(0, 4), ['ipad/s00', 'iphone/s00', 'ipad/s01', 'iphone/s01']);
+  assert.equal(visual.scenes.length, 20); assert.equal(visual.deferred, undefined);
+  assert.equal(visual.artifactCount, 160); assert.equal(visual.artifacts, undefined); assert.equal(visual.record, '.protoflow/verifications/VER-FAKE.json');
+  assert.equal(compact.repair.verification.build.status, 'PASS'); assert.equal(compact.repair.attempt, 1);
+  // Tighter still: the first failing scenes in detail, the others named with their failing tiers, within the budget.
+  const batched = await fitContext(root, request, { budget: 60000 });
+  const part = batched.repair.verification.visual;
+  assert.ok(JSON.stringify(batched, null, 2).length <= 60000);
+  assert.ok(part.scenes.length >= 1 && part.scenes.length < 20);
+  assert.equal(part.scenes.length + part.deferred.length, 20);
+  assert.deepEqual(part.deferred.at(-1), { scene: 'iphone/s09', status: 'FAIL', tiers: ['structure'] });
+  // The request one more fitting step would still not fit reports it, as before.
+  await assert.rejects(fitContext(root, request, { budget: 8000 }), error => error.reasonCode === 'context-too-large' && /and one failing scene in detail/.test(error.message));
+  // The executor is told what the shortened report means and where the whole one is.
+  const prompt = executorPrompt({ instructions: 'FAKE' }, batched);
+  assert.match(prompt, /passed names the passing scenes[\s\S]*\.protoflow\/verifications\/VER-FAKE\.json/);
+  assert.match(prompt, new RegExp(`Only the first ${part.scenes.length} failing scenes carry their details[\\s\\S]*the other ${part.deferred.length}`));
+  assert.doesNotMatch(executorPrompt({ instructions: 'FAKE' }, compact), /Only the first/);
+  assert.doesNotMatch(executorPrompt({ instructions: 'FAKE' }, request), /shortened to fit/);
+});

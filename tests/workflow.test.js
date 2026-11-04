@@ -230,6 +230,27 @@ test('tests a busy simulator did not serve run once more and then are NOT_RUN en
   assert.equal(await readFile(runs, 'utf8'), 'x', 'a test that failed is not retried');
   assert.deepEqual([failed.status, failed.reasonCode, failed.functional.status, failed.functional.environmentRetry], ['FAIL', undefined, 'FAIL', undefined]);
 });
+test('a build that runs out of time runs once more and continues; timing out again it fails as before', async t => {
+  const { root, config, manifest } = await target(t);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'protoflow-build-timeout-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const runs = path.join(scratch, 'runs');
+  const count = `const fs = require('fs'); fs.appendFileSync(${JSON.stringify(runs)}, 'x'); const run = fs.readFileSync(${JSON.stringify(runs)}, 'utf8').length;`;
+  // A cold build that the first run could not finish in time; the second continues from its incremental outputs.
+  const cold = { argv: [process.execPath, '-e', `${count} if (run === 1) setTimeout(() => {}, 30000);`], timeoutMs: 1000 };
+  const recovered = await verify(root, { ...config, verification: { build: cold } }, manifest.id);
+  assert.equal(await readFile(runs, 'utf8'), 'xx', 'the build ran once more');
+  assert.equal(recovered.build.status, 'PASS'); assert.equal(recovered.build.timedOut, false);
+  assert.deepEqual([recovered.build.timeoutRetry.timeoutMs, recovered.build.timeoutRetry.status, recovered.build.timeoutRetry.timedOut], [1000, 'PASS', false]);
+  await rm(runs);
+  const stuck = await verify(root, { ...config, verification: { build: { argv: [process.execPath, '-e', `${count} setTimeout(() => {}, 30000);`], timeoutMs: 1000 } } }, manifest.id);
+  assert.equal(await readFile(runs, 'utf8'), 'xx', 'only once more');
+  assert.deepEqual([stuck.status, stuck.reasonCode, stuck.build.status, stuck.build.timedOut, stuck.build.timeoutRetry.timedOut], ['FAIL', undefined, 'FAIL', true, true]);
+  await rm(runs);
+  const failed = await verify(root, { ...config, verification: { build: { argv: [process.execPath, '-e', `${count} process.exit(1)`], timeoutMs: 1000 } } }, manifest.id);
+  assert.equal(await readFile(runs, 'utf8'), 'x', 'a build that failed in time is not run again');
+  assert.equal(failed.build.timeoutRetry, undefined);
+});
 test('a build that fails for the machine runs once more: failing again it is NOT_RUN environment and nothing else runs', async t => {
   const { root, config, manifest } = await target(t);
   const scratch = await mkdtemp(path.join(os.tmpdir(), 'protoflow-build-runs-'));

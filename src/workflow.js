@@ -89,7 +89,18 @@ async function retryForMachine(phase, run, cause, { retryDelayMs, signal }) {
   if (!again) return { ...second, environmentRetry: retry };
   return { ...second, status: 'NOT_RUN', reasonCode: 'environment', environment: { phase, line: again.line, ...(again.hint && { hint: again.hint }), retry }, environmentRetry: retry };
 }
-const runBuild = (root, runPhase, phase, command, options) => retryForMachine(phase, async () => checkBuild(root, command, await runPhase(phase, command)), buildEnvironment, options);
+/**
+ * A build that ran out of time without failing (a cold native build on a loaded machine) runs once more: it continues
+ * from its incremental outputs (DerivedData, Gradle caches), so a slow machine is not mistaken for a broken change.
+ * Timing out again, it fails as before.
+ */
+async function runTimedBuild(runPhase, phase, command) {
+  const first = await runPhase(phase, command);
+  if (!first.timedOut || first.aborted) return first;
+  const second = await runPhase(phase, command);
+  return { ...second, timeoutRetry: { at: date(), timeoutMs: command?.timeoutMs ?? null, status: second.status, timedOut: Boolean(second.timedOut) } };
+}
+const runBuild = (root, runPhase, phase, command, options) => retryForMachine(phase, async () => checkBuild(root, command, await runTimedBuild(runPhase, phase, command)), buildEnvironment, options);
 /** The project name a device holder shows: the dashboard name, or the folder of the project a runner worktree belongs to. */
 const projectName = (root, config) => config.dashboard?.name ?? path.basename(root.split(`${path.sep}.protoflow${path.sep}runner${path.sep}`)[0]);
 /**
